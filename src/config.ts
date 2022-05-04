@@ -4,6 +4,7 @@ interface Config {
   XDAI_GTCR_SUBGRAPH_URL: string
   XDAI_LIST_ADDRESS: string
   NODE_ENV: string
+  API_KEY: string
 }
 
 const getSanitizedConfig = (config: unknown): Config => {

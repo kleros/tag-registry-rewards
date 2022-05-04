@@ -19,7 +19,9 @@ import conf from "./config"
  * Same with status (has to be Registered)
  */
 const fetchTagsByAddressInRegistry = async (
-  subgraphEndpoint: string, registry: string, address: string
+  subgraphEndpoint: string,
+  registry: string,
+  address: string
 ): Promise<Item[]> => {
   const subgraphQuery = {
     query: `
@@ -44,35 +46,54 @@ const fetchTagsByAddressInRegistry = async (
     body: JSON.stringify(subgraphQuery),
   })
 
-  const { data } = await response.json()
+  const { data } = await response.json() as any
   const tags: Item[] = data.itemSearch
-  const filteredTags = tags.filter(tag => tag.registryAddress === registry.toLowerCase()
-    && tag.status === "Registered"
+  const filteredTags = tags.filter(
+    (tag) =>
+      tag.registryAddress === registry.toLowerCase() &&
+      tag.status === "Registered"
   )
-  
+
   return filteredTags
 }
 
 export const fetchTagsByAddress = async (address: string): Promise<Item[]> => {
-  const mainnetTagsFetch = fetchTagsByAddressInRegistry(conf.MAINNET_GTCR_SUBGRAPH_URL, conf.MAINNET_LIST_ADDRESS, address)
-  const xdaiTagsFetch = fetchTagsByAddressInRegistry(conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_LIST_ADDRESS, address)
+  const mainnetTagsFetch = fetchTagsByAddressInRegistry(
+    conf.MAINNET_GTCR_SUBGRAPH_URL,
+    conf.MAINNET_LIST_ADDRESS,
+    address
+  )
+  const xdaiTagsFetch = fetchTagsByAddressInRegistry(
+    conf.XDAI_GTCR_SUBGRAPH_URL,
+    conf.XDAI_LIST_ADDRESS,
+    address
+  )
 
-  const [mainnetTags, xdaiTags] = await Promise.all([mainnetTagsFetch, xdaiTagsFetch])
+  const [mainnetTags, xdaiTags] = await Promise.all([
+    mainnetTagsFetch,
+    xdaiTagsFetch,
+  ])
 
-  return mainnetTags.concat(xdaiTags)  
+  return mainnetTags.concat(xdaiTags)
 }
 
 const fetchTagsBatchByRegistry = async (
-  period: Period, subgraphEndpoint: string, registry: string
+  period: Period,
+  subgraphEndpoint: string,
+  registry: string
 ): Promise<Item[]> => {
+  const [start, end] = [
+    Math.floor(period.start.getTime() / 1000),
+    Math.floor(period.end.getTime() / 1000),
+  ]
   const subgraphQuery = {
     query: `
       {
         litems(where: {
           registryAddress: "${registry}",
           status: Registered,
-          latestRequestResolutionTime_gte: ${period.start},
-  	      latestRequestResolutionTime_lt: ${period.end}
+          latestRequestResolutionTime_gte: ${start},
+  	      latestRequestResolutionTime_lt: ${end}
         }) {
           id
           props {
@@ -91,7 +112,7 @@ const fetchTagsBatchByRegistry = async (
     body: JSON.stringify(subgraphQuery),
   })
 
-  const { data } = await response.json()
+  const { data } = await response.json() as any
   const tags: Item[] = data.litems
 
   return tags
@@ -99,27 +120,30 @@ const fetchTagsBatchByRegistry = async (
 
 const itemToTag = (item: Item): Tag => {
   // if there were multiple props with eth addresses, it should've been rejected.
-  const address = item.props.map(prop => prop.value)
-    .find(value => /^0x[a-fA-F0-9]{40}$/.test(value))
+  const address = item.props
+    .map((prop) => prop.value)
+    .find((value) => /^0x[a-fA-F0-9]{40}$/.test(value)) as string
   const tag: Tag = {
     id: item.id,
     latestRequestResolutionTime: Number(item.latestRequestResolutionTime),
     submitter: item.requests[0].requester,
-    tagAddress: address
+    tagAddress: address,
   }
   return tag
 }
 
 const removeDupeTags = (tags: Tag[]): Tag[] => {
-  const filteredItems = []
+  const filteredItems: Tag[] = []
   const sameTag = (t1: Tag, t2: Tag): boolean => {
-    return (t1.tagAddress.toLowerCase() === t2.tagAddress.toLowerCase())
+    return t1.tagAddress.toLowerCase() === t2.tagAddress.toLowerCase()
   }
 
   for (const tag of tags) {
-    const matches = tags.filter(i => sameTag(i, tag))
+    const matches = tags.filter((i) => sameTag(i, tag))
     const earliestFirst = matches.sort(
-      (a, b) => Number(a.latestRequestResolutionTime) - Number(b.latestRequestResolutionTime)
+      (a, b) =>
+        Number(a.latestRequestResolutionTime) -
+        Number(b.latestRequestResolutionTime)
     )
     filteredItems.push(earliestFirst[0])
   }
@@ -128,11 +152,22 @@ const removeDupeTags = (tags: Tag[]): Tag[] => {
 }
 
 export const fetchTagsBatch = async (period: Period): Promise<Tag[]> => {
-  const mainnetTagsFetch = fetchTagsBatchByRegistry(period, conf.MAINNET_GTCR_SUBGRAPH_URL, conf.MAINNET_LIST_ADDRESS)
-  const xdaiTagsFetch = fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_LIST_ADDRESS)
+  const mainnetTagsFetch = fetchTagsBatchByRegistry(
+    period,
+    conf.MAINNET_GTCR_SUBGRAPH_URL,
+    conf.MAINNET_LIST_ADDRESS
+  )
+  const xdaiTagsFetch = fetchTagsBatchByRegistry(
+    period,
+    conf.XDAI_GTCR_SUBGRAPH_URL,
+    conf.XDAI_LIST_ADDRESS
+  )
 
-  const [mainnetTags, xdaiTags] = await Promise.all([mainnetTagsFetch, xdaiTagsFetch])
-  const tags = mainnetTags.concat(xdaiTags).map(item => itemToTag(item))
+  const [mainnetTags, xdaiTags] = await Promise.all([
+    mainnetTagsFetch,
+    xdaiTagsFetch,
+  ])
+  const tags = mainnetTags.concat(xdaiTags).map((item) => itemToTag(item))
   const filteredTags = removeDupeTags(tags)
   return filteredTags
 }

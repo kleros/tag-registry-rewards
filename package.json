@@ -7,6 +7,9 @@
   "author": "Kleros",
   "license": "MIT",
   "private": false,
+  "prettier": {
+    "semi": false
+  },
   "scripts": {
     "start": "ts-node --transpile-only --files -r dotenv-safe/config src/index.ts",
     "start:kovan": "env-cmd -f ./.env.kovan ts-node --transpile-only --files -r dotenv-safe/config src/index.ts",
@@ -22,7 +25,6 @@
   },
   "husky": {
     "hooks": {
-      "pre-commit": "npm run lint:fix",
       "commit-msg": "commitlint -E HUSKY_GIT_PARAMS"
     }
   },
@@ -48,9 +50,12 @@
   "dependencies": {
     "@types/node": "^14.0.23",
     "@types/node-fetch": "^2.5.7",
+    "cheerio": "^1.0.0-rc.10",
     "dotenv-safe": "^8.2.0",
     "env-cmd": "^10.1.0",
-    "node-fetch": "^2.6.0"
+    "ethers": "^5.6.5",
+    "node-fetch": "^2.6.6",
+    "web3": "^1.7.3"
   },
   "volta": {
     "node": "16.13.1",

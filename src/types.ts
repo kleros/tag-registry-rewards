@@ -1,3 +1,5 @@
+import { BigNumber } from "ethers"
+
 export interface Prop {
   value: string
 }
@@ -12,8 +14,8 @@ export interface Item {
 }
 
 export type Period = {
-  start: number,
-  end: number
+  start: Date,
+  end: Date
 }
 
 export interface Tag {
@@ -24,11 +26,11 @@ export interface Tag {
 }
 
 export interface ContractInfo extends Tag {
-  gasUsed: string
+  gasUsed: number
 }
 
 export interface Reward {
-  amount: string // prob BigNumberish?
+  amount: BigNumber
   recipient: string
   id: string // used to identify dupes
 }
