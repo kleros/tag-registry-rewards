@@ -26,7 +26,6 @@ export const fetchPage = async (address: string): Promise<string | null> => {
   return response
 }
 
-// todo
 export const getSpentGas = async (address: string): Promise<number> => {
   let page = await fetchPage(address)
   for (let i = 0; i < 5; i++) {

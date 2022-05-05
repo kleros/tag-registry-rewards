@@ -8,4 +8,8 @@ const stipend = BigNumber.from("100000000000000000000000")
 buildRewards({start, end}, stipend).then(p => {
   console.log(p)
   console.log(p.length)
+  const viewable = p.map(reward => {
+    return reward.amount.div(BigNumber.from("1000000000000000000")).toNumber()
+  })
+  console.log(viewable)
 })

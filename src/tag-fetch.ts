@@ -46,7 +46,7 @@ const fetchTagsByAddressInRegistry = async (
     body: JSON.stringify(subgraphQuery),
   })
 
-  const { data } = await response.json() as any
+  const { data } = (await response.json()) as any
   const tags: Item[] = data.itemSearch
   const filteredTags = tags.filter(
     (tag) =>
@@ -112,7 +112,7 @@ const fetchTagsBatchByRegistry = async (
     body: JSON.stringify(subgraphQuery),
   })
 
-  const { data } = await response.json() as any
+  const { data } = (await response.json()) as any
   const tags: Item[] = data.litems
 
   return tags
@@ -134,11 +134,14 @@ const itemToTag = (item: Item): Tag => {
 
 const removeDupeTags = (tags: Tag[]): Tag[] => {
   const filteredItems: Tag[] = []
-  const sameTag = (t1: Tag, t2: Tag): boolean => {
-    return t1.tagAddress.toLowerCase() === t2.tagAddress.toLowerCase()
-  }
+  const sameTag = (t1: Tag, t2: Tag): boolean =>
+    t1.tagAddress.toLowerCase() === t2.tagAddress.toLowerCase()
 
+  // not the cleanest approach but it works. feel free to refactor.
   for (const tag of tags) {
+    // dont include if address has already been included
+    if (filteredItems.filter((item) => sameTag(item, tag)).length > 0) continue
+    // it hasn't been included. get all same tags, and include first
     const matches = tags.filter((i) => sameTag(i, tag))
     const earliestFirst = matches.sort(
       (a, b) =>
