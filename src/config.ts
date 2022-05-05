@@ -5,6 +5,13 @@ interface Config {
   XDAI_LIST_ADDRESS: string
   NODE_ENV: string
   API_KEY: string
+  TX_KEY: string
+  WALLET_PRIVATE_KEY: string
+  WALLET_ADDRESS: string
+  PNK: string
+  STIPEND: string
+  START_DATE: string
+  END_DATE: string
 }
 
 const getSanitizedConfig = (config: unknown): Config => {
