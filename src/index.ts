@@ -15,8 +15,8 @@ const dend = parseDate(conf.END_DATE)
 const start = new Date(Date.UTC(dstart[0], dstart[1] - 1, dstart[2]))
 const end = new Date(Date.UTC(dend[0], dend[1] - 1, dend[2]))
 
-console.log(start)
-console.log(end)
+console.log("start", start)
+console.log("end", end)
 
 const stipend = BigNumber.from(conf.STIPEND)
 

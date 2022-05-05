@@ -10,6 +10,10 @@ const wallet = new ethers.Wallet(conf.WALLET_PRIVATE_KEY, provider)
 const pnkContract = new ethers.Contract(conf.PNK, ERC20Abi)
 const pnk = pnkContract.connect(wallet)
 
+const humanizeAmount = (bn: BigNumber): number => {
+  return bn.div(BigNumber.from("1000000000000000")).toNumber() / 1000
+}
+
 const sendReward = async (r: Reward, nonce: number) => {
   await pnk.transfer(r.recipient, r.amount, { nonce })
 }
@@ -25,7 +29,12 @@ export const sendAllRewards = async (rewards: Reward[], stipend: BigNumber) => {
   console.info("Nonce", nonce)
 
   for (const reward of rewards) {
-    console.info("Sending reward to", reward.recipient)
+    console.info(
+      "Sending",
+      humanizeAmount(reward.amount),
+      "PNK to",
+      reward.recipient
+    )
     await sendReward(reward, nonce)
     nonce = nonce + 1
   }
