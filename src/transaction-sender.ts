@@ -20,7 +20,7 @@ const sendReward = async (r: Reward, nonce: number) => {
 
 export const sendAllRewards = async (rewards: Reward[], stipend: BigNumber) => {
   console.info("=== About to send rewards ===")
-  const balance: BigNumber = await pnk.balanceOf(conf.WALLET_ADDRESS)
+  const balance: BigNumber = await pnk.balanceOf(wallet.address)
   console.info("Current balance", balance.toString())
   if (!balance || balance.lt(stipend)) {
     throw new Error("Balance is lower than stipend")

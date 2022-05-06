@@ -7,7 +7,6 @@ interface Config {
   API_KEY: string
   TX_KEY: string
   WALLET_PRIVATE_KEY: string
-  WALLET_ADDRESS: string
   PNK: string
   STIPEND: string
   START_DATE: string
