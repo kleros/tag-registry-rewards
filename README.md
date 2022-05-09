@@ -6,32 +6,33 @@ Script to distribute rewards for the Address Tags TCRs, given a period and a sti
 
 `cp .env.example .env; yarn`
 
-Set the .env key variables
+Set the missing .env key variables
+
+## Format
+
+`yarn start --node <node> --mode <mode> --start <start_date> --end <end_date> --stipend <stipend>`
+
+Most variables have defaults set in the `.env` file. You should set the stipend in the `.env` to avoid mistyping it when you run the command.
+
+Dates are `YYYY-MM-DD` strings e.g. `2022-05-01`. If you don't pass them, they will default to the dates that enclose the past month.
+
+## Exporting rewards
+
+Generating the rewards without distributing is safe. It allows to inspect the rewards, and it allows you to show the rewards to the community before committing to send them. To do so, run the script with `--mode csv`. It doesn't matter if this is run on `production` or `development`, as it won't send any transaction.
 
 ## Distributing rewards
 
-Go to .env and set the START_DATE, END_DATE, STIPEND. Remember that PNK has 18 decimal digits, so you should append 18 zeroes to the human friendly amount.
+`yarn start --mode send`
 
-Distribute the rewards on the testnet to make sure you don't mess up. [This is a test ERC-20 token in Kovan for this purpose.](https://kovan.etherscan.io/address/0xaFF4481D10270F50f203E0763e2597776068CBc5#writeContract) Call the `drip()` function. Change PNK in the .env to this token, change the stipend, and set the NODE_ENV to `development`. The env variables below are suited for this test. Note the stipend is lower than what you will distribute.
-
-```
-PNK=0xaFF4481D10270F50f203E0763e2597776068CBc5
-STIPEND=1000000000000000000000
-NODE_ENV=development
-```
+Distribute the rewards on the testnet to make sure you don't mess up. Deploy a test ERC-20 contract in Sokol chain for this purpose, and set it on the `.env`.
 
 Things that can go wrong:
 - Etherscan scraping not working
 - Etherscan throttling
 - Wrong stipend
-- Not enough funds
 
-You can't really test the stipend, so don't get it wrong. If you mistype it and there're not enough funds, the bot will refuse to distribute. If it's less, then it will go through, but you can do another distribution with the portion of the stipend you missed.
+You can't really test the stipend, so don't get it wrong. If you mistype it and there're not enough funds, the bot will refuse to distribute. If it's less, then it will go through, but you can do another distribution with the portion of the stipend you missed. So, the safest approach is to make sure the bot doesn't hold more than the supposed stipend.
 
-If nothing went wrong, proceed with the real distribution. The stipend below is for 100k PNK, and the token is for stPNK.
+If nothing went wrong, proceed with the real distribution.
 
-```
-PNK=0xcb3231aBA3b451343e0Fddfc45883c842f223846
-STIPEND=100000000000000000000000
-NODE_ENV=production
-```
+`yarn start --node production --mode send`

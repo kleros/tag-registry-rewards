@@ -30,6 +30,7 @@ export interface ContractInfo extends Tag {
 }
 
 export interface Reward {
+  contractInfo: ContractInfo,
   amount: BigNumber
   recipient: string
   id: string // used to identify dupes

@@ -2,3 +2,4 @@ notes
 node_modules
 yarn.lock
 .env
+csv

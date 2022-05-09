@@ -38,6 +38,7 @@ const allRewards = (
       id: contract.id,
       amount: rewardAmount,
       recipient: contract.submitter,
+      contractInfo: contract,
     }
     return reward
   })
