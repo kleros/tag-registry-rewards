@@ -1,6 +1,6 @@
 {
   "name": "tag-registry-rewards",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Monthly, rewards addresses that make contributions to address tags registry.",
   "main": "src/index.ts",
   "repository": "git+https://github.com/kleros/tag-registry-rewards",
