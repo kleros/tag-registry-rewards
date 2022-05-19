@@ -10,9 +10,9 @@ Set the missing .env key variables
 
 ## Format
 
-`yarn start --node <node> --mode <mode> --start <start_date> --end <end_date> --stipend <stipend>`
+`yarn start --node <node> --mode <mode> --start <start_date> --end <end_date> --stipend <stipend> --new-tag-ratio <new-tag-ratio>`
 
-Most variables have defaults set in the `.env` file. You should set the stipend in the `.env` to avoid mistyping it when you run the command.
+Most variables have defaults set in the `.env` file. You should set the stipend in the `.env` to avoid mistyping it when you run the command. Same with the new-tag-ratio.
 
 Dates are `YYYY-MM-DD` strings e.g. `2022-05-01`. If you don't pass them, they will default to the dates that enclose the past month.
 
@@ -30,9 +30,14 @@ Things that can go wrong:
 - Etherscan scraping not working
 - Etherscan throttling
 - Wrong stipend
+- Wrong new tag ratio
 
 You can't really test the stipend, so don't get it wrong. If you mistype it and there're not enough funds, the bot will refuse to distribute. If it's less, then it will go through, but you can do another distribution with the portion of the stipend you missed. So, the safest approach is to make sure the bot doesn't hold more than the supposed stipend.
 
 If nothing went wrong, proceed with the real distribution.
 
 `yarn start --node production --mode send`
+
+## New tag ratio
+
+The new tag ratio is the guaranteed minimum percentage allocated to tags that hadn't been tagged before in Etherscan. After obtaining the weights, if the actual ratio of new tags is under this ratio, the rewards will be generated in separate classes of rewards. Setting it to zero will distribute the rewards as before, without this bias.

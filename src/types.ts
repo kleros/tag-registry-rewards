@@ -27,6 +27,7 @@ export interface Tag {
 
 export interface ContractInfo extends Tag {
   gasUsed: number
+  newTag: boolean
 }
 
 export interface Reward {

@@ -13,6 +13,8 @@ import { fetchTagsBatch } from "./tag-fetch"
 import { ContractInfo, Period, Reward } from "./types"
 import { BigNumber } from "ethers"
 
+const normalizer = 1_000_000_000 // used to turn weights onto bignumbers
+
 const contractWeight = (contract: ContractInfo): number => {
   // better distribution
   // const weight = Math.sqrt(Number(contract.gasUsed))
@@ -20,17 +22,19 @@ const contractWeight = (contract: ContractInfo): number => {
   return weight
 }
 
-const allRewards = (
-  contracts: ContractInfo[],
+type ClassRewardsGenerator = {
+  contracts: ContractInfo[]
   stipend: BigNumber
-): Reward[] => {
-  const totalWeight = contracts.reduce((acc, contract) => {
-    const weight = contractWeight(contract)
-    return acc + weight
-  }, 0)
+  totalWeight: number
+}
+
+const allClassRewards = ({
+  contracts,
+  stipend,
+  totalWeight,
+}: ClassRewardsGenerator): Reward[] => {
   const rewards: Reward[] = contracts.map((contract) => {
     const weight = contractWeight(contract)
-    const normalizer = 1_000_000_000 // used to turn weights onto bignumbers
     const rewardAmount = stipend
       .mul(BigNumber.from(Math.floor(weight * normalizer)))
       .div(BigNumber.from(Math.floor(totalWeight * normalizer)))
@@ -45,9 +49,71 @@ const allRewards = (
   return rewards
 }
 
-export const buildRewards = async (period: Period, stipend: BigNumber) => {
+const allRewards = (
+  contracts: ContractInfo[],
+  stipend: BigNumber,
+  newTagRatio: number
+): Reward[] => {
+  type Weights = { totalWeight: number; totalNewTagWeight: number }
+  const { totalWeight, totalNewTagWeight }: Weights = contracts.reduce(
+    (acc: Weights, contract) => {
+      const { totalWeight, totalNewTagWeight } = acc
+      const weight = contractWeight(contract)
+      if (contract.newTag) {
+        return {
+          totalWeight: totalWeight + weight,
+          totalNewTagWeight: totalNewTagWeight + weight,
+        }
+      } else {
+        return { totalWeight: totalWeight + weight, totalNewTagWeight }
+      }
+    },
+    { totalWeight: 0, totalNewTagWeight: 0 } as Weights
+  )
+
+  // check if new tags are over the ratio.
+  const actualRatio = totalNewTagWeight / totalWeight
+  console.log("Ratio between Kleros tags", actualRatio)
+  console.log("vs newTagRatio", newTagRatio)
+  let rewards: Reward[] = []
+  if (actualRatio > newTagRatio) {
+    // distribute as before
+    console.log("Regular distribution")
+    rewards = allClassRewards({ contracts, stipend, totalWeight })
+  } else {
+    // distribute, guaranteeing newTagRatio to the newTag class
+    console.log("Giving more weight to newly submitted addresses")
+    const newTaggedGenerator: ClassRewardsGenerator = {
+      contracts: contracts.filter((contract) => contract.newTag),
+      stipend: stipend
+        .mul(BigNumber.from(Math.floor(newTagRatio * normalizer)))
+        .div(BigNumber.from(normalizer)),
+      totalWeight: totalNewTagWeight,
+    }
+    const previouslyTaggedGenerator: ClassRewardsGenerator = {
+      contracts: contracts.filter((contract) => !contract.newTag),
+      stipend: stipend
+        .mul(BigNumber.from(Math.floor((1 - newTagRatio) * normalizer)))
+        .div(BigNumber.from(normalizer)),
+      totalWeight: totalWeight - totalNewTagWeight,
+    }
+
+    const newTaggedRewards = allClassRewards(newTaggedGenerator)
+    const previouslyTaggedRewards = allClassRewards(previouslyTaggedGenerator)
+
+    rewards = [...newTaggedRewards, ...previouslyTaggedRewards]
+  }
+
+  return rewards
+}
+
+export const buildRewards = async (
+  period: Period,
+  stipend: BigNumber,
+  newTagRatio = 0
+): Promise<Reward[]> => {
   const tagsBatch = await fetchTagsBatch(period)
   const contractInfos = await getAllContractInfo(tagsBatch)
-  const rewards = allRewards(contractInfos, stipend)
+  const rewards = allRewards(contractInfos, stipend, newTagRatio)
   return rewards
 }

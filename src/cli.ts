@@ -61,12 +61,15 @@ const main = async () => {
   const start = argv.start ? parseDate(argv.start) : getExpectedPeriod().start
   const end = argv.end ? parseDate(argv.end) : getExpectedPeriod().end
   const stipend = BigNumber.from(argv.stipend ? argv.stipend : conf.STIPEND)
+  const newTagRatio = Number(
+    argv["new-tag-ratio"] ? argv["new-tag-ratio"] : conf.NEW_TAG_RATIO
+  )
   const nodeEnv = argv.node as string
   const mode = argv.mode as string | undefined
   if (mode === undefined) {
     throw new Error("You must choose a mode, 'csv' | 'send'")
   }
-  const rewards = await buildRewards({ start, end }, stipend)
+  const rewards = await buildRewards({ start, end }, stipend, newTagRatio)
   if (mode === "csv") {
     await buildCsv(rewards)
   } else if (mode === "send") {

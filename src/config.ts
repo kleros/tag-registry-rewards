@@ -11,6 +11,7 @@ interface Config {
   STIPEND: string
   TX_PROVIDER: string
   TX_TEST_PROVIDER: string
+  NEW_TAG_RATIO: string
 }
 
 const getSanitizedConfig = (config: unknown): Config => {

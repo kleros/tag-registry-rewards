@@ -2,6 +2,7 @@ import { getSpentGas } from "./spent-gas"
 import { ContractInfo, Tag } from "./types"
 import Web3 from "web3"
 import conf from "./config"
+import { isNewTag } from "./new-tag"
 
 const web3 = new Web3(conf.API_KEY)
 
@@ -17,7 +18,8 @@ const tagToContractInfo = async (tag: Tag): Promise<ContractInfo | null> => {
     return null
   }
   const gasUsed = await getSpentGas(tag.tagAddress)
-  const contract = { ...tag, gasUsed }
+  const newTag = await isNewTag(tag.tagAddress)
+  const contract: ContractInfo = { ...tag, gasUsed, newTag }
   return contract
 }
 
