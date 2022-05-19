@@ -15,7 +15,7 @@ export const sendAllRewards = async (
   rewards: Reward[],
   stipend: BigNumber,
   node: string
-) => {
+): Promise<void> => {
   console.info("=== Node mode:", node, "===")
   const networkId = node === "production" ? 100 : 77
   const providerUrl =

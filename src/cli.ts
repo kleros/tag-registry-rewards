@@ -15,7 +15,9 @@ const getExpectedPeriod = (): Period => {
   return { start, end }
 }
 
-const argv = yargs(hideBin(process.argv))
+// @types/yargs is hard to understand, skip.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const argv: any = yargs(hideBin(process.argv))
   .locale("en")
   .usage(
     `Usage:
@@ -49,7 +51,7 @@ const argv = yargs(hideBin(process.argv))
   })
   .option("h", {
     alias: "help",
-  }).argv as any
+  }).argv
 
 const parseDate = (s: string): Date => {
   const [y, m, d] = s.split("-").map((n) => Number(n))

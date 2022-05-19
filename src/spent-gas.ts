@@ -4,7 +4,7 @@ import { load } from "cheerio"
 const randomBetween = (min: number, max: number) =>
   Math.floor(min + Math.random() * (max - min))
 
-export const sleep = () => {
+export const sleep = (): Promise<void> => {
   const seconds = randomBetween(2, 5)
   return new Promise((resolve) => setTimeout(resolve, seconds * 1000))
 }
@@ -20,7 +20,7 @@ export const classicFetch = async (url: string): Promise<string | null> => {
   return decoded
 }
 
-export const fetchPage = async (address: string): Promise<string | null> => {
+const fetchPage = async (address: string): Promise<string | null> => {
   const etherscanQuery = `https://etherscan.io/address-analytics?&a=${address}`
   const response = await classicFetch(etherscanQuery)
   return response

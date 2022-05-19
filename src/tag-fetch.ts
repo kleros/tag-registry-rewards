@@ -46,7 +46,7 @@ const fetchTagsByAddressInRegistry = async (
     body: JSON.stringify(subgraphQuery),
   })
 
-  const { data } = (await response.json()) as any
+  const { data } = (await response.json())
   const tags: Item[] = data.itemSearch
   const filteredTags = tags.filter(
     (tag) =>
@@ -112,7 +112,7 @@ const fetchTagsBatchByRegistry = async (
     body: JSON.stringify(subgraphQuery),
   })
 
-  const { data } = (await response.json()) as any
+  const { data } = (await response.json())
   const tags: Item[] = data.litems
 
   return tags
