@@ -10,7 +10,7 @@ Set the missing .env key variables
 
 ## Format
 
-`yarn start --node <node> --mode <mode> --start <start_date> --end <end_date> --stipend <stipend> --new-tag-ratio <new-tag-ratio>`
+`yarn start --node <node> --mode <mode> --start <start_date> --end <end_date> --stipend <stipend> --new-tag-ratio <new-tag-ratio> --file <file>`
 
 Most variables have defaults set in the `.env` file. You should set the stipend in the `.env` to avoid mistyping it when you run the command. Same with the new-tag-ratio.
 
@@ -20,17 +20,24 @@ Dates are `YYYY-MM-DD` strings e.g. `2022-05-01`. If you don't pass them, they w
 
 Generating the rewards without distributing is safe. It allows to inspect the rewards, and it allows you to show the rewards to the community before committing to send them. To do so, run the script with `--mode csv`. It doesn't matter if this is run on `production` or `development`, as it won't send any transaction.
 
+This will create a csv file you can export to a calc sheet, and a JSON with the generated, unsent rewards.
+
 ## Distributing rewards
 
 `yarn start --mode send`
 
 Distribute the rewards on the testnet to make sure you don't mess up. Deploy a test ERC-20 contract in Sokol chain for this purpose, and set it on the `.env`.
 
-Things that can go wrong:
-- Etherscan scraping not working
-- Etherscan throttling
+You can optionally pass a file containing the rewards with `--file filename.json`. This removes the need to calculate the rewards twice, which can change if any of the contracts addressed in the tags are used. You should always  Use this to prevent issues with Etherscan.
+
+Sanity check list:
 - Wrong stipend
 - Wrong new tag ratio
+
+Problems you avoid by passing file as argument:
+- Etherscan scraping not working
+- Etherscan throttling
+- Wrong dates
 
 You can't really test the stipend, so don't get it wrong. If you mistype it and there're not enough funds, the bot will refuse to distribute. If it's less, then it will go through, but you can do another distribution with the portion of the stipend you missed. So, the safest approach is to make sure the bot doesn't hold more than the supposed stipend.
 

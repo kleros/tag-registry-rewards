@@ -1,11 +1,12 @@
 import { BigNumber } from "ethers"
 import { buildRewards } from "./reward-builder"
 import { sendAllRewards } from "./transaction-sender"
-import { Period } from "./types"
+import { Period, Reward } from "./types"
 import conf from "./config"
 import yargs = require("yargs")
 import { hideBin } from "yargs/helpers"
 import buildCsv from "./csv"
+import { readFileSync } from "fs"
 
 const getExpectedPeriod = (): Period => {
   const now = new Date()
@@ -51,6 +52,10 @@ const argv: any = yargs(hideBin(process.argv))
   })
   .option("h", {
     alias: "help",
+  })
+  .option("f", {
+    description: "The name of the optional file",
+    alias: "file",
   }).argv
 
 const parseDate = (s: string): Date => {
@@ -71,7 +76,20 @@ const main = async () => {
   if (mode === undefined) {
     throw new Error("You must choose a mode, 'csv' | 'send'")
   }
-  const rewards = await buildRewards({ start, end }, stipend, newTagRatio)
+  const file = argv.file as string | undefined
+
+  let rewards: Reward[]
+  if (file) {
+    const fileContent = readFileSync(`./${conf.FILES_DIR}/${file}`).toString()
+    rewards = JSON.parse(fileContent)
+    // rewrap the amounts onto BigNumber to recover their methods.
+    rewards.forEach((reward) => {
+      reward.amount = BigNumber.from(reward.amount)
+    })
+  } else {
+    rewards = await buildRewards({ start, end }, stipend, newTagRatio)
+  }
+
   if (mode === "csv") {
     await buildCsv(rewards)
   } else if (mode === "send") {

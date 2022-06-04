@@ -12,6 +12,7 @@ interface Config {
   TX_PROVIDER: string
   TX_TEST_PROVIDER: string
   NEW_TAG_RATIO: string
+  FILES_DIR: string
 }
 
 const getSanitizedConfig = (config: unknown): Config => {
