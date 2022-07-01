@@ -24,7 +24,7 @@ This will create a csv file you can export to a calc sheet, and a JSON with the 
 
 ## Distributing rewards
 
-`yarn start --mode send`
+`yarn start --mode send --file ${filename}.json`
 
 Distribute the rewards on the testnet to make sure you don't mess up. Deploy a test ERC-20 contract in Sokol chain for this purpose, and set it on the `.env`.
 
@@ -43,7 +43,7 @@ You can't really test the stipend, so don't get it wrong. If you mistype it and 
 
 If nothing went wrong, proceed with the real distribution.
 
-`yarn start --node production --mode send`
+`yarn start --mode send --node production --file ${filename}.json`
 
 ## New tag ratio
 

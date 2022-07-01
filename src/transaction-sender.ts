@@ -1,6 +1,7 @@
 import { BigNumber, Contract, ethers } from "ethers"
 import ERC20Abi from "../abi/ERC20.json"
 import conf from "./config"
+import { sleep } from "./spent-gas"
 import { Reward } from "./types"
 
 export const humanizeAmount = (bn: BigNumber): number => {
@@ -43,6 +44,7 @@ export const sendAllRewards = async (
       reward.recipient
     )
     await sendReward(reward, nonce, pnk)
+    await sleep(10) //somethings wrong with the nonce
     nonce = nonce + 1
   }
 }
