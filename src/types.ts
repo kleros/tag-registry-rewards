@@ -36,3 +36,8 @@ export interface Reward {
   recipient: string
   id: string // used to identify dupes
 }
+
+export interface Transaction {
+  amount: BigNumber
+  recipient: string
+}

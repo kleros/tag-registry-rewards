@@ -1,7 +1,7 @@
 import { BigNumber } from "ethers"
 import { buildRewards } from "./reward-builder"
 import { sendAllRewards } from "./transaction-sender"
-import { Period, Reward } from "./types"
+import { Period, Transaction } from "./types"
 import conf from "./config"
 import yargs = require("yargs")
 import { hideBin } from "yargs/helpers"
@@ -65,34 +65,30 @@ const parseDate = (s: string): Date => {
 }
 
 const main = async () => {
-  const start = argv.start ? parseDate(argv.start) : getExpectedPeriod().start
-  const end = argv.end ? parseDate(argv.end) : getExpectedPeriod().end
-  const stipend = BigNumber.from(argv.stipend ? argv.stipend : conf.STIPEND)
-  const newTagRatio = Number(
-    argv["new-tag-ratio"] ? argv["new-tag-ratio"] : conf.NEW_TAG_RATIO
-  )
-  const nodeEnv = argv.node as string
   const mode = argv.mode as string | undefined
   if (mode === undefined) {
     throw new Error("You must choose a mode, 'csv' | 'send'")
   }
-  const file = argv.file as string | undefined
+  const stipend = BigNumber.from(argv.stipend ? argv.stipend : conf.STIPEND)
+  if (mode === "csv") {
+    const start = argv.start ? parseDate(argv.start) : getExpectedPeriod().start
+    const end = argv.end ? parseDate(argv.end) : getExpectedPeriod().end
+    const newTagRatio = Number(
+      argv["new-tag-ratio"] ? argv["new-tag-ratio"] : conf.NEW_TAG_RATIO
+    )
+    const rewards = await buildRewards({ start, end }, stipend, newTagRatio)
+    await buildCsv(rewards)
 
-  let rewards: Reward[]
-  if (file) {
+  } else if (mode === "send") {
+    const file = argv.file
+    const nodeEnv = argv.node as string
+    if (!file) throw new Error("JSON file needed to send the full rewards")
     const fileContent = readFileSync(`./${conf.FILES_DIR}/${file}`).toString()
-    rewards = JSON.parse(fileContent)
+    const rewards: Transaction[] = JSON.parse(fileContent)
     // rewrap the amounts onto BigNumber to recover their methods.
     rewards.forEach((reward) => {
       reward.amount = BigNumber.from(reward.amount)
     })
-  } else {
-    rewards = await buildRewards({ start, end }, stipend, newTagRatio)
-  }
-
-  if (mode === "csv") {
-    await buildCsv(rewards)
-  } else if (mode === "send") {
     await sendAllRewards(rewards, stipend, nodeEnv)
   } else {
     throw new Error(`Unrecognized mode ${mode}`)

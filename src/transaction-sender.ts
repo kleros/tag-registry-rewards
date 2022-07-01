@@ -2,18 +2,18 @@ import { BigNumber, Contract, ethers } from "ethers"
 import ERC20Abi from "../abi/ERC20.json"
 import conf from "./config"
 import { sleep } from "./spent-gas"
-import { Reward } from "./types"
+import { Transaction } from "./types"
 
 export const humanizeAmount = (bn: BigNumber): number => {
   return bn.div(BigNumber.from("1000000000000000")).toNumber() / 1000
 }
 
-const sendReward = async (r: Reward, nonce: number, pnk: Contract) => {
+const sendReward = async (r: Transaction, nonce: number, pnk: Contract) => {
   await pnk.transfer(r.recipient, r.amount, { nonce })
 }
 
 export const sendAllRewards = async (
-  rewards: Reward[],
+  rewards: Transaction[],
   stipend: BigNumber,
   node: string
 ): Promise<void> => {

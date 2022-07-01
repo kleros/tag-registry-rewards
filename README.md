@@ -16,11 +16,21 @@ Most variables have defaults set in the `.env` file. You should set the stipend 
 
 Dates are `YYYY-MM-DD` strings e.g. `2022-05-01`. If you don't pass them, they will default to the dates that enclose the past month.
 
-## Exporting rewards
+There are two modes, that need different arguments:
+- `csv`, will create the csv file of the rewards, along with the transactions.
+- `send`, will send the transactions.
 
-Generating the rewards without distributing is safe. It allows to inspect the rewards, and it allows you to show the rewards to the community before committing to send them. To do so, run the script with `--mode csv`. It doesn't matter if this is run on `production` or `development`, as it won't send any transaction.
+## Generating rewards
 
-This will create a csv file you can export to a calc sheet, and a JSON with the generated, unsent rewards.
+Generating the rewards with `--mode csv` is safe and won't generate transactions. It allows to inspect the rewards, and to share the rewards to the community before committing to send them. To do so, run the script with `--mode csv`, and optionally pass extra parameters, although, you should just keep them in the `.env`. It doesn't matter if this is run on `production` or `development`, as it won't send any transaction.
+
+This will create a csv file you can export to a calc sheet with every reward detail, and a JSON and csv with the final transactions that will place. This JSON will be the one that you will use to distribute the rewards. 
+
+Things that could go wrong:
+- Wrong stipend
+- Wrong new tag ratio
+
+I recommend to **not** pass these on the cli. Keep them in the `.env`. That way, you only need to check them if there are any changes on how the rewards are distributed.
 
 ## Distributing rewards
 
@@ -28,18 +38,9 @@ This will create a csv file you can export to a calc sheet, and a JSON with the 
 
 Distribute the rewards on the testnet to make sure you don't mess up. Deploy a test ERC-20 contract in Sokol chain for this purpose, and set it on the `.env`.
 
-You can optionally pass a file containing the rewards with `--file filename.json`. This removes the need to calculate the rewards twice, which can change if any of the contracts addressed in the tags are used. You should always  Use this to prevent issues with Etherscan.
+You must pass a file containing the transactions with `--file filename.json`.
 
-Sanity check list:
-- Wrong stipend
-- Wrong new tag ratio
-
-Problems you avoid by passing file as argument:
-- Etherscan scraping not working
-- Etherscan throttling
-- Wrong dates
-
-You can't really test the stipend, so don't get it wrong. If you mistype it and there're not enough funds, the bot will refuse to distribute. If it's less, then it will go through, but you can do another distribution with the portion of the stipend you missed. So, the safest approach is to make sure the bot doesn't hold more than the supposed stipend.
+Note, the stipend is used here to revert if the stipend is greater than the current balance. It will not affect the transactions in any way, because they have alredy been generated.
 
 If nothing went wrong, proceed with the real distribution.
 
