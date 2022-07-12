@@ -4,7 +4,7 @@ import Web3 from "web3"
 import conf from "./config"
 import { isNewTag } from "./new-tag"
 
-const web3 = new Web3(conf.API_KEY)
+const web3 = new Web3(conf.MAINNET_RPC)
 
 const isContract = async (tag: Tag): Promise<boolean> => {
   const addressCode = await web3.eth.getCode(tag.tagAddress)
