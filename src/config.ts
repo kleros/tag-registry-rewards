@@ -4,7 +4,7 @@ interface Config {
   XDAI_GTCR_SUBGRAPH_URL: string
   XDAI_LIST_ADDRESS: string
   NODE_ENV: string
-  API_KEY: string
+  MAINNET_RPC: string
   WALLET_PRIVATE_KEY: string
   PNK: string
   TEST_PNK: string
