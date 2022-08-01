@@ -12,6 +12,7 @@ import { getAllContractInfo } from "./contract-info"
 import { fetchTagsBatch } from "./tag-fetch"
 import { ContractInfo, Period, Reward } from "./types"
 import { BigNumber } from "ethers"
+import { humanizeAmount } from "./transaction-sender"
 
 const normalizer = 1_000_000_000 // used to turn weights onto bignumbers
 
@@ -112,6 +113,7 @@ export const buildRewards = async (
   stipend: BigNumber,
   newTagRatio = 0
 ): Promise<Reward[]> => {
+  console.log("Generating rewards for", humanizeAmount(stipend), "PNK")
   const tagsBatch = await fetchTagsBatch(period)
   const contractInfos = await getAllContractInfo(tagsBatch)
   const rewards = allRewards(contractInfos, stipend, newTagRatio)
