@@ -132,23 +132,25 @@ const itemToTag = (item: Item): Tag => {
   return tag
 }
 
-const removeDupeTags = (tags: Tag[]): Tag[] => {
+const removeDupeTags = async (tags: Tag[]): Promise<Tag[]> => {
   const filteredItems: Tag[] = []
   const sameTag = (t1: Tag, t2: Tag): boolean =>
     t1.tagAddress.toLowerCase() === t2.tagAddress.toLowerCase()
 
-  // not the cleanest approach but it works. feel free to refactor.
+  // for each tag, only add if it's the earliest instance of the address.
   for (const tag of tags) {
-    // dont include if address has already been included
-    if (filteredItems.filter((item) => sameTag(item, tag)).length > 0) continue
-    // it hasn't been included. get all same tags, and include first
-    const matches = tags.filter((i) => sameTag(i, tag))
-    const earliestFirst = matches.sort(
+    const matchedItems = await fetchTagsByAddress(tag.tagAddress)
+    const dupeTags = matchedItems
+      .map(item => itemToTag(item))
+      .filter(matchedTag => sameTag(tag, matchedTag))
+
+    const earliestDupes = dupeTags.sort(
       (a, b) =>
         Number(a.latestRequestResolutionTime) -
         Number(b.latestRequestResolutionTime)
     )
-    filteredItems.push(earliestFirst[0])
+    // is the tag we're considering, the earliest included tag of this address?
+    if (tag.id === earliestDupes[0].id) filteredItems.push(tag)
   }
 
   return filteredItems
@@ -171,6 +173,6 @@ export const fetchTagsBatch = async (period: Period): Promise<Tag[]> => {
     xdaiTagsFetch,
   ])
   const tags = mainnetTags.concat(xdaiTags).map((item) => itemToTag(item))
-  const filteredTags = removeDupeTags(tags)
+  const filteredTags = await removeDupeTags(tags)
   return filteredTags
 }
