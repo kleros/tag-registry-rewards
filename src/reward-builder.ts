@@ -115,6 +115,7 @@ export const buildRewards = async (
 ): Promise<Reward[]> => {
   console.log("Generating rewards for", humanizeAmount(stipend), "PNK")
   const tagsBatch = await fetchTagsBatch(period)
+  console.log("Tag count:", tagsBatch.length)
   const contractInfos = await getAllContractInfo(tagsBatch)
   const rewards = allRewards(contractInfos, stipend, newTagRatio)
   return rewards
