@@ -94,7 +94,7 @@ const fetchTagsBatchByRegistry = async (
           status: Registered,
           latestRequestResolutionTime_gte: ${start},
   	      latestRequestResolutionTime_lt: ${end}
-        }) {
+        }, first: 1000) {
           id
           props {
             value
