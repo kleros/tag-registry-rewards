@@ -10,7 +10,9 @@ interface Config {
   TEST_PNK: string
   STIPEND: string
   TX_PROVIDER: string
+  TX_NETWORK_ID: string
   TX_TEST_PROVIDER: string
+  TX_TEST_NETWORK_ID: string
   NEW_TAG_RATIO: string
   FILES_DIR: string
 }

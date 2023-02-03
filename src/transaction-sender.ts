@@ -18,7 +18,7 @@ export const sendAllRewards = async (
   node: string
 ): Promise<void> => {
   console.info("=== Node mode:", node, "===")
-  const networkId = node === "production" ? 100 : 77
+  const networkId = node === "production" ? Number(conf.TX_NETWORK_ID) : Number(conf.TX_TEST_NETWORK_ID)
   const providerUrl =
     node === "production" ? conf.TX_PROVIDER : conf.TX_TEST_PROVIDER
   const pnkAddress = node === "production" ? conf.PNK : conf.TEST_PNK
@@ -29,9 +29,9 @@ export const sendAllRewards = async (
   const pnkContract = new ethers.Contract(pnkAddress, ERC20Abi)
   const pnk = pnkContract.connect(wallet)
   console.info("=== About to send rewards ===")
+  console.info("You are", wallet.address)
   const balance: BigNumber = await pnk.balanceOf(wallet.address)
   console.info("Current balance", humanizeAmount(balance), "PNK")
-  console.info("You are", wallet.address)
   if (!balance || balance.lt(stipend)) {
     throw new Error("Balance is lower than stipend")
   }
@@ -45,7 +45,7 @@ export const sendAllRewards = async (
       reward.recipient
     )
     await sendReward(reward, nonce, pnk)
-    await sleep(10) //somethings wrong with the nonce
+    await sleep(20) //somethings wrong with the nonce
     nonce = nonce + 1
   }
 }
