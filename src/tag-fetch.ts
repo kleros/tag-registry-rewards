@@ -50,8 +50,7 @@ const fetchTagsByAddressInRegistry = async (
   const tags: Item[] = data.itemSearch
   const filteredTags = tags.filter(
     (tag) =>
-      tag.registryAddress === registry.toLowerCase() &&
-      tag.status === "Registered"
+      tag.registryAddress === registry.toLowerCase()
   )
 
   return filteredTags
@@ -140,7 +139,10 @@ const removeDupeTags = async (tags: Tag[]): Promise<Tag[]> => {
   // for each tag, only add if it's the earliest instance of the address.
   for (const tag of tags) {
     const matchedItems = await fetchTagsByAddress(tag.tagAddress)
-    const dupeTags = matchedItems
+    const includedMatchedItems = matchedItems
+      .filter(item => ["Registered", "ClearingRequested"].includes(item.status as string))
+
+    const dupeTags = includedMatchedItems
       .map(item => itemToTag(item))
       .filter(matchedTag => sameTag(tag, matchedTag))
 
