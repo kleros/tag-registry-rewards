@@ -36,6 +36,8 @@ const fetchTagsByAddressInRegistry = async (
           status
           requests {
             requester
+            requestType
+            resolutionTime
           }
         }
       }
@@ -101,6 +103,8 @@ const fetchTagsBatchByRegistry = async (
           latestRequestResolutionTime
           requests {
             requester
+            requestType
+            resolutionTime
           }
         }
       }

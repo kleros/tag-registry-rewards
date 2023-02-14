@@ -10,7 +10,7 @@
 
 import { getAllContractInfo } from "./contract-info"
 import { fetchTagsBatch } from "./tag-fetch"
-import { ContractInfo, Period, Reward } from "./types"
+import { ContractInfo, Period, Reward, WeightedContractInfo } from "./types"
 import { BigNumber } from "ethers"
 import { humanizeAmount } from "./transaction-sender"
 
@@ -23,21 +23,14 @@ const contractWeight = (contract: ContractInfo): number => {
   return weight
 }
 
-type ClassRewardsGenerator = {
-  contracts: ContractInfo[]
-  stipend: BigNumber
+const allClassRewards = (
+  contracts: WeightedContractInfo[],
+  stipend: BigNumber,
   totalWeight: number
-}
-
-const allClassRewards = ({
-  contracts,
-  stipend,
-  totalWeight,
-}: ClassRewardsGenerator): Reward[] => {
+): Reward[] => {
   const rewards: Reward[] = contracts.map((contract) => {
-    const weight = contractWeight(contract)
     const rewardAmount = stipend
-      .mul(BigNumber.from(Math.floor(weight * normalizer)))
+      .mul(BigNumber.from(Math.floor(contract.weight * normalizer)))
       .div(BigNumber.from(Math.floor(totalWeight * normalizer)))
     const reward: Reward = {
       id: contract.id,
@@ -52,72 +45,40 @@ const allClassRewards = ({
 
 const allRewards = (
   contracts: ContractInfo[],
-  stipend: BigNumber,
-  newTagRatio: number
+  stipend: BigNumber
 ): Reward[] => {
-  type Weights = { totalWeight: number; totalNewTagWeight: number }
-  const { totalWeight, totalNewTagWeight }: Weights = contracts.reduce(
-    (acc: Weights, contract) => {
-      const { totalWeight, totalNewTagWeight } = acc
-      const weight = contractWeight(contract)
-      if (contract.newTag) {
-        return {
-          totalWeight: totalWeight + weight,
-          totalNewTagWeight: totalNewTagWeight + weight,
-        }
-      } else {
-        return { totalWeight: totalWeight + weight, totalNewTagWeight }
-      }
-    },
-    { totalWeight: 0, totalNewTagWeight: 0 } as Weights
-  )
+  // first we remove the edit tags from consideration.
+  const nonEditContracts = contracts.filter(contract => !contract.edit)
+  const weightedNonEdits: WeightedContractInfo[] =
+    nonEditContracts.map(contract => ({...contract, weight: contractWeight(contract)}))
 
-  // check if new tags are over the ratio.
-  const actualRatio = totalNewTagWeight / totalWeight
-  console.log("Ratio between Kleros tags", actualRatio)
-  console.log("vs newTagRatio", newTagRatio)
-  let rewards: Reward[] = []
-  if (actualRatio > newTagRatio) {
-    // distribute as before
-    console.log("Regular distribution")
-    rewards = allClassRewards({ contracts, stipend, totalWeight })
-  } else {
-    // distribute, guaranteeing newTagRatio to the newTag class
-    console.log("Giving more weight to newly submitted addresses")
-    const newTaggedGenerator: ClassRewardsGenerator = {
-      contracts: contracts.filter((contract) => contract.newTag),
-      stipend: stipend
-        .mul(BigNumber.from(Math.floor(newTagRatio * normalizer)))
-        .div(BigNumber.from(normalizer)),
-      totalWeight: totalNewTagWeight,
-    }
-    const previouslyTaggedGenerator: ClassRewardsGenerator = {
-      contracts: contracts.filter((contract) => !contract.newTag),
-      stipend: stipend
-        .mul(BigNumber.from(Math.floor((1 - newTagRatio) * normalizer)))
-        .div(BigNumber.from(normalizer)),
-      totalWeight: totalWeight - totalNewTagWeight,
-    }
+  const totalNonEditWeight = weightedNonEdits.reduce((acc, contract) => acc + contract.weight, 0)
 
-    const newTaggedRewards = allClassRewards(newTaggedGenerator)
-    const previouslyTaggedRewards = allClassRewards(previouslyTaggedGenerator)
+  // edits can, at max, have the average reward of non-edited tags.
+  if (nonEditContracts.length === 0) throw new Error("No new tags, edge case must be handled.")
+  const averageNonEdit = totalNonEditWeight / nonEditContracts.length
 
-    rewards = [...newTaggedRewards, ...previouslyTaggedRewards]
-  }
+  const editContracts = contracts.filter(contract => contract.edit)
+  const weightedEdits: WeightedContractInfo[] = editContracts
+    .map(contract => ({ ...contract, weight: Math.max(contractWeight(contract), averageNonEdit) }))
 
+  const totalEditWeight = weightedEdits.reduce((acc, contract) => acc + contract.weight, 0)
+
+  const weightedContracts = [...weightedEdits, ...weightedNonEdits]
+  const rewards = allClassRewards(weightedContracts, stipend, totalEditWeight + totalNonEditWeight)
   return rewards
 }
 
 export const buildRewards = async (
   period: Period,
   stipend: BigNumber,
-  newTagRatio = 0
+  editPeriod: Period
 ): Promise<Reward[]> => {
   console.log("Generating rewards for", humanizeAmount(stipend), "PNK")
   console.log("Period:", period)
   const tagsBatch = await fetchTagsBatch(period)
   console.log("Tag count:", tagsBatch.length)
-  const contractInfos = await getAllContractInfo(tagsBatch)
-  const rewards = allRewards(contractInfos, stipend, newTagRatio)
+  const contractInfos = await getAllContractInfo(tagsBatch, editPeriod)
+  const rewards = allRewards(contractInfos, stipend)
   return rewards
 }

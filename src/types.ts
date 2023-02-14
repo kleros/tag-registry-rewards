@@ -10,7 +10,13 @@ export interface Item {
   latestRequestResolutionTime: string
   registryAddress?: string
   status?: string
-  requests: {requester: string}[]
+  requests: ItemRequest[]
+}
+
+export interface ItemRequest {
+  requester: string,
+  requestType: "RegistrationRequested" | "ClearingRequested",
+  resolutionTime: number
 }
 
 export type Period = {
@@ -27,11 +33,15 @@ export interface Tag {
 
 export interface ContractInfo extends Tag {
   gasUsed: number
-  newTag: boolean
+  edit: boolean
+}
+
+export interface WeightedContractInfo extends ContractInfo {
+  weight: number
 }
 
 export interface Reward {
-  contractInfo: ContractInfo,
+  contractInfo: WeightedContractInfo,
   amount: BigNumber
   recipient: string
   id: string // used to identify dupes
