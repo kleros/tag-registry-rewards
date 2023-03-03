@@ -9,6 +9,7 @@ const rewardsHeader = [
   { id: "submitter", title: "Submitter" },
   { id: "tagAddress", title: "Address tagged" },
   { id: "latestRequestResolutionTime", title: "Registered at" },
+  { id: "edit", title: "Edit?" },
   { id: "gasUsed", title: "Gas spent" },
   { id: "weight", title: "Weight"},
   { id: "amount", title: "Reward amount" },
@@ -46,7 +47,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
     header: rewardsHeader,
   })
   const rows = rewards.map((reward) => {
-    const { submitter, gasUsed, latestRequestResolutionTime, tagAddress, weight } =
+    const { submitter, gasUsed, latestRequestResolutionTime, tagAddress, weight, edit } =
       reward.contractInfo
     const humanAmount = humanizeAmount(reward.amount)
     return {
@@ -57,6 +58,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
       ).toISOString(),
       tagAddress,
       weight,
+      edit,
       amount: humanAmount,
     }
   })
