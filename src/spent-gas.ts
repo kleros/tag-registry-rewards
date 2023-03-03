@@ -39,7 +39,7 @@ export const getSpentGas = async (address: string): Promise<number> => {
   const feesTab = $("div #txfees")
   const feesDiv = $("div .row.mx-gutters-md-2", feesTab)
   const feesUsedDiv = $("div .col-md-6.u-ver-divider", feesDiv)
-  const ethDiv = $("div .text-secondary.mb-1", feesUsedDiv)
+  const ethDiv = $("div .text-muted.mb-1", feesUsedDiv)
   const ethUsed = Number(ethDiv.text().slice(0, -4))
 
   return ethUsed
