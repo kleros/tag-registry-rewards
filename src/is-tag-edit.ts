@@ -23,7 +23,7 @@ export const isEdit = async (address: string, editPeriod: Period): Promise<boole
     }
   }
 
-  if (finishedRemovalRequests.length === 0) return true
+  if (finishedRemovalRequests.length === 0) return false
   // take the latest
   const latestRequest = finishedRemovalRequests.sort((a, b) => b.resolutionTime - a.resolutionTime)[0]
   const timestamp = latestRequest.resolutionTime
