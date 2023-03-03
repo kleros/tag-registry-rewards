@@ -56,11 +56,14 @@ const allRewards = (
 
   // edits can, at max, have the average reward of non-edited tags.
   if (nonEditContracts.length === 0) throw new Error("No new tags, edge case must be handled.")
+  console.log(nonEditContracts.length, "non-edit tags")
   const averageNonEdit = totalNonEditWeight / nonEditContracts.length
+  console.log("Average non-edit weight:", averageNonEdit)
 
   const editContracts = contracts.filter(contract => contract.edit)
+  console.log(editContracts.length, "edit tags")
   const weightedEdits: WeightedContractInfo[] = editContracts
-    .map(contract => ({ ...contract, weight: Math.max(contractWeight(contract), averageNonEdit) }))
+    .map(contract => ({ ...contract, weight: Math.min(contractWeight(contract), averageNonEdit) }))
 
   const totalEditWeight = weightedEdits.reduce((acc, contract) => acc + contract.weight, 0)
 

@@ -33,7 +33,7 @@ export const getAllContractInfo = async (
     console.info("Building contractInfo for tag:", tag.tagAddress)
     const contractInfo = await tagToContractInfo(tag, editPeriod)
     if (contractInfo) {
-      console.info("Was contract. gas:", contractInfo.gasUsed)
+      console.info(contractInfo.edit ? "X EDIT" : "O NEW", "contract. gas:", contractInfo.gasUsed)
       contracts.push(contractInfo)
     } else {
       console.info("Tag wasn't a contract")
