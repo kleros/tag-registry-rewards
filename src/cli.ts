@@ -1,20 +1,19 @@
 import { BigNumber } from "ethers"
 import { buildRewards } from "./reward-builder"
 import { sendAllRewards } from "./transaction-sender"
-import { Period, Transaction } from "./types"
+import { Transaction } from "./types"
 import conf from "./config"
 import yargs = require("yargs")
 import { hideBin } from "yargs/helpers"
 import buildCsv from "./csv"
 import { readFileSync } from "fs"
 
-const getExpectedDates = (): {editStart: Date, start: Date, end: Date} => {
+const getExpectedDates = (): { start: Date; end: Date } => {
   const now = new Date()
   const timezone = now.getTimezoneOffset() / 60
-  const editStart = new Date(now.getFullYear(), now.getMonth() - 2, 1, -timezone)
   const start = new Date(now.getFullYear(), now.getMonth() - 1, 1, -timezone)
   const end = new Date(now.getFullYear(), now.getMonth(), 1, -timezone)
-  return { editStart, start, end }
+  return { start, end }
 }
 
 // @types/yargs is hard to understand, skip.
@@ -72,13 +71,12 @@ const main = async () => {
   }
   const stipend = BigNumber.from(argv.stipend ? argv.stipend : conf.STIPEND)
   if (mode === "csv") {
-    let {editStart: edit, start, end} = getExpectedDates()
+    let { start, end } = getExpectedDates()
     start = argv.start ? parseDate(argv.start) : start
     end = argv.end ? parseDate(argv.end) : end
-  
-    const rewards = await buildRewards({ start, end }, stipend, {start: edit, end})
-    await buildCsv(rewards)
 
+    const rewards = await buildRewards({ start, end }, stipend)
+    await buildCsv(rewards)
   } else if (mode === "send") {
     const file = argv.file
     const nodeEnv = argv.node as string

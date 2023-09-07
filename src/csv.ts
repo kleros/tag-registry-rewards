@@ -7,30 +7,32 @@ import conf from "./config"
 
 const rewardsHeader = [
   { id: "submitter", title: "Submitter" },
+  { id: "registry", title: "Registry" },
+  { id: "chain", title: "Chain" },
   { id: "tagAddress", title: "Address tagged" },
   { id: "latestRequestResolutionTime", title: "Registered at" },
-  { id: "edit", title: "Edit?" },
   { id: "gasUsed", title: "Gas spent" },
-  { id: "weight", title: "Weight"},
+  { id: "weight", title: "Weight" },
   { id: "amount", title: "Reward amount" },
 ]
 
 const transactionsHeader = [
   { id: "recipient", title: "Recipient" },
-  { id: "amount", title: "Amount" }
+  { id: "amount", title: "Amount" },
 ]
 
 const generateTransactions = (rewards: Reward[]): Transaction[] => {
-  const transactionMap: {[address: string]: Transaction} = {}
+  const transactionMap: { [address: string]: Transaction } = {}
   for (const reward of rewards) {
     if (!transactionMap[reward.recipient]) {
       transactionMap[reward.recipient] = {
         amount: reward.amount,
-        recipient: reward.recipient
+        recipient: reward.recipient,
       }
     } else {
-      transactionMap[reward.recipient].amount =
-        transactionMap[reward.recipient].amount.add(reward.amount)
+      transactionMap[reward.recipient].amount = transactionMap[
+        reward.recipient
+      ].amount.add(reward.amount)
     }
   }
   return Object.values(transactionMap)
@@ -47,21 +49,39 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
     header: rewardsHeader,
   })
   const rows = rewards.map((reward) => {
-    const { submitter, gasUsed, latestRequestResolutionTime, tagAddress, weight, edit } =
+    const { submitter, gasUsed, latestRequestResolutionTime, tagAddress } =
       reward.contractInfo
+
     const humanAmount = humanizeAmount(reward.amount)
+    const prettierWeight = (reward.weight * 100).toFixed(3) + "%"
+
+    const prettierRegistryName = {
+      addressTags: "Address Tags",
+      tokens: "Kleros Tokens",
+      domains: "Domains", // todo?
+    }[reward.contractInfo.registry]
+
+    const prettierChainName = {
+      "1": "Ethereum Mainnet",
+      "56": "Binance Smart Chain",
+      "100": "Gnosis Chain",
+      "137": "Polygon",
+    }[reward.contractInfo.chain]
+
     return {
       submitter,
       gasUsed,
       latestRequestResolutionTime: new Date(
         latestRequestResolutionTime * 1000
       ).toISOString(),
-      tagAddress,
-      weight,
-      edit,
+      tagAddress: tagAddress,
+      registry: prettierRegistryName,
+      chain: prettierChainName,
+      weight: prettierWeight,
       amount: humanAmount,
     }
   })
+
   await csvWriter.writeRecords(rows)
   // also store the transactions to be made as a json
   const transactions = generateTransactions(rewards)
@@ -82,7 +102,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
     const humanAmount = humanizeAmount(amount)
     return {
       recipient,
-      amount: humanAmount
+      amount: humanAmount,
     }
   })
 

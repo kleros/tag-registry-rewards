@@ -18,9 +18,12 @@ export const sendAllRewards = async (
   node: string
 ): Promise<void> => {
   console.info("=== Node mode:", node, "===")
-  const networkId = node === "production" ? Number(conf.TX_NETWORK_ID) : Number(conf.TX_TEST_NETWORK_ID)
+  const networkId =
+    node === "production"
+      ? Number(conf.TX_NETWORK_ID)
+      : Number(conf.TX_TEST_NETWORK_ID)
   const providerUrl =
-    node === "production" ? conf.TX_PROVIDER : conf.TX_TEST_PROVIDER
+    node === "production" ? conf.GNOSIS_RPC : conf.TX_TEST_PROVIDER
   const pnkAddress = node === "production" ? conf.PNK : conf.TEST_PNK
 
   const provider = new ethers.providers.JsonRpcProvider(providerUrl, networkId)
