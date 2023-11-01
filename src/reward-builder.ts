@@ -1,10 +1,7 @@
-import { getAllContractInfo } from "./contract-info"
-import { fetchTags } from "./tag-fetch"
-import { ContractInfo, Period, Reward } from "./types"
+import { generateContractInfos } from "./contract-info"
+import { ContractInfo, GasDune, Reward, Tag } from "./types"
 import { BigNumber } from "ethers"
 import { humanizeAmount } from "./transaction-sender"
-import { writeFileSync } from "fs"
-import conf from "./config"
 
 const normalizer = 1_000_000 // used to turn weights onto bignumbers
 
@@ -77,25 +74,12 @@ const allRewards = (
 }
 
 export const buildRewards = async (
-  period: Period,
-  stipend: BigNumber
+  stipend: BigNumber,
+  tags: Tag[],
+  gasDunes: GasDune[]
 ): Promise<Reward[]> => {
   console.log("Generating rewards for", humanizeAmount(stipend), "PNK")
-  console.log("Period:", period)
-  const tags = await fetchTags(period)
-  console.log("Tag count:")
-
-  console.log("A.T.", tags.filter((t) => t.registry === "addressTags").length)
-  console.log("Tokens", tags.filter((t) => t.registry === "tokens").length)
-  console.log("Domains", tags.filter((t) => t.registry === "domains").length)
-
-  const contractInfos = await getAllContractInfo(tags) //todo de debug
-
-  const filename = new Date().getTime()
-  writeFileSync(
-    `./${conf.FILES_DIR}/contracts-${filename}.json`,
-    JSON.stringify(contractInfos)
-  )
+  const contractInfos = generateContractInfos(tags, gasDunes)
   const rewards = allRewards(contractInfos, stipend)
   return rewards
 }

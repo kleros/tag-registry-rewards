@@ -37,6 +37,12 @@ export interface Tag {
   latestRequestResolutionTime: number
 }
 
+export interface GasDune {
+  chain: number
+  address: string
+  gas_spent: number
+}
+
 export interface ContractInfo extends Tag {
   gasUsed: number
 }

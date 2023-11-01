@@ -87,8 +87,24 @@ export const fetchTags = async (period: Period): Promise<Tag[]> => {
     conf.XDAI_GTCR_SUBGRAPH_URL,
     conf.XDAI_REGISTRY_TOKENS
   )
-
   const tokens = tokensItems.map((item) => itemToTag(item, "tokens"))
+
+  // october hack, will be patched out after delivery.
+  // context: a registry got submissions and was deprecated.
+  const now = new Date()
+  const timezone = now.getTimezoneOffset() / 60
+  const start = new Date(2023, 10 - 1, 1, -timezone)
+  const end = new Date(2023, 10 - 1, 9, -timezone)
+
+  const tokensItemsOctoberHack: Item[] = await fetchTagsBatchByRegistry(
+    { start: start, end: end },
+    conf.XDAI_GTCR_SUBGRAPH_URL,
+    "0x70533554fe5c17caf77fe530f77eab933b92af60"
+  )
+  const tokensHack = tokensItemsOctoberHack.map((item) =>
+    itemToTag(item, "tokens")
+  )
+  // hacks end
 
   const domainsItems: Item[] = await fetchTagsBatchByRegistry(
     period,
@@ -98,5 +114,15 @@ export const fetchTags = async (period: Period): Promise<Tag[]> => {
 
   const domains = domainsItems.map((item) => itemToTag(item, "domains"))
 
-  return addressTags.concat(tokens).concat(domains)
+  return (
+    addressTags
+      .concat(tokens)
+      // hack
+      .concat(tokensHack)
+      .concat(domains)
+      // hack
+      .filter(
+        (tag) => tag.submitter !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6"
+      )
+  )
 }

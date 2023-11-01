@@ -1,8 +1,15 @@
 import { BigNumber, Contract, ethers } from "ethers"
 import ERC20Abi from "../abi/ERC20.json"
 import conf from "./config"
-import { sleep } from "./spent-gas"
 import { Transaction } from "./types"
+
+const randomBetween = (min: number, max: number) =>
+  Math.floor(min + Math.random() * (max - min))
+
+export const sleep = (seconds = 0): Promise<void> => {
+  if (seconds === 0) seconds = randomBetween(2, 5)
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1000))
+}
 
 export const humanizeAmount = (bn: BigNumber): number => {
   return bn.div(BigNumber.from("1000000000000000")).toNumber() / 1000
@@ -35,7 +42,7 @@ export const sendAllRewards = async (
   console.info("You are", wallet.address)
   const balance: BigNumber = await pnk.balanceOf(wallet.address)
   console.info("Current balance", humanizeAmount(balance), "PNK")
-  if (!balance || balance.lt(stipend)) {
+  if (!balance || balance.lt(stipend.mul(BigNumber.from(12)))) {
     throw new Error("Balance is lower than stipend")
   }
   let nonce = await wallet.getTransactionCount()

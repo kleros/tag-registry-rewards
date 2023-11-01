@@ -1,12 +1,13 @@
 import { BigNumber } from "ethers"
 import { buildRewards } from "./reward-builder"
 import { sendAllRewards } from "./transaction-sender"
-import { Transaction } from "./types"
+import { GasDune, Tag, Transaction } from "./types"
 import conf from "./config"
 import yargs = require("yargs")
 import { hideBin } from "yargs/helpers"
 import buildCsv from "./csv"
 import { readFileSync } from "fs"
+import { tagsRoutine } from "./tags-routine"
 
 const getExpectedDates = (): { start: Date; end: Date } => {
   const now = new Date()
@@ -22,25 +23,22 @@ const argv: any = yargs(hideBin(process.argv))
   .locale("en")
   .usage(
     `Usage:
-    Make CSV file:
-      $0 --mode csv --start <start-date> --end <end-date> --stipend <stipend-amount>
+    Fetch tags:
+      $0 --mode tags --start <start-date> --end <end-date>
+    Generate rewards file:
+      $0 --mode rewards --tags \${filename}.json --gas \${filename}.json
     Send rewards:
-      $0 --mode send --start <start-date> --end <end-date> --stipend <stipend-amount>`
+      $0 --mode send --rewards \${filename}.json`
   )
   .option("m", {
     description:
-      "The mode of the execution. 'csv' will just create a csv file, 'send' will distribute rewards.",
+      "The mode of the execution. 3 steps: 'tags', 'generate', and 'send'",
     alias: "mode",
   })
   .option("n", {
     description: "Whether it's running on production or development",
     alias: "node",
     default: "development",
-  })
-  .option("a", {
-    description: "The stipend of the distribution for this period",
-    alias: "stipend",
-    default: conf.STIPEND,
   })
   .option("s", {
     description: "The day the period starts",
@@ -53,9 +51,17 @@ const argv: any = yargs(hideBin(process.argv))
   .option("h", {
     alias: "help",
   })
-  .option("f", {
-    description: "The name of the optional file",
-    alias: "file",
+  .option("t", {
+    description: "The name of the tags file",
+    alias: "tags",
+  })
+  .option("g", {
+    description: "The name of the gas file",
+    alias: "gas",
+  })
+  .option("r", {
+    description: "The name of the rewards file",
+    alias: "rewards",
   }).argv
 
 const parseDate = (s: string): Date => {
@@ -67,17 +73,33 @@ const parseDate = (s: string): Date => {
 const main = async () => {
   const mode = argv.mode as string | undefined
   if (mode === undefined) {
-    throw new Error("You must choose a mode, 'csv' | 'send'")
+    throw new Error("You must choose a mode, 'tags' | 'rewards' | 'send'")
   }
-  const stipend = BigNumber.from(argv.stipend ? argv.stipend : conf.STIPEND)
-  if (mode === "csv") {
+  if (mode === "tags") {
+    // fetch the tags according to a period. first step.
+    // after operator generates the tags, follow the instructions and run `rewards` next.
     let { start, end } = getExpectedDates()
     start = argv.start ? parseDate(argv.start) : start
     end = argv.end ? parseDate(argv.end) : end
-
-    const rewards = await buildRewards({ start, end }, stipend)
+    await tagsRoutine({ start, end })
+  } else if (mode === "rewards") {
+    // generate the rewards from tags and gas query
+    const stipend = BigNumber.from(conf.STIPEND)
+    const tagsFilename = argv.tags
+    const gasFilename = argv.gas
+    if (!tagsFilename || !gasFilename)
+      throw new Error("JSON files for tags and gas needed")
+    const tags: Tag[] = JSON.parse(
+      readFileSync(`./${conf.FILES_DIR}/${tagsFilename}`).toString()
+    )
+    const gasDunes: GasDune[] = JSON.parse(
+      readFileSync(`./${conf.FILES_DIR}/${gasFilename}`).toString()
+    )
+    const rewards = await buildRewards(stipend, tags, gasDunes)
     await buildCsv(rewards)
   } else if (mode === "send") {
+    // disburse rewards
+    const stipend = BigNumber.from(conf.STIPEND)
     const file = argv.file
     const nodeEnv = argv.node as string
     if (!file) throw new Error("JSON file needed to send the full rewards")
