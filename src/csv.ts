@@ -14,6 +14,7 @@ const rewardsHeader = [
   { id: "gasUsed", title: "Gas spent" },
   { id: "weight", title: "Weight" },
   { id: "amount", title: "Reward amount" },
+  { id: "edit", title: "Edit" },
 ]
 
 const transactionsHeader = [
@@ -79,6 +80,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
       chain: prettierChainName,
       weight: prettierWeight,
       amount: humanAmount,
+      edit: reward.edit,
     }
   })
 

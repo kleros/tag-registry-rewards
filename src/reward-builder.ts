@@ -97,6 +97,7 @@ const allRewards = (
       weight: weight,
       recipient: contract.submitter,
       contractInfo: contract,
+      edit: contract.edit,
     }
     return reward
   })
@@ -150,6 +151,7 @@ const editRewards = (
       weight: weight,
       recipient: contract.submitter,
       contractInfo: contract,
+      edit: contract.edit,
     }
     return reward
   })

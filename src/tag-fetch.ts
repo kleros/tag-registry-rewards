@@ -3,8 +3,8 @@ import fetch from "node-fetch"
 import conf from "./config"
 
 const fetchTagsByAddressInRegistry = async (
-  registryType: "addressTags" | "tokens" | "domains",
   address: string,
+  registryType: "addressTags" | "tokens" | "domains",
   subgraphEndpoint: string
 ): Promise<Item[]> => {
   const registry = {
@@ -38,8 +38,8 @@ const fetchTagsByAddressInRegistry = async (
   const { data } = await response.json()
   const items: Item[] = data.litems
 
-  // hack for October begins...
   if (registryType !== "tokens") {
+    // hack for October begins...
     return items
   } else {
     const subgraphQuery2 = {
@@ -80,8 +80,8 @@ const isEdit = async (
   if (registryType === "domains") return false
 
   const items = await fetchTagsByAddressInRegistry(
-    registryType,
     address,
+    registryType,
     conf.XDAI_GTCR_SUBGRAPH_URL
   )
   const absentItems = items.filter((item) =>

@@ -53,6 +53,7 @@ export interface Reward {
   amount: BigNumber
   weight: number
   recipient: string
+  edit: boolean
   id: string // used to identify dupes
 }
 
