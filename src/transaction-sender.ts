@@ -21,7 +21,6 @@ const sendReward = async (r: Transaction, nonce: number, pnk: Contract) => {
 
 export const sendAllRewards = async (
   rewards: Transaction[],
-  stipend: BigNumber,
   node: string
 ): Promise<void> => {
   console.info("=== Node mode:", node, "===")
@@ -42,7 +41,12 @@ export const sendAllRewards = async (
   console.info("You are", wallet.address)
   const balance: BigNumber = await pnk.balanceOf(wallet.address)
   console.info("Current balance", humanizeAmount(balance), "PNK")
-  if (!balance || balance.lt(stipend.mul(BigNumber.from(12)))) {
+  let stipend = BigNumber.from(0)
+  for (const reward of rewards) {
+    stipend = stipend.add(reward.amount)
+  }
+  console.info("Stipend", humanizeAmount(stipend), "PNK")
+  if (!balance || balance.lt(stipend)) {
     throw new Error("Balance is lower than stipend")
   }
   let nonce = await wallet.getTransactionCount()

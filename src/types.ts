@@ -35,6 +35,7 @@ export interface Tag {
   submitter: string
   tagAddress: string
   latestRequestResolutionTime: number
+  edit: boolean
 }
 
 export interface GasDune {

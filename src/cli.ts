@@ -9,12 +9,18 @@ import buildCsv from "./csv"
 import { readFileSync } from "fs"
 import { tagsRoutine } from "./tags-routine"
 
-const getExpectedDates = (): { start: Date; end: Date } => {
+const getExpectedDates = (): { start: Date; end: Date; editStart: Date } => {
   const now = new Date()
   const timezone = now.getTimezoneOffset() / 60
   const start = new Date(now.getFullYear(), now.getMonth() - 1, 1, -timezone)
   const end = new Date(now.getFullYear(), now.getMonth(), 1, -timezone)
-  return { start, end }
+  const editStart = new Date(
+    now.getFullYear(),
+    now.getMonth() - 2,
+    1,
+    -timezone
+  )
+  return { start, end, editStart }
 }
 
 // @types/yargs is hard to understand, skip.
@@ -48,6 +54,10 @@ const argv: any = yargs(hideBin(process.argv))
     description: "The day the period ends",
     alias: "end",
   })
+  .option("d", {
+    description: "The day the edit period starts",
+    alias: "edit",
+  })
   .option("h", {
     alias: "help",
   })
@@ -78,10 +88,11 @@ const main = async () => {
   if (mode === "tags") {
     // fetch the tags according to a period. first step.
     // after operator generates the tags, follow the instructions and run `rewards` next.
-    let { start, end } = getExpectedDates()
+    let { start, end, editStart } = getExpectedDates()
     start = argv.start ? parseDate(argv.start) : start
     end = argv.end ? parseDate(argv.end) : end
-    await tagsRoutine({ start, end })
+    editStart = argv.edit ? parseDate(argv.edit) : editStart
+    await tagsRoutine({ start, end }, { start: editStart, end })
   } else if (mode === "rewards") {
     // generate the rewards from tags and gas query
     const stipend = BigNumber.from(conf.STIPEND)
@@ -99,7 +110,6 @@ const main = async () => {
     await buildCsv(rewards)
   } else if (mode === "send") {
     // disburse rewards
-    const stipend = BigNumber.from(conf.STIPEND)
     const file = argv.file
     const nodeEnv = argv.node as string
     if (!file) throw new Error("JSON file needed to send the full rewards")
@@ -109,7 +119,7 @@ const main = async () => {
     rewards.forEach((reward) => {
       reward.amount = BigNumber.from(reward.amount)
     })
-    await sendAllRewards(rewards, stipend, nodeEnv)
+    await sendAllRewards(rewards, nodeEnv)
   } else {
     throw new Error(`Unrecognized mode ${mode}`)
   }

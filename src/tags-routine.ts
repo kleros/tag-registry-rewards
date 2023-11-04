@@ -77,9 +77,13 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   )
 }
 
-export const tagsRoutine = async (period: Period): Promise<void> => {
+export const tagsRoutine = async (
+  period: Period,
+  editPeriod: Period
+): Promise<void> => {
   console.log("Period:", period)
-  const tags = await fetchTags(period)
+  console.log("Edit period:", editPeriod)
+  const tags = await fetchTags(period, editPeriod)
 
   console.log("Tag count:")
 

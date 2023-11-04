@@ -1,6 +1,121 @@
-import { Item, Period, Tag } from "./types"
+import { Item, ItemRequest, Period, Tag } from "./types"
 import fetch from "node-fetch"
 import conf from "./config"
+
+const fetchTagsByAddressInRegistry = async (
+  registryType: "addressTags" | "tokens" | "domains",
+  address: string,
+  subgraphEndpoint: string
+): Promise<Item[]> => {
+  const registry = {
+    addressTags: conf.XDAI_REGISTRY_ADDRESS_TAGS,
+    tokens: conf.XDAI_REGISTRY_TOKENS,
+    domains: conf.XDAI_REGISTRY_DOMAINS,
+  }[registryType]
+  const subgraphQuery = {
+    query: `
+      {
+        litems(where: {
+          registry: "${registry}",
+          key0_starts_with_nocase: "${address}",
+          key0_ends_with_nocase: "${address}"
+        }) {
+          status
+          requests {
+            requestType
+            resolutionTime
+            requester
+          }
+        }
+      }
+    `,
+  }
+  const response = await fetch(subgraphEndpoint, {
+    method: "POST",
+    body: JSON.stringify(subgraphQuery),
+  })
+
+  const { data } = await response.json()
+  const items: Item[] = data.litems
+
+  // hack for October begins...
+  if (registryType !== "tokens") {
+    return items
+  } else {
+    const subgraphQuery2 = {
+      query: `
+        {
+          litems(where: {
+            registry: "0x70533554fe5c17caf77fe530f77eab933b92af60",
+            key0_starts_with_nocase: "${address}",
+            key0_ends_with_nocase: "${address}"
+          }) {
+            status
+            requests {
+              requestType
+              resolutionTime
+              requester
+            }
+          }
+        }
+      `,
+    }
+    const response2 = await fetch(subgraphEndpoint, {
+      method: "POST",
+      body: JSON.stringify(subgraphQuery2),
+    })
+
+    const { data: data2 } = await response2.json()
+    const items2: Item[] = data2.litems
+    return [...items, ...items2]
+  }
+}
+
+const isEdit = async (
+  address: string,
+  registryType: "addressTags" | "tokens" | "domains",
+  editPeriod: Period
+): Promise<boolean> => {
+  // there should be no valid reason to edit domains.
+  if (registryType === "domains") return false
+
+  const items = await fetchTagsByAddressInRegistry(
+    registryType,
+    address,
+    conf.XDAI_GTCR_SUBGRAPH_URL
+  )
+  const absentItems = items.filter((item) =>
+    ["Absent", "RegistrationRequested"].includes(item.status as string)
+  )
+
+  const finishedRemovalRequests: ItemRequest[] = []
+  for (const item of absentItems) {
+    for (const request of item.requests) {
+      if (
+        request.requestType === "ClearingRequested" &&
+        request.resolutionTime > 0 &&
+        // filter auxiliary addresses
+        request.requester !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6"
+      ) {
+        finishedRemovalRequests.push(request)
+      }
+    }
+  }
+
+  if (finishedRemovalRequests.length === 0) return false
+  // take the latest
+  const latestRequest = finishedRemovalRequests.sort(
+    (a, b) => b.resolutionTime - a.resolutionTime
+  )[0]
+  const timestamp = latestRequest.resolutionTime
+  if (
+    editPeriod.start.getTime() / 1000 <= timestamp &&
+    editPeriod.end.getTime() / 1000 >= timestamp
+  )
+    return true
+
+  return false
+}
 
 const fetchTagsBatchByRegistry = async (
   period: Period,
@@ -54,12 +169,15 @@ const parseCaip = (caip: string): { address: string; chain: number } => {
   return { chain: Number(chain), address }
 }
 
-const itemToTag = (
+const itemToTag = async (
   item: Item,
-  registryType: "addressTags" | "tokens" | "domains"
-): Tag => {
+  registryType: "addressTags" | "tokens" | "domains",
+  editPeriod: Period
+): Promise<Tag> => {
   // in all 3 registries, key0 is caip address
   const { chain, address } = parseCaip(item.key0)
+  const edit = await isEdit(item.key0, registryType, editPeriod)
+  if (edit) console.log("got edit in registry", registryType, item.key0)
   const tag: Tag = {
     id: item.id,
     registry: registryType,
@@ -67,19 +185,23 @@ const itemToTag = (
     latestRequestResolutionTime: Number(item.latestRequestResolutionTime),
     submitter: item.requests[0].requester,
     tagAddress: address,
+    edit,
   }
   return tag
 }
 
-export const fetchTags = async (period: Period): Promise<Tag[]> => {
+export const fetchTags = async (
+  period: Period,
+  editPeriod: Period
+): Promise<Tag[]> => {
   const addressTagsItems: Item[] = await fetchTagsBatchByRegistry(
     period,
     conf.XDAI_GTCR_SUBGRAPH_URL,
     conf.XDAI_REGISTRY_ADDRESS_TAGS
   )
 
-  const addressTags = addressTagsItems.map((item) =>
-    itemToTag(item, "addressTags")
+  const addressTags = await Promise.all(
+    addressTagsItems.map((item) => itemToTag(item, "addressTags", editPeriod))
   )
 
   const tokensItems: Item[] = await fetchTagsBatchByRegistry(
@@ -87,7 +209,9 @@ export const fetchTags = async (period: Period): Promise<Tag[]> => {
     conf.XDAI_GTCR_SUBGRAPH_URL,
     conf.XDAI_REGISTRY_TOKENS
   )
-  const tokens = tokensItems.map((item) => itemToTag(item, "tokens"))
+  const tokens = await Promise.all(
+    tokensItems.map((item) => itemToTag(item, "tokens", editPeriod))
+  )
 
   // october hack, will be patched out after delivery.
   // context: a registry got submissions and was deprecated.
@@ -101,8 +225,8 @@ export const fetchTags = async (period: Period): Promise<Tag[]> => {
     conf.XDAI_GTCR_SUBGRAPH_URL,
     "0x70533554fe5c17caf77fe530f77eab933b92af60"
   )
-  const tokensHack = tokensItemsOctoberHack.map((item) =>
-    itemToTag(item, "tokens")
+  const tokensHack = await Promise.all(
+    tokensItemsOctoberHack.map((item) => itemToTag(item, "tokens", editPeriod))
   )
   // hacks end
 
@@ -112,7 +236,9 @@ export const fetchTags = async (period: Period): Promise<Tag[]> => {
     conf.XDAI_REGISTRY_DOMAINS
   )
 
-  const domains = domainsItems.map((item) => itemToTag(item, "domains"))
+  const domains = await Promise.all(
+    domainsItems.map((item) => itemToTag(item, "domains", editPeriod))
+  )
 
   return (
     addressTags
@@ -120,7 +246,7 @@ export const fetchTags = async (period: Period): Promise<Tag[]> => {
       // hack
       .concat(tokensHack)
       .concat(domains)
-      // hack
+      // hack to filter out auxiliary address
       .filter(
         (tag) => tag.submitter !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6"
       )
