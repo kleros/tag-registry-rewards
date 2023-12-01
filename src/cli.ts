@@ -110,7 +110,7 @@ const main = async () => {
     await buildCsv(rewards)
   } else if (mode === "send") {
     // disburse rewards
-    const file = argv.file
+    const file = argv.rewards
     const nodeEnv = argv.node as string
     if (!file) throw new Error("JSON file needed to send the full rewards")
     const fileContent = readFileSync(`./${conf.FILES_DIR}/${file}`).toString()

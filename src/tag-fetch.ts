@@ -39,7 +39,8 @@ const fetchTagsByAddressInRegistry = async (
   const items: Item[] = data.litems
 
   if (registryType !== "tokens") {
-    // hack for October begins...
+    // hack for November - December begins...
+    // todo refactor out in january
     return items
   } else {
     const subgraphQuery2 = {
@@ -95,7 +96,8 @@ const isEdit = async (
         request.requestType === "ClearingRequested" &&
         request.resolutionTime > 0 &&
         // filter auxiliary addresses
-        request.requester !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6"
+        request.requester !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6" &&
+        request.requester !== "0xd0e76cfaa8af741f3a8b107eca76d393f734dace"
       ) {
         finishedRemovalRequests.push(request)
       }
@@ -213,23 +215,6 @@ export const fetchTags = async (
     tokensItems.map((item) => itemToTag(item, "tokens", editPeriod))
   )
 
-  // october hack, will be patched out after delivery.
-  // context: a registry got submissions and was deprecated.
-  const now = new Date()
-  const timezone = now.getTimezoneOffset() / 60
-  const start = new Date(2023, 10 - 1, 1, -timezone)
-  const end = new Date(2023, 10 - 1, 9, -timezone)
-
-  const tokensItemsOctoberHack: Item[] = await fetchTagsBatchByRegistry(
-    { start: start, end: end },
-    conf.XDAI_GTCR_SUBGRAPH_URL,
-    "0x70533554fe5c17caf77fe530f77eab933b92af60"
-  )
-  const tokensHack = await Promise.all(
-    tokensItemsOctoberHack.map((item) => itemToTag(item, "tokens", editPeriod))
-  )
-  // hacks end
-
   const domainsItems: Item[] = await fetchTagsBatchByRegistry(
     period,
     conf.XDAI_GTCR_SUBGRAPH_URL,
@@ -243,12 +228,12 @@ export const fetchTags = async (
   return (
     addressTags
       .concat(tokens)
-      // hack
-      .concat(tokensHack)
       .concat(domains)
       // hack to filter out auxiliary address
       .filter(
-        (tag) => tag.submitter !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6"
+        (tag) =>
+          tag.submitter !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6" &&
+          tag.submitter !== "0xd0e76cfaa8af741f3a8b107eca76d393f734dace"
       )
   )
 }
