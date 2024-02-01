@@ -3,7 +3,7 @@ import fetch from "node-fetch"
 import conf from "./config"
 
 const fetchTagsByAddressInRegistry = async (
-  address: string,
+  caipAddress: string,
   registryType: "addressTags" | "tokens" | "domains",
   subgraphEndpoint: string
 ): Promise<Item[]> => {
@@ -17,8 +17,8 @@ const fetchTagsByAddressInRegistry = async (
       {
         litems(where: {
           registry: "${registry}",
-          key0_starts_with_nocase: "${address}",
-          key0_ends_with_nocase: "${address}"
+          key0_starts_with_nocase: "${caipAddress}",
+          key0_ends_with_nocase: "${caipAddress}"
         }) {
           status
           requests {
@@ -38,42 +38,11 @@ const fetchTagsByAddressInRegistry = async (
   const { data } = await response.json()
   const items: Item[] = data.litems
 
-  if (registryType !== "tokens") {
-    // hack for November - December begins...
-    // todo refactor out in january
-    return items
-  } else {
-    const subgraphQuery2 = {
-      query: `
-        {
-          litems(where: {
-            registry: "0x70533554fe5c17caf77fe530f77eab933b92af60",
-            key0_starts_with_nocase: "${address}",
-            key0_ends_with_nocase: "${address}"
-          }) {
-            status
-            requests {
-              requestType
-              resolutionTime
-              requester
-            }
-          }
-        }
-      `,
-    }
-    const response2 = await fetch(subgraphEndpoint, {
-      method: "POST",
-      body: JSON.stringify(subgraphQuery2),
-    })
-
-    const { data: data2 } = await response2.json()
-    const items2: Item[] = data2.litems
-    return [...items, ...items2]
-  }
+  return items
 }
 
 const isEdit = async (
-  address: string,
+  caipAddress: string,
   registryType: "addressTags" | "tokens" | "domains",
   editPeriod: Period
 ): Promise<boolean> => {
@@ -81,7 +50,7 @@ const isEdit = async (
   if (registryType === "domains") return false
 
   const items = await fetchTagsByAddressInRegistry(
-    address,
+    caipAddress,
     registryType,
     conf.XDAI_GTCR_SUBGRAPH_URL
   )
@@ -192,6 +161,24 @@ const itemToTag = async (
   return tag
 }
 
+const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
+  const nonTokenDomains: Item[] = []
+  for (const item of domainItems) {
+    const tagMatches = await fetchTagsByAddressInRegistry(
+      item.key0,
+      "tokens",
+      conf.XDAI_GTCR_SUBGRAPH_URL
+    )
+    // check that every single one is out. this means the filter above must be length 0.
+    // ow it's a token
+    const includedItems = tagMatches.filter((item) =>
+      ["Registered", "RemovalRequested"].includes(item.status as string)
+    )
+    if (includedItems.length === 0) nonTokenDomains.push(item)
+  }
+  return nonTokenDomains
+}
+
 export const fetchTags = async (
   period: Period,
   editPeriod: Period
@@ -221,8 +208,11 @@ export const fetchTags = async (
     conf.XDAI_REGISTRY_DOMAINS
   )
 
+  console.log("Filtering Tokens away from Domains for rewards")
+  const nonTokenDomainsItems = await nonTokensFromDomains(domainsItems)
+
   const domains = await Promise.all(
-    domainsItems.map((item) => itemToTag(item, "domains", editPeriod))
+    nonTokenDomainsItems.map((item) => itemToTag(item, "domains", editPeriod))
   )
 
   return (
@@ -233,7 +223,9 @@ export const fetchTags = async (
       .filter(
         (tag) =>
           tag.submitter !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6" &&
-          tag.submitter !== "0xd0e76cfaa8af741f3a8b107eca76d393f734dace"
+          tag.submitter !== "0xd0e76cfaa8af741f3a8b107eca76d393f734dace" &&
+          tag.submitter !== "0x6f8e399b94e117d9e44311306c4c756369682720" &&
+          tag.submitter !== "0xbf45d3c81f587833635b3a1907f5a26c208532e7"
       )
   )
 }

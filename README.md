@@ -10,7 +10,7 @@ Set the missing .env key variables
 
 ## Format
 
-`yarn start --node <node> --mode <mode> --start <start_date> --end <end_date> --tags <tags_filename> --gas <gas_filename> --rewards <rewards_filename>`
+`yarn start --node <node> --mode <mode> --start <start_date> --end <end_date> --edit <edit_start_date> --tags <tags_filename> --gas <gas_filename> --rewards <rewards_filename>`
 
 Most variables have defaults set in the `.env` file. You should set the stipend in the `.env` to avoid mistyping it when you run the command. Same with the new-tag-ratio.
 
