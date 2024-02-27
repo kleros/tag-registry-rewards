@@ -15,7 +15,7 @@ export const generateContractInfos = (
       throw new Error(
         `Unable to find matched gasDune for tag ${tag.tagAddress} chain ${tag.chain}`
       )
-    return { ...tag, gasUsed: matchGas.gas_spent }
+    return { ...tag, txCount: matchGas.tx_count }
   })
 
   return contractInfos

@@ -1,4 +1,4 @@
-import { Item, ItemRequest, Period, Tag } from "./types"
+import { Item, Period, Tag } from "./types"
 import fetch from "node-fetch"
 import conf from "./config"
 
@@ -39,53 +39,6 @@ const fetchTagsByAddressInRegistry = async (
   const items: Item[] = data.litems
 
   return items
-}
-
-const isEdit = async (
-  caipAddress: string,
-  registryType: "addressTags" | "tokens" | "domains",
-  editPeriod: Period
-): Promise<boolean> => {
-  // there should be no valid reason to edit domains.
-  if (registryType === "domains") return false
-
-  const items = await fetchTagsByAddressInRegistry(
-    caipAddress,
-    registryType,
-    conf.XDAI_GTCR_SUBGRAPH_URL
-  )
-  const absentItems = items.filter((item) =>
-    ["Absent", "RegistrationRequested"].includes(item.status as string)
-  )
-
-  const finishedRemovalRequests: ItemRequest[] = []
-  for (const item of absentItems) {
-    for (const request of item.requests) {
-      if (
-        request.requestType === "ClearingRequested" &&
-        request.resolutionTime > 0 &&
-        // filter auxiliary addresses
-        request.requester !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6" &&
-        request.requester !== "0xd0e76cfaa8af741f3a8b107eca76d393f734dace"
-      ) {
-        finishedRemovalRequests.push(request)
-      }
-    }
-  }
-
-  if (finishedRemovalRequests.length === 0) return false
-  // take the latest
-  const latestRequest = finishedRemovalRequests.sort(
-    (a, b) => b.resolutionTime - a.resolutionTime
-  )[0]
-  const timestamp = latestRequest.resolutionTime
-  if (
-    editPeriod.start.getTime() / 1000 <= timestamp &&
-    editPeriod.end.getTime() / 1000 >= timestamp
-  )
-    return true
-
-  return false
 }
 
 const fetchTagsBatchByRegistry = async (
@@ -142,13 +95,10 @@ const parseCaip = (caip: string): { address: string; chain: number } => {
 
 const itemToTag = async (
   item: Item,
-  registryType: "addressTags" | "tokens" | "domains",
-  editPeriod: Period
+  registryType: "addressTags" | "tokens" | "domains"
 ): Promise<Tag> => {
   // in all 3 registries, key0 is caip address
   const { chain, address } = parseCaip(item.key0)
-  const edit = await isEdit(item.key0, registryType, editPeriod)
-  if (edit) console.log("got edit in registry", registryType, item.key0)
   const tag: Tag = {
     id: item.id,
     registry: registryType,
@@ -156,7 +106,6 @@ const itemToTag = async (
     latestRequestResolutionTime: Number(item.latestRequestResolutionTime),
     submitter: item.requests[0].requester,
     tagAddress: address,
-    edit,
   }
   return tag
 }
@@ -180,8 +129,7 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
 }
 
 export const fetchTags = async (
-  period: Period,
-  editPeriod: Period
+  period: Period
 ): Promise<Tag[]> => {
   const addressTagsItems: Item[] = await fetchTagsBatchByRegistry(
     period,
@@ -190,7 +138,7 @@ export const fetchTags = async (
   )
 
   const addressTags = await Promise.all(
-    addressTagsItems.map((item) => itemToTag(item, "addressTags", editPeriod))
+    addressTagsItems.map((item) => itemToTag(item, "addressTags"))
   )
 
   const tokensItems: Item[] = await fetchTagsBatchByRegistry(
@@ -199,7 +147,7 @@ export const fetchTags = async (
     conf.XDAI_REGISTRY_TOKENS
   )
   const tokens = await Promise.all(
-    tokensItems.map((item) => itemToTag(item, "tokens", editPeriod))
+    tokensItems.map((item) => itemToTag(item, "tokens"))
   )
 
   const domainsItems: Item[] = await fetchTagsBatchByRegistry(
@@ -212,7 +160,7 @@ export const fetchTags = async (
   const nonTokenDomainsItems = await nonTokensFromDomains(domainsItems)
 
   const domains = await Promise.all(
-    nonTokenDomainsItems.map((item) => itemToTag(item, "domains", editPeriod))
+    nonTokenDomainsItems.map((item) => itemToTag(item, "domains"))
   )
 
   return (

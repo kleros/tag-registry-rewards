@@ -4,17 +4,12 @@ interface Config {
   XDAI_REGISTRY_TOKENS: string
   XDAI_REGISTRY_DOMAINS: string
   NODE_ENV: string
-  MAINNET_RPC: string
-  BSC_RPC: string
-  GNOSIS_RPC: string
-  POLYGON_RPC: string
   WALLET_PRIVATE_KEY: string
   PNK: string
   TEST_PNK: string
   STIPEND: string
+  MAX_REWARD: string
   TX_NETWORK_ID: string
-  TX_TEST_PROVIDER: string
-  TX_TEST_NETWORK_ID: string
   FILES_DIR: string
 }
 

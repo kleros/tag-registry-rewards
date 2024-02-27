@@ -11,10 +11,8 @@ const rewardsHeader = [
   { id: "chain", title: "Chain" },
   { id: "tagAddress", title: "Address tagged" },
   { id: "latestRequestResolutionTime", title: "Registered at" },
-  { id: "gasUsed", title: "Gas spent" },
-  { id: "weight", title: "Weight" },
+  { id: "txCount", title: "Tx count" },
   { id: "amount", title: "Reward amount" },
-  { id: "edit", title: "Edit" },
 ]
 
 const transactionsHeader = [
@@ -50,11 +48,10 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
     header: rewardsHeader,
   })
   const rows = rewards.map((reward) => {
-    const { submitter, gasUsed, latestRequestResolutionTime, tagAddress } =
+    const { submitter, txCount, latestRequestResolutionTime, tagAddress } =
       reward.contractInfo
 
     const humanAmount = humanizeAmount(reward.amount)
-    const prettierWeight = (reward.weight * 100).toFixed(3) + "%"
 
     const prettierRegistryName = {
       addressTags: "Address Tags",
@@ -71,16 +68,14 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
 
     return {
       submitter,
-      gasUsed,
+      txCount,
       latestRequestResolutionTime: new Date(
         latestRequestResolutionTime * 1000
       ).toISOString(),
       tagAddress: tagAddress,
       registry: prettierRegistryName,
       chain: prettierChainName,
-      weight: prettierWeight,
       amount: humanAmount,
-      edit: reward.edit,
     }
   })
 

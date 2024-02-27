@@ -35,42 +35,26 @@ export interface Tag {
   submitter: string
   tagAddress: string
   latestRequestResolutionTime: number
-  edit: boolean
 }
 
 export interface GasDune {
   chain: number
   address: string
-  gas_spent: number
+  tx_count: number
 }
 
 export interface ContractInfo extends Tag {
-  gasUsed: number
+  txCount: number
 }
 
 export interface Reward {
   contractInfo: ContractInfo
   amount: BigNumber
-  weight: number
   recipient: string
-  edit: boolean
   id: string // used to identify dupes
 }
 
 export interface Transaction {
   amount: BigNumber
   recipient: string
-}
-
-export interface Registry {
-  "1": Tag[]
-  "56": Tag[]
-  "100": Tag[]
-  "137": Tag[]
-}
-
-export interface TagBucket {
-  addressTags: Registry
-  tokens: Registry
-  domains: Registry
 }

@@ -3,17 +3,10 @@ import { fetchTags } from "./tag-fetch"
 import { Period, Tag } from "./types"
 import conf from "./config"
 import Web3 from "web3"
-
-// only used to check if something is a contract
-const web3s = {
-  "1": new Web3(conf.MAINNET_RPC),
-  "56": new Web3(conf.BSC_RPC),
-  "100": new Web3(conf.GNOSIS_RPC),
-  "137": new Web3(conf.POLYGON_RPC),
-}
+import { chainIdToRpc } from "./rpcs"
 
 const isContract = async (tag: Tag): Promise<boolean> => {
-  const web3 = web3s[tag.chain]
+  const web3 = new Web3(chainIdToRpc[tag.chain])
   const addressCode = await web3.eth.getCode(tag.tagAddress)
   if (addressCode === "0x") return false
   return true
@@ -23,7 +16,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   const contractTags: Tag[] = []
   for (const tag of tags) {
     // skip non rewarded stuff
-    if (![1, 56, 100, 137].includes(tag.chain)) {
+    if (!chainIdToRpc[tag.chain]) {
       console.log("Non-rewarded tag, skipping...", tag)
       continue
     }
@@ -56,34 +49,56 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   
     ${parseContractsInChain(100)}
   
-    addresses_polygon:
-  
-    ${parseContractsInChain(137)}
-  
     addresses_bnb:
   
     ${parseContractsInChain(56)}
+
+    addresses_arbitrum
+
+    ${parseContractsInChain(42161)}
+
+    addresses_optimism
+
+    ${parseContractsInChain(10)}
+
+    addresses_avalanche_c
+
+    ${parseContractsInChain(43114)}
+
+    addresses_celo
+
+    ${parseContractsInChain(42220)}
+
+    addresses_base
+
+    ${parseContractsInChain(8453)}
+
+    addresses_zksync
+
+    ${parseContractsInChain(324)}
+
+    addresses_fantom
+
+    ${parseContractsInChain(250)}
     `
   const filename = new Date().getTime()
   writeFileSync(`./${conf.FILES_DIR}/${filename}_queries.txt`, contractsTxt)
   writeFileSync(
     `./${conf.FILES_DIR}/${filename}_tags.json`,
-    JSON.stringify(tags)
+    JSON.stringify(contractTags)
   )
 
   console.log(
-    "Go to https://dune.com/queries/3078126 and paste in the query parameters in",
+    "Go to https://dune.com/queries/3454015 and paste in the query parameters in",
     `${filename}_tags.txt`
   )
 }
 
 export const tagsRoutine = async (
-  period: Period,
-  editPeriod: Period
+  period: Period
 ): Promise<void> => {
   console.log("Period:", period)
-  console.log("Edit period:", editPeriod)
-  const tags = await fetchTags(period, editPeriod)
+  const tags = await fetchTags(period)
 
   console.log("Tag count:")
 

@@ -2,6 +2,7 @@ import { BigNumber, Contract, ethers } from "ethers"
 import ERC20Abi from "../abi/ERC20.json"
 import conf from "./config"
 import { Transaction } from "./types"
+import { chainIdToRpc } from "./rpcs"
 
 const randomBetween = (min: number, max: number) =>
   Math.floor(min + Math.random() * (max - min))
@@ -19,23 +20,14 @@ const sendReward = async (r: Transaction, nonce: number, pnk: Contract) => {
   await pnk.transfer(r.recipient, r.amount, { nonce })
 }
 
-export const sendAllRewards = async (
-  rewards: Transaction[],
-  node: string
-): Promise<void> => {
-  console.info("=== Node mode:", node, "===")
-  const networkId =
-    node === "production"
-      ? Number(conf.TX_NETWORK_ID)
-      : Number(conf.TX_TEST_NETWORK_ID)
-  const providerUrl =
-    node === "production" ? conf.GNOSIS_RPC : conf.TX_TEST_PROVIDER
-  const pnkAddress = node === "production" ? conf.PNK : conf.TEST_PNK
+export const sendAllRewards = async (rewards: Transaction[]): Promise<void> => {
+  const networkId = Number(conf.TX_NETWORK_ID)
+  const providerUrl = chainIdToRpc[networkId]
 
   const provider = new ethers.providers.JsonRpcProvider(providerUrl, networkId)
   const wallet = new ethers.Wallet(conf.WALLET_PRIVATE_KEY, provider)
 
-  const pnkContract = new ethers.Contract(pnkAddress, ERC20Abi)
+  const pnkContract = new ethers.Contract(conf.PNK, ERC20Abi)
   const pnk = pnkContract.connect(wallet)
   console.info("=== About to send rewards ===")
   console.info("You are", wallet.address)
