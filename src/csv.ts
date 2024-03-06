@@ -64,6 +64,13 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
       "56": "Binance Smart Chain",
       "100": "Gnosis Chain",
       "137": "Polygon",
+      "42161": "Arbitrum",
+      "10": "Optimism",
+      "324": "zkSync",
+      "43114": "Avalanche",
+      "42220": "Celo",
+      "8453": "Base",
+      "250": "Fantom",
     }[reward.contractInfo.chain]
 
     return {

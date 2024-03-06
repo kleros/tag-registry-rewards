@@ -6,7 +6,6 @@ interface Config {
   NODE_ENV: string
   WALLET_PRIVATE_KEY: string
   PNK: string
-  TEST_PNK: string
   STIPEND: string
   MAX_REWARD: string
   TX_NETWORK_ID: string

@@ -18,19 +18,21 @@ Dates are `YYYY-MM-DD` strings e.g. `2022-05-01`. If you don't pass them, they w
 
 There are three modes, that need different arguments. They are three steps, in order:
 
-- `tags`, will get the awarded submissions and output some data to query gas used per contract.
-- `rewards`, will create the csv file of the rewards, along with the transactions.
+- `fetch`, will get the awarded submissions and output some data to query gas used per contract.
+- `generate`, will create the csv file of the rewards, along with the transactions.
 - `send`, will send the transactions.
 
 ## Fetching tags
 
 Fetching the tags is the first step, and will not send transactions. `--mode fetch` will generate a txt file with some variables to paste in a Dune query. The Dune query will return a JSON file (use network tab), deep into this file there's a `data` property that will contain an array. This array must be copied and pasted into a new JSON file under the `files` directory, and will be used within the next command to obtain the gas used, to generate the rewards.
 
+`yarn start --mode fetch`
+
 [Dune Query](https://dune.com/queries/3454015) 
 
 ## Generating rewards
 
-Generating the rewards with `--mode generate` is safe and won't send transactions. It allows to inspect the rewards, and to share the rewards to the community before committing to send them. To do so, run the script with `--mode generate --tags ${filename}.json --gas ${filename}.json`.
+Generating the rewards with `--mode generate` is safe and won't send transactions. It allows to inspect the rewards, and to share the rewards to the community before committing to send them. To do so, run the script with `--mode generate --tags ${filename}_tags.json --gas ${filename}.json`.
 
 This will create a csv file you can export to a calc sheet with every reward detail, and a JSON and csv with the final transactions that will place. This JSON will be the one that you will use to distribute the rewards.
 
@@ -38,7 +40,7 @@ Things that could go wrong:
 
 - Wrong stipend
 
-Stipend is kept in the `.env`. That way, you only need to check them if there are any changes on how the rewards are distributed. At the current time, the stipend is 25_000 PNK, the amount awarded per registry and chain.
+Stipend is kept in the `.env`. That way, you only need to check them if there are any changes on how the rewards are distributed. At the current time, the stipend is 100_000 PNK, the maximum amount awarded per registry.
 
 ## Distributing rewards
 
