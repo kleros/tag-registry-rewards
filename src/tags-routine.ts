@@ -2,15 +2,7 @@ import { writeFileSync } from "fs"
 import { fetchTags } from "./tag-fetch"
 import { Period, Tag } from "./types"
 import conf from "./config"
-import Web3 from "web3"
 import { chainIdToRpc } from "./rpcs"
-
-const isContract = async (tag: Tag): Promise<boolean> => {
-  const web3 = new Web3(chainIdToRpc[tag.chain])
-  const addressCode = await web3.eth.getCode(tag.tagAddress)
-  if (addressCode === "0x") return false
-  return true
-}
 
 const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   const contractTags: Tag[] = []
@@ -20,14 +12,9 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
       console.log("Non-rewarded tag, skipping...", tag)
       continue
     }
-
-    console.info("Chain", tag.chain, "Checking if contract:", tag.tagAddress)
-    const contractCheck = await isContract(tag)
-    if (contractCheck) {
-      contractTags.push(tag)
-    } else {
-      console.info("Tag wasn't a contract")
-    }
+    // we used to check whether if the address pointed to a contract
+    // or not. but we don't need to do that, since we're already trusting the registry
+    contractTags.push(tag)
   }
 
   // Filter by chain, turn into a set to remove dupes, parse into Dune friendly format
