@@ -17,8 +17,10 @@ const fetchTagsByAddressInRegistry = async (
       {
         litems(where: {
           registry: "${registry}",
-          key0_starts_with_nocase: "${caipAddress}",
-          key0_ends_with_nocase: "${caipAddress}"
+          metadata_: {
+            key0_starts_with_nocase: "${caipAddress}",
+            key0_ends_with_nocase: "${caipAddress}"
+          }
         }) {
           status
           requests {
@@ -60,19 +62,21 @@ const fetchTagsBatchByRegistry = async (
   	      latestRequestResolutionTime_lt: ${end}
         }, first: 1000) {
           id
-          props {
-            value
-          }
           latestRequestResolutionTime
           requests {
             requester
             requestType
             resolutionTime
           }
-          key0
-          key1
-          key2
-          key3
+          metadata {
+            props {
+              value
+            }
+            key0
+            key1
+            key2
+            key3
+          }
         }
       }
     `,
@@ -98,7 +102,7 @@ const itemToTag = async (
   registryType: "addressTags" | "tokens" | "domains"
 ): Promise<Tag> => {
   // in all 3 registries, key0 is caip address
-  const { chain, address } = parseCaip(item.key0)
+  const { chain, address } = parseCaip(item?.metadata?.key0)
   const tag: Tag = {
     id: item.id,
     registry: registryType,
@@ -114,7 +118,7 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
   const nonTokenDomains: Item[] = []
   for (const item of domainItems) {
     const tagMatches = await fetchTagsByAddressInRegistry(
-      item.key0,
+      item?.metadata?.key0,
       "tokens",
       conf.XDAI_GTCR_SUBGRAPH_URL
     )

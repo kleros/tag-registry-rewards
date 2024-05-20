@@ -5,16 +5,18 @@ export interface Prop {
 }
 
 export interface Item {
-  props: Prop[]
   id: string
   latestRequestResolutionTime: string
   registryAddress?: string
   status?: string
   requests: ItemRequest[]
-  key0: string
-  key1: string
-  key2: string
-  key3: string
+  metadata : { 
+    props: Prop[]
+    key0: string
+    key1: string
+    key2: string
+    key3: string
+  } | null
 }
 
 export interface ItemRequest {
