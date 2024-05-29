@@ -35,6 +35,9 @@ const fetchTagsByAddressInRegistry = async (
   const response = await fetch(subgraphEndpoint, {
     method: "POST",
     body: JSON.stringify(subgraphQuery),
+    headers: {
+      'Content-Type': 'application/json',
+    },
   })
 
   const { data } = await response.json()
@@ -84,6 +87,9 @@ const fetchTagsBatchByRegistry = async (
   const response = await fetch(subgraphEndpoint, {
     method: "POST",
     body: JSON.stringify(subgraphQuery),
+    headers: {
+      'Content-Type': 'application/json',
+    },
   })
 
   const { data } = await response.json()
