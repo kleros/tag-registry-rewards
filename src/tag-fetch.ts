@@ -32,11 +32,12 @@ const fetchTagsByAddressInRegistry = async (
       }
     `,
   }
+
   const response = await fetch(subgraphEndpoint, {
     method: "POST",
     body: JSON.stringify(subgraphQuery),
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     },
   })
 
@@ -88,7 +89,7 @@ const fetchTagsBatchByRegistry = async (
     method: "POST",
     body: JSON.stringify(subgraphQuery),
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     },
   })
 
@@ -138,9 +139,7 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
   return nonTokenDomains
 }
 
-export const fetchTags = async (
-  period: Period
-): Promise<Tag[]> => {
+export const fetchTags = async (period: Period): Promise<Tag[]> => {
   const addressTagsItems: Item[] = await fetchTagsBatchByRegistry(
     period,
     conf.XDAI_GTCR_SUBGRAPH_URL,

@@ -2,7 +2,10 @@ import { writeFileSync } from "fs"
 import { fetchTags } from "./tag-fetch"
 import { Period, Tag } from "./types"
 import conf from "./config"
-import { chainIdToRpc } from "./rpcs"
+import { chainIdToRpc } from "./utils/rpcs"
+import { isTaggedOnEtherscan } from "./is-tagged-on-etherscan"
+import { chainIdToEtherscanBasedBrowser } from "./utils/chainIdToEtherscanBasedBrowser"
+import { sleep } from "./transaction-sender"
 
 const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   const contractTags: Tag[] = []
@@ -10,6 +13,21 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     // skip non rewarded stuff
     if (!chainIdToRpc[tag.chain]) {
       console.log("Non-rewarded tag, skipping...", tag)
+      continue
+    }
+
+    const isAlreadyTagged = await isTaggedOnEtherscan(
+      chainIdToEtherscanBasedBrowser[tag.chain],
+      tag.tagAddress
+    )
+
+    await sleep(2)
+
+    if (isAlreadyTagged) {
+      console.log(
+        "this tag is already tagged on an etherscan based browser, non-rewarded tag, skipping...",
+        tag
+      )
       continue
     }
     // we used to check whether if the address pointed to a contract
@@ -28,37 +46,14 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     ].join(", ")
 
   const contractsTxt = `
-    addresses_mainnet:
-  
-    ${parseContractsInChain(1)}
     
     addresses_gnosis:
   
     ${parseContractsInChain(100)}
-  
-    addresses_bnb:
-  
-    ${parseContractsInChain(56)}
-
-    addresses_arbitrum
-
-    ${parseContractsInChain(42161)}
-
-    addresses_optimism
-
-    ${parseContractsInChain(10)}
 
     addresses_avalanche_c
 
     ${parseContractsInChain(43114)}
-
-    addresses_celo
-
-    ${parseContractsInChain(42220)}
-
-    addresses_base
-
-    ${parseContractsInChain(8453)}
 
     addresses_zksync
 
@@ -67,6 +62,10 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     addresses_fantom
 
     ${parseContractsInChain(250)}
+
+    addresses_scroll
+
+    ${parseContractsInChain(534352)}
     `
   const filename = new Date().getTime()
   writeFileSync(`./${conf.FILES_DIR}/${filename}_queries.txt`, contractsTxt)
@@ -81,9 +80,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   )
 }
 
-export const tagsRoutine = async (
-  period: Period
-): Promise<void> => {
+export const tagsRoutine = async (period: Period): Promise<void> => {
   console.log("Period:", period)
   const tags = await fetchTags(period)
 
