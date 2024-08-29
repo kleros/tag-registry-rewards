@@ -1,6 +1,6 @@
 import fetch from "node-fetch"
 
-// For scraping Etherscan explorers to figure out if an address' "name tag" is already tagged on etherscan
+// Scraps etherscan-based explorers to figure out if an address' public name tag is already tagged on Etherscan
 export async function isTaggedOnEtherscan(
   etherscanHostname: string,
   address: string
@@ -47,7 +47,7 @@ export async function isTaggedOnEtherscan(
     // Apply the regex to the HTML
     const match = regex.exec(html)
 
-    if (match && match[1]) {
+    if (match?.[1]) {
       const elementContent = match[1].trim()
       console.log("Extracted Content:", elementContent)
       return true
