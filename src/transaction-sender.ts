@@ -2,7 +2,7 @@ import { BigNumber, Contract, ethers } from "ethers"
 import ERC20Abi from "../abi/ERC20.json"
 import conf from "./config"
 import { Transaction } from "./types"
-import { chainIdToRpc } from "./rpcs"
+import { chainIdToRpc } from "./utils/rpcs"
 
 const randomBetween = (min: number, max: number) =>
   Math.floor(min + Math.random() * (max - min))
