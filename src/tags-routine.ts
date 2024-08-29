@@ -3,8 +3,8 @@ import { fetchTags } from "./tag-fetch"
 import { Period, Tag } from "./types"
 import conf from "./config"
 import { chainIdToRpc } from "./utils/rpcs"
-import { isTaggedOnEtherscan } from "./is-tagged-on-etherscan"
-import { chainIdToEtherscanBasedBrowser } from "./utils/chainIdToEtherscanBasedBrowser"
+import { isTaggedOnEtherscan } from "./utils/is-tagged-on-etherscan"
+import { chainIdToEtherscanBasedBrowser } from "./utils/chain-id-to-etherscan-based-browser"
 import { sleep } from "./transaction-sender"
 
 const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
@@ -75,7 +75,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   )
 
   console.log(
-    "Go to https://dune.com/queries/3454015 and paste in the query parameters in",
+    "Go to https://dune.com/queries/4024703 and paste in the query parameters in",
     `${filename}_tags.txt`
   )
 }

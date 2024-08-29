@@ -36,7 +36,7 @@ export async function isTaggedOnEtherscan(
       regexPattern = "anyone\\)'>(.*?)<\\/span>"
     } else {
       regexPattern =
-        '<span\\s+class="hash-tag\\s+text-truncate\\s+lh-sm\\s+my-n1">(.*?)<\\/span>'
+        "<span\\s+class=(\"|')hash-tag\\s+text-truncate\\s+lh-sm\\s+my-n1(\"|')>(.*?)<\\/span>"
     }
 
     console.log(`Hostname: ${etherscanHostname} and regex is ${regexPattern}`)
