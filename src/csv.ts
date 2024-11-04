@@ -71,6 +71,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
       "42220": "Celo",
       "8453": "Base",
       "250": "Fantom",
+      "534352": "Scroll",
     }[reward.contractInfo.chain]
 
     return {
