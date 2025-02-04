@@ -1,6 +1,7 @@
 import { Item, Period, Tag } from "./types"
 import fetch from "node-fetch"
 import conf from "./config"
+import { sleep } from "./transaction-sender"
 
 const fetchTagsByAddressInRegistry = async (
   caipAddress: string,
@@ -32,11 +33,12 @@ const fetchTagsByAddressInRegistry = async (
       }
     `,
   }
+
   const response = await fetch(subgraphEndpoint, {
     method: "POST",
     body: JSON.stringify(subgraphQuery),
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     },
   })
 
@@ -88,7 +90,7 @@ const fetchTagsBatchByRegistry = async (
     method: "POST",
     body: JSON.stringify(subgraphQuery),
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     },
   })
 
@@ -128,6 +130,7 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
       "tokens",
       conf.XDAI_GTCR_SUBGRAPH_URL
     )
+    await sleep(2)
     // check that every single one is out. this means the filter above must be length 0.
     // ow it's a token
     const includedItems = tagMatches.filter((item) =>
@@ -138,9 +141,7 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
   return nonTokenDomains
 }
 
-export const fetchTags = async (
-  period: Period
-): Promise<Tag[]> => {
+export const fetchTags = async (period: Period): Promise<Tag[]> => {
   const addressTagsItems: Item[] = await fetchTagsBatchByRegistry(
     period,
     conf.XDAI_GTCR_SUBGRAPH_URL,
