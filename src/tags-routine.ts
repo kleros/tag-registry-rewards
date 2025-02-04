@@ -66,7 +66,16 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     addresses_scroll
 
     ${parseContractsInChain(534352)}
+
+    addresses_celo
+
+    ${parseContractsInChain(42220)}
+
+    addresses_base
+
+    ${parseContractsInChain(8453)}
     `
+
   const filename = new Date().getTime()
   writeFileSync(`./${conf.FILES_DIR}/${filename}_queries.txt`, contractsTxt)
   writeFileSync(
@@ -75,7 +84,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   )
 
   console.log(
-    "Go to https://dune.com/queries/4024703 and paste in the query parameters in",
+    "Go to https://dune.com/queries/4666923 and paste in the query parameters in",
     `${filename}_tags.txt`
   )
 }

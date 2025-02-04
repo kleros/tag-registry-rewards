@@ -14,8 +14,8 @@ export const chainIdToRpc: { [chainId: string]: string } = {
   // "10": "https://op-pokt.nodies.app",
   "324": "https://1rpc.io/zksync2-era",
   "43114": "https://avalanche.drpc.org",
-  // "42220": "https://forno.celo.org",
-  // "8453": "https://base.meowrpc.com",
+  "42220": "https://forno.celo.org",
+  "8453": "https://base.meowrpc.com",
   "250": "https://1rpc.io/ftm",
   "534352": "https://rpc.scroll.io",
 }
