@@ -2,22 +2,23 @@ import { writeFileSync } from "fs"
 import { fetchTags } from "./tag-fetch"
 import { Period, Tag } from "./types"
 import conf from "./config"
-import { chainIdToRpc } from "./utils/rpcs"
 import { isTaggedOnEtherscan } from "./utils/is-tagged-on-etherscan"
-import { chainIdToEtherscanBasedBrowser } from "./utils/chain-id-to-etherscan-based-browser"
 import { sleep } from "./transaction-sender"
+import { chains } from "./utils/chains"
 
 const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   const contractTags: Tag[] = []
   for (const tag of tags) {
     // skip non rewarded stuff
-    if (!chainIdToRpc[tag.chain]) {
+    const rewardedChain = chains.find(c => c.id === String(tag.chain))
+
+    if (!rewardedChain) {
       console.log("Non-rewarded tag, skipping...", tag)
       continue
     }
 
     const isAlreadyTagged = await isTaggedOnEtherscan(
-      chainIdToEtherscanBasedBrowser[tag.chain],
+      rewardedChain.explorer,
       tag.tagAddress
     )
 
