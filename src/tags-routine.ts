@@ -6,6 +6,7 @@ import { isTaggedOnEtherscan } from "./utils/is-tagged-on-etherscan"
 import { sleep } from "./transaction-sender"
 import { chains } from "./utils/chains"
 import { getSolanaTokenHolderCount } from './utils/fetch-solana-token-holder-count'
+import { ethers } from "ethers";
 
 const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   const contractTags: Tag[] = []
@@ -42,6 +43,44 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
       if (holderCount < solanaTokenHolderThreshold) {
         console.log(`Token holder count below threshold (${solanaTokenHolderThreshold}), skipping...`, tag)
         continue
+      }
+    }
+
+    if (tag.isTokenOnAddressTags) {
+      console.log("Token submitted inside Address Tag Registry, Non-rewarded tag, skipping...", tag)
+      continue
+    }
+
+    // checks if an NFT was submitted on the Address Tag registry, and excludes it from rewards.
+    if (tag.registry === "addressTags") {
+      const chainCfg = chains.find(c => String(c.id) === String(tag.chain) && c.namespaceId === 'eip155')
+      if (!chainCfg) {
+        console.log("No RPC found for chain, skipping...", tag)
+        continue
+      }
+    
+      try {
+        const provider = new ethers.providers.JsonRpcProvider(chainCfg.rpc)
+        const bytecode = await provider.getCode(tag.tagAddress)
+    
+        if (!bytecode || bytecode === "0x") {
+          console.log("Not a contract, skipping...", tag)
+          continue
+        }
+    
+        const contract = new ethers.Contract(
+          tag.tagAddress,
+          ["function supportsInterface(bytes4 interfaceID) external view returns (bool)"],
+          provider
+        )
+    
+        const isERC721 = await contract.supportsInterface("0x80ac58cd")
+        if (isERC721) {
+          console.log("ERC721 (NFT) detected via supportsInterface, skipping...", tag)
+          continue
+        }
+      } catch (e) {
+        console.log("Not an NFT, tag is valid, proceeding with tag:", tag)
       }
     }
     // we used to check whether if the address pointed to a contract

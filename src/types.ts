@@ -37,6 +37,8 @@ export interface Tag {
   submitter: string
   tagAddress: string
   latestRequestResolutionTime: number
+  isTokenOnAddressTags: boolean
+  addressTagName: string
 }
 
 export interface GasDune {
