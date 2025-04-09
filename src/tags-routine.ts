@@ -5,9 +5,13 @@ import conf from "./config"
 import { isTaggedOnEtherscan } from "./utils/is-tagged-on-etherscan"
 import { sleep } from "./transaction-sender"
 import { chains } from "./utils/chains"
+import { getSolanaTokenHolderCount } from './utils/fetch-solana-token-holder-count'
 
 const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   const contractTags: Tag[] = []
+  const solanaChain = chains.find(c => c.namespaceId === 'solana')
+  const solanaTokenHolderThreshold = 5000
+
   for (const tag of tags) {
     // skip non rewarded stuff
     const rewardedChain = chains.find(c => c.id === String(tag.chain))
@@ -30,6 +34,15 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
         tag
       )
       continue
+    }
+  
+    if (tag.registry === 'tokens' && String(tag.chain).toLowerCase() === String(solanaChain!.id).toLowerCase()) {
+      const holderCount = await getSolanaTokenHolderCount(tag.tagAddress.toLowerCase(), conf.HELIUS_SOLANA_API_KEY)
+  
+      if (holderCount < solanaTokenHolderThreshold) {
+        console.log(`Token holder count below threshold (${solanaTokenHolderThreshold}), skipping...`, tag)
+        continue
+      }
     }
     // we used to check whether if the address pointed to a contract
     // or not. but we don't need to do that, since we're already trusting the registry
