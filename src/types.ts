@@ -33,7 +33,7 @@ export type Period = {
 export interface Tag {
   id: string
   registry: "addressTags" | "tokens" | "domains"
-  chain: number
+  chain: string
   submitter: string
   tagAddress: string
   latestRequestResolutionTime: number
@@ -42,7 +42,7 @@ export interface Tag {
 }
 
 export interface GasDune {
-  chain: number
+  chain: string
   address: string
   tx_count: number
 }

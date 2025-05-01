@@ -53,7 +53,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
 
     // checks if an NFT was submitted on the Address Tag registry, and excludes it from rewards.
     if (tag.registry === "addressTags") {
-      const chainCfg = chains.find(c => String(c.id) === String(tag.chain) && c.namespaceId === 'eip155')
+      const chainCfg = chains.find(c => String(c.id).toLowerCase() === String(tag.chain).toLowerCase() && c.namespaceId === 'eip155')
       if (!chainCfg) {
         console.log("No RPC found for chain, skipping...", tag)
         continue
@@ -89,44 +89,50 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   }
 
   // Filter by chain, turn into a set to remove dupes, parse into Dune friendly format
-  const parseContractsInChain = (chain: number): string =>
+  const parseContractsInChain = (chain) =>
     [
       ...new Set(
         contractTags
-          .filter((tag) => tag.chain === chain)
+          .filter((tag) => tag.chain.toLowerCase() === chain.toLowerCase())
           .map((tag) => tag.tagAddress)
-      ),
-    ].join(", ")
+      )
+    ].map((addr) =>
+      chain === "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" ? `'${addr}'` : addr
+    ).join(", ");
 
   const contractsTxt = `
     
     addresses_gnosis:
   
-    ${parseContractsInChain(100)}
+    ${parseContractsInChain("100")}
 
     addresses_avalanche_c
 
-    ${parseContractsInChain(43114)}
+    ${parseContractsInChain("43114")}
 
     addresses_zksync
 
-    ${parseContractsInChain(324)}
+    ${parseContractsInChain("324")}
 
     addresses_fantom
 
-    ${parseContractsInChain(250)}
+    ${parseContractsInChain("250")}
 
     addresses_scroll
 
-    ${parseContractsInChain(534352)}
+    ${parseContractsInChain("534352")}
 
     addresses_celo
 
-    ${parseContractsInChain(42220)}
+    ${parseContractsInChain("42220")}
 
     addresses_base
 
-    ${parseContractsInChain(8453)}
+    ${parseContractsInChain("8453")}
+
+    addresses_solana
+
+    ${parseContractsInChain("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")}
     `
 
   const filename = new Date().getTime()
@@ -137,7 +143,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   )
 
   console.log(
-    "Go to https://dune.com/queries/4666923 and paste in the query parameters in",
+    "Go to https://dune.com/queries/5068623 and paste in the query parameters in",
     `${filename}_tags.txt`
   )
 }

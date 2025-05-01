@@ -100,9 +100,9 @@ const fetchTagsBatchByRegistry = async (
   return tags
 }
 
-const parseCaip = (caip: string): { address: string; chain: number } => {
+const parseCaip = (caip: string): { address: string; chain: string } => {
   const [, chain, address] = caip.split(":")
-  return { chain: Number(chain), address }
+  return { chain, address }
 }
 
 const itemToTag = async (

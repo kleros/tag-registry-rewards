@@ -60,7 +60,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
     }[reward.contractInfo.registry]
 
     const prettierChainName = {
-      "1": "Ethereum Mainnet",
+      "1": "Solana",
       "56": "Binance Smart Chain",
       "100": "Gnosis Chain",
       "137": "Polygon",
