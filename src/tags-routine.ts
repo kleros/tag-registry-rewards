@@ -2,22 +2,28 @@ import { writeFileSync } from "fs"
 import { fetchTags } from "./tag-fetch"
 import { Period, Tag } from "./types"
 import conf from "./config"
-import { chainIdToRpc } from "./utils/rpcs"
 import { isTaggedOnEtherscan } from "./utils/is-tagged-on-etherscan"
-import { chainIdToEtherscanBasedBrowser } from "./utils/chain-id-to-etherscan-based-browser"
 import { sleep } from "./transaction-sender"
+import { chains } from "./utils/chains"
+import { getSolanaTokenHolderCount } from './utils/fetch-solana-token-holder-count'
+import { ethers } from "ethers";
 
 const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   const contractTags: Tag[] = []
+  const solanaChain = chains.find(c => c.namespaceId === 'solana')
+  const solanaTokenHolderThreshold = 5000
+
   for (const tag of tags) {
     // skip non rewarded stuff
-    if (!chainIdToRpc[tag.chain]) {
+    const rewardedChain = chains.find(c => c.id === String(tag.chain))
+
+    if (!rewardedChain) {
       console.log("Non-rewarded tag, skipping...", tag)
       continue
     }
 
     const isAlreadyTagged = await isTaggedOnEtherscan(
-      chainIdToEtherscanBasedBrowser[tag.chain],
+      rewardedChain.explorer,
       tag.tagAddress
     )
 
@@ -30,50 +36,103 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
       )
       continue
     }
+  
+    if (tag.registry === 'tokens' && String(tag.chain).toLowerCase() === String(solanaChain!.id).toLowerCase()) {
+      const holderCount = await getSolanaTokenHolderCount(tag.tagAddress.toLowerCase(), conf.HELIUS_SOLANA_API_KEY)
+  
+      if (holderCount < solanaTokenHolderThreshold) {
+        console.log(`Token holder count below threshold (${solanaTokenHolderThreshold}), skipping...`, tag)
+        continue
+      }
+    }
+
+    if (tag.isTokenOnAddressTags) {
+      console.log("Token submitted inside Address Tag Registry, Non-rewarded tag, skipping...", tag)
+      continue
+    }
+
+    // checks if an NFT was submitted on the Address Tag registry, and excludes it from rewards.
+    if (tag.registry === "addressTags") {
+      const chainCfg = chains.find(c => String(c.id).toLowerCase() === String(tag.chain).toLowerCase() && c.namespaceId === 'eip155')
+      if (!chainCfg) {
+        console.log("No RPC found for chain, skipping...", tag)
+        continue
+      }
+    
+      try {
+        const provider = new ethers.providers.JsonRpcProvider(chainCfg.rpc)
+        const bytecode = await provider.getCode(tag.tagAddress)
+    
+        if (!bytecode || bytecode === "0x") {
+          console.log("Not a contract, skipping...", tag)
+          continue
+        }
+    
+        const contract = new ethers.Contract(
+          tag.tagAddress,
+          ["function supportsInterface(bytes4 interfaceID) external view returns (bool)"],
+          provider
+        )
+    
+        const isERC721 = await contract.supportsInterface("0x80ac58cd")
+        if (isERC721) {
+          console.log("ERC721 (NFT) detected via supportsInterface, skipping...", tag)
+          continue
+        }
+      } catch (e) {
+        console.log("Not an NFT, tag is valid, proceeding with tag:", tag)
+      }
+    }
     // we used to check whether if the address pointed to a contract
     // or not. but we don't need to do that, since we're already trusting the registry
     contractTags.push(tag)
   }
 
   // Filter by chain, turn into a set to remove dupes, parse into Dune friendly format
-  const parseContractsInChain = (chain: number): string =>
+  const parseContractsInChain = (chain) =>
     [
       ...new Set(
         contractTags
-          .filter((tag) => tag.chain === chain)
+          .filter((tag) => tag.chain.toLowerCase() === chain.toLowerCase())
           .map((tag) => tag.tagAddress)
-      ),
-    ].join(", ")
+      )
+    ].map((addr) =>
+      chain === "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" ? `'${addr}'` : addr
+    ).join(", ");
 
   const contractsTxt = `
     
     addresses_gnosis:
   
-    ${parseContractsInChain(100)}
+    ${parseContractsInChain("100")}
 
     addresses_avalanche_c
 
-    ${parseContractsInChain(43114)}
+    ${parseContractsInChain("43114")}
 
     addresses_zksync
 
-    ${parseContractsInChain(324)}
+    ${parseContractsInChain("324")}
 
     addresses_fantom
 
-    ${parseContractsInChain(250)}
+    ${parseContractsInChain("250")}
 
     addresses_scroll
 
-    ${parseContractsInChain(534352)}
+    ${parseContractsInChain("534352")}
 
     addresses_celo
 
-    ${parseContractsInChain(42220)}
+    ${parseContractsInChain("42220")}
 
     addresses_base
 
-    ${parseContractsInChain(8453)}
+    ${parseContractsInChain("8453")}
+
+    addresses_solana
+
+    ${parseContractsInChain("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")}
     `
 
   const filename = new Date().getTime()
@@ -84,7 +143,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   )
 
   console.log(
-    "Go to https://dune.com/queries/4666923 and paste in the query parameters in",
+    "Go to https://dune.com/queries/5068623 and paste in the query parameters in",
     `${filename}_tags.txt`
   )
 }

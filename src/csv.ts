@@ -48,7 +48,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
     header: rewardsHeader,
   })
   const rows = rewards.map((reward) => {
-    const { submitter, txCount, latestRequestResolutionTime, tagAddress } =
+    const { submitter, txCount, latestRequestResolutionTime, tagAddress, addressTagName } =
       reward.contractInfo
 
     const humanAmount = humanizeAmount(reward.amount)
@@ -60,7 +60,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
     }[reward.contractInfo.registry]
 
     const prettierChainName = {
-      "1": "Ethereum Mainnet",
+      "1": "Solana",
       "56": "Binance Smart Chain",
       "100": "Gnosis Chain",
       "137": "Polygon",
@@ -81,6 +81,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
         latestRequestResolutionTime * 1000
       ).toISOString(),
       tagAddress: tagAddress,
+      addressTagName: addressTagName,
       registry: prettierRegistryName,
       chain: prettierChainName,
       amount: humanAmount,

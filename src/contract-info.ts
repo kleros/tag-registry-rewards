@@ -8,8 +8,8 @@ export const generateContractInfos = (
   const contractInfos: ContractInfo[] = tags.map((tag) => {
     const matchGas = gasDunes.find(
       (gasDune) =>
-        gasDune.address === tag.tagAddress.toLocaleLowerCase() &&
-        gasDune.chain === tag.chain
+        gasDune.address.toLowerCase() === tag.tagAddress.toLocaleLowerCase().replace(/^0x/i, '') &&
+        String(gasDune.chain).toLowerCase() === String(tag.chain).toLowerCase()
     )
     if (!matchGas) {
       // a valid contract might not have had any tx! in this case, txCount is zero.

@@ -10,6 +10,7 @@ interface Config {
   MAX_REWARD: string
   TX_NETWORK_ID: string
   FILES_DIR: string
+  HELIUS_SOLANA_API_KEY: string
 }
 
 const getSanitizedConfig = (config: unknown): Config => {

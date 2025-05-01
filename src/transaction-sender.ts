@@ -2,7 +2,7 @@ import { BigNumber, Contract, ethers } from "ethers"
 import ERC20Abi from "../abi/ERC20.json"
 import conf from "./config"
 import { Transaction } from "./types"
-import { chainIdToRpc } from "./utils/rpcs"
+import { chains } from "./utils/chains"
 
 const randomBetween = (min: number, max: number) =>
   Math.floor(min + Math.random() * (max - min))
@@ -22,7 +22,7 @@ const sendReward = async (r: Transaction, nonce: number, pnk: Contract) => {
 
 export const sendAllRewards = async (rewards: Transaction[]): Promise<void> => {
   const networkId = Number(conf.TX_NETWORK_ID)
-  const providerUrl = chainIdToRpc[networkId]
+  const providerUrl = chains.find(c => Number(c.id) === networkId)?.rpc
 
   const provider = new ethers.providers.JsonRpcProvider(providerUrl, networkId)
   const wallet = new ethers.Wallet(conf.WALLET_PRIVATE_KEY, provider)

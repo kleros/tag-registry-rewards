@@ -100,9 +100,9 @@ const fetchTagsBatchByRegistry = async (
   return tags
 }
 
-const parseCaip = (caip: string): { address: string; chain: number } => {
+const parseCaip = (caip: string): { address: string; chain: string } => {
   const [, chain, address] = caip.split(":")
-  return { chain: Number(chain), address }
+  return { chain, address }
 }
 
 const itemToTag = async (
@@ -118,6 +118,8 @@ const itemToTag = async (
     latestRequestResolutionTime: Number(item.latestRequestResolutionTime),
     submitter: item.requests[0].requester,
     tagAddress: address,
+    isTokenOnAddressTags: registryType === "addressTags" && /\btoken\b\s*$/i.test(item?.metadata?.key1 || "") ? true : false,
+    addressTagName: registryType === "addressTags" ? item?.metadata?.key1?.toLowerCase() : ""
   }
   return tag
 }
