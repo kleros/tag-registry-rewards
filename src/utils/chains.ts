@@ -43,14 +43,14 @@ export const chains = [
     explorer: 'basescan.org',
     rpc: 'https://base.meowrpc.com'
   },
-  {
-    id: '250',
-    namespaceId: 'eip155',
-    name: 'Fantom Opera',
-    label: 'FTM',
-    explorer: 'ftmscan.com',
-    rpc: 'https://1rpc.io/ftm'
-  },
+  // {
+  //   id: '250',
+  //   namespaceId: 'eip155',
+  //   name: 'Fantom Opera',
+  //   label: 'FTM',
+  //   explorer: 'ftmscan.com',
+  //   rpc: 'https://1rpc.io/ftm'
+  // },
   {
     id: '534352',
     namespaceId: 'eip155',
@@ -66,7 +66,7 @@ export const chains = [
     label: 'SOL',
     explorer: 'solscan.io',
     rpc: 'https://api.mainnet-beta.solana.com'
-  }
+  },
   // {
   //   id: '1',
   //   namespaceId: 'eip155',
@@ -91,20 +91,20 @@ export const chains = [
   //   explorer: 'bscscan.com',
   //   rpc: 'https://bsc-dataseed1.binance.org'
   // },
-  // {
-  //   id: '42161',
-  //   namespaceId: 'eip155',
-  //   name: 'Arbitrum One',
-  //   label: 'ARB',
-  //   explorer: 'arbiscan.io',
-  //   rpc: 'https://arbitrum.llamarpc.com'
-  // },
-  // {
-  //   id: '10',
-  //   namespaceId: 'eip155',
-  //   name: 'Optimism',
-  //   label: 'OP',
-  //   explorer: 'optimistic.etherscan.io',
-  //   rpc: 'https://op-pokt.nodies.app'
-  // }
+  {
+    id: '42161',
+    namespaceId: 'eip155',
+    name: 'Arbitrum One',
+    label: 'ARB',
+    explorer: 'arbiscan.io',
+    rpc: 'https://arbitrum.llamarpc.com'
+  },
+  {
+    id: '10',
+    namespaceId: 'eip155',
+    name: 'Optimism',
+    label: 'OP',
+    explorer: 'optimistic.etherscan.io',
+    rpc: 'https://op-pokt.nodies.app'
+  }
 ]

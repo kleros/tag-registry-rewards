@@ -114,10 +114,6 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
 
     ${parseContractsInChain("324")}
 
-    addresses_fantom
-
-    ${parseContractsInChain("250")}
-
     addresses_scroll
 
     ${parseContractsInChain("534352")}
@@ -133,6 +129,14 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     addresses_solana
 
     ${parseContractsInChain("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")}
+
+    addresses_optimism
+
+    ${parseContractsInChain("10")}
+
+    addresses_arbitrum
+
+    ${parseContractsInChain("42161")}
     `
 
   const filename = new Date().getTime()
