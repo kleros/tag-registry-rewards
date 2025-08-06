@@ -53,34 +53,40 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
 
     // checks if an NFT was submitted on the Address Tag registry, and excludes it from rewards.
     if (tag.registry === "addressTags") {
-      const chainCfg = chains.find(c => String(c.id).toLowerCase() === String(tag.chain).toLowerCase() && c.namespaceId === 'eip155')
-      if (!chainCfg) {
-        console.log("No RPC found for chain, skipping...", tag)
-        continue
+      const chainCfg = chains.find(c => String(c.id).toLowerCase() === String(tag.chain).toLowerCase())
+      
+      // For Solana chains, skip the contract validation since all addresses are valid
+      if (chainCfg && chainCfg.namespaceId === 'solana') {
+        console.log("Solana address tag, proceeding without contract validation...", tag)
       }
-    
-      try {
-        const provider = new ethers.providers.JsonRpcProvider(chainCfg.rpc)
-        const bytecode = await provider.getCode(tag.tagAddress)
-    
-        if (!bytecode || bytecode === "0x") {
-          console.log("Not a contract, skipping...", tag)
-          continue
+      // For EIP155 chains, perform contract validation
+      else if (chainCfg && chainCfg.namespaceId === 'eip155') {
+        try {
+          const provider = new ethers.providers.JsonRpcProvider(chainCfg.rpc)
+          const bytecode = await provider.getCode(tag.tagAddress)
+      
+          if (!bytecode || bytecode === "0x") {
+            console.log("Not a contract, skipping...", tag)
+            continue
+          }
+      
+          const contract = new ethers.Contract(
+            tag.tagAddress,
+            ["function supportsInterface(bytes4 interfaceID) external view returns (bool)"],
+            provider
+          )
+      
+          const isERC721 = await contract.supportsInterface("0x80ac58cd")
+          if (isERC721) {
+            console.log("ERC721 (NFT) detected via supportsInterface, skipping...", tag)
+            continue
+          }
+        } catch (e) {
+          console.log("Not an NFT, tag is valid, proceeding with tag:", tag)
         }
-    
-        const contract = new ethers.Contract(
-          tag.tagAddress,
-          ["function supportsInterface(bytes4 interfaceID) external view returns (bool)"],
-          provider
-        )
-    
-        const isERC721 = await contract.supportsInterface("0x80ac58cd")
-        if (isERC721) {
-          console.log("ERC721 (NFT) detected via supportsInterface, skipping...", tag)
-          continue
-        }
-      } catch (e) {
-        console.log("Not an NFT, tag is valid, proceeding with tag:", tag)
+      } else {
+        console.log("No chain config found, skipping...", tag)
+        continue
       }
     }
     // we used to check whether if the address pointed to a contract
