@@ -100,7 +100,9 @@ const fetchTagsBatchByRegistry = async (
   return tags
 }
 
-const parseCaip = (caip: string): { address: string; chain: string } => {
+const parseCaip = (caip?: string): { address: string; chain: string } => {
+  if (!caip || !caip.includes(":"))
+    throw new Error(`Invalid CAIP string received: "${caip}"`)
   const [, chain, address] = caip.split(":")
   return { chain, address }
 }
@@ -108,20 +110,27 @@ const parseCaip = (caip: string): { address: string; chain: string } => {
 const itemToTag = async (
   item: Item,
   registryType: "addressTags" | "tokens" | "domains"
-): Promise<Tag> => {
-  // in all 3 registries, key0 is caip address
-  const { chain, address } = parseCaip(item?.metadata?.key0)
-  const tag: Tag = {
+): Promise<Tag | null> => {
+  const caip = item?.metadata?.key0
+  if (!caip) {
+    console.warn(`Skipping item ${item.id} – missing metadata.key0`)
+    return null
+  }
+
+  const { chain, address } = parseCaip(caip)
+  return {
     id: item.id,
     registry: registryType,
     chain,
     latestRequestResolutionTime: Number(item.latestRequestResolutionTime),
     submitter: item.requests[0].requester,
     tagAddress: address,
-    isTokenOnAddressTags: registryType === "addressTags" && /\btoken\b\s*$/i.test(item?.metadata?.key1 || "") ? true : false,
-    addressTagName: registryType === "addressTags" ? item?.metadata?.key1?.toLowerCase() : ""
+    isTokenOnAddressTags:
+      registryType === "addressTags" &&
+      /\btoken\b\s*$/i.test(item?.metadata?.key1 || ""),
+    addressTagName:
+      registryType === "addressTags" ? item?.metadata?.key1?.toLowerCase() : "",
   }
-  return tag
 }
 
 const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
@@ -183,6 +192,7 @@ export const fetchTags = async (period: Period): Promise<Tag[]> => {
       // hack to filter out auxiliary address
       .filter(
         (tag) =>
+          tag !== null &&
           tag.submitter !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6" &&
           tag.submitter !== "0xd0e76cfaa8af741f3a8b107eca76d393f734dace" &&
           tag.submitter !== "0x6f8e399b94e117d9e44311306c4c756369682720" &&
