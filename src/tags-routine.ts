@@ -153,7 +153,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   )
 
   console.log(
-    "Go to https://dune.com/queries/5068623 and paste in the query parameters in",
+    "Go to https://dune.com/queries/5586118 and paste in the query parameters in",
     `${filename}_tags.txt`
   )
 }
