@@ -10,13 +10,11 @@ export interface Item {
   registryAddress?: string
   status?: string
   requests: ItemRequest[]
-  metadata : { 
-    props: Prop[]
-    key0: string
-    key1: string
-    key2: string
-    key3: string
-  } | null
+  props: Prop[]
+  key0: string
+  key1: string
+  key2: string
+  key3: string
 }
 
 export interface ItemRequest {
