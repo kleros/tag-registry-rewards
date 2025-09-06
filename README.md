@@ -40,7 +40,7 @@ Things that could go wrong:
 
 - Wrong stipend
 
-Stipend is kept in the `.env`. That way, you only need to check them if there are any changes on how the rewards are distributed. At the current time, the stipend is 100_000 PNK, the maximum amount awarded per registry.
+Stipend is kept in the `.env`. That way, you only need to check them if there are any changes on how the rewards are distributed. At the current time, the stipend is 93_000 PNK, the maximum amount awarded per registry.
 
 ## Distributing rewards
 

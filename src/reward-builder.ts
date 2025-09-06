@@ -9,12 +9,14 @@ const normalizer = 1_000_000 // used to turn weights onto bignumbers
 const contractInfosToRewards = (
   contractInfos: ContractInfo[],
   stipend: BigNumber,
-  maxReward: BigNumber
+  maxReward: BigNumber,
+  registryName?: string
 ): Reward[] => {
   // base case
   if (contractInfos.length === 0) return []
+  const registryLabel = registryName ? ` (${registryName} registry)` : ""
   console.log(
-    "pending recursion... stipend remaining",
+    `pending recursion... ${contractInfos.length} submissions${registryLabel}, stipend remaining:`,
     formatEther(stipend.toString())
   )
   const counter = { itemCount: 0, txCount: 0 }
@@ -23,16 +25,17 @@ const contractInfosToRewards = (
     counter.txCount += ci.txCount
   }
 
-  if (counter.txCount === 0) throw new Error("No tx")
   const rewards = contractInfos.map((ci) => {
-    const unitaryStipend = stipend.div(BigNumber.from(2))
+    const unitaryStipend = counter.txCount === 0 ? stipend : stipend.div(BigNumber.from(2))
     const unitaryReward = unitaryStipend.div(BigNumber.from(counter.itemCount))
-    const txStipend = stipend.div(BigNumber.from(2))
-    const txReward = txStipend
-      .mul(BigNumber.from(ci.txCount))
-      .mul(BigNumber.from(normalizer))
-      .div(BigNumber.from(counter.txCount))
-      .div(BigNumber.from(normalizer))
+    const txStipend = counter.txCount === 0 ? BigNumber.from(0) : stipend.div(BigNumber.from(2))
+    const txReward = counter.txCount === 0 
+      ? BigNumber.from(0)
+      : txStipend
+          .mul(BigNumber.from(ci.txCount))
+          .mul(BigNumber.from(normalizer))
+          .div(BigNumber.from(counter.txCount))
+          .div(BigNumber.from(normalizer))
 
     const totalReward = unitaryReward.add(txReward)
     const reward: Reward = {
@@ -82,17 +85,20 @@ export const buildRewards = async (
   const tagRewards = contractInfosToRewards(
     contractInfos.filter((ci) => ci.registry === "addressTags"),
     stipend,
-    maxReward
+    maxReward,
+    "addressTags"
   )
   const tokensRewards = contractInfosToRewards(
     contractInfos.filter((ci) => ci.registry === "tokens"),
     stipend,
-    maxReward
+    maxReward,
+    "tokens"
   )
   const domainsRewards = contractInfosToRewards(
     contractInfos.filter((ci) => ci.registry === "domains"),
     stipend,
-    maxReward
+    maxReward,
+    "domains"
   )
   const rewards = [...tagRewards, ...tokensRewards, ...domainsRewards]
   let sum = BigNumber.from(0)
