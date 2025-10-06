@@ -28,7 +28,7 @@ Fetching the tags is the first step, and will not send transactions. `--mode fet
 
 `yarn start --mode fetch`
 
-[Dune Query](https://dune.com/queries/5586118) 
+[Dune Query](https://dune.com/queries/5890718) 
 
 ## Generating rewards
 

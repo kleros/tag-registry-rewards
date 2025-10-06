@@ -51,10 +51,10 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
       continue
     }
 
-    // checks if an NFT was submitted on the Address Tag registry, and excludes it from rewards.
+    // checks if an NFT, token, or minimal proxy was submitted on the Address Tag registry, and excludes it from rewards.
     if (tag.registry === "addressTags") {
       const chainCfg = chains.find(c => String(c.id).toLowerCase() === String(tag.chain).toLowerCase())
-      
+
       // For Solana chains, skip the contract validation since all addresses are valid
       if (chainCfg && chainCfg.namespaceId === 'solana') {
         console.log("Solana address tag, proceeding without contract validation...", tag)
@@ -64,25 +64,44 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
         try {
           const provider = new ethers.providers.JsonRpcProvider(chainCfg.rpc)
           const bytecode = await provider.getCode(tag.tagAddress)
-      
+
           if (!bytecode || bytecode === "0x") {
             console.log("Not a contract, skipping...", tag)
             continue
           }
-      
+
+          // Check for EIP-1167 minimal proxy pattern
+          const bytecodeNormalized = bytecode.toLowerCase().replace(/^0x/, '')
+          if (bytecodeNormalized.length === 90) {
+            const m = /^363d3d373d3d3d363d73([a-f0-9]{40})5af43d82803e903d91602b57fd5bf3$/.exec(bytecodeNormalized)
+            if (m) {
+              const implementation = ethers.utils.getAddress(m[1])
+              const implCode = await provider.getCode(implementation)
+              const implementationHasCode = implCode && implCode !== "0x"
+
+              if (implementationHasCode) {
+                console.log("EIP-1167 minimal proxy detected; implementation:", implementation, "skipping...", tag)
+                continue
+              } else {
+                console.log("EIP-1167-like pattern but implementation has no code; treating as false positive, proceeding...", tag)
+              }
+            }
+          }
+
+          // Check for ERC-721 via supportsInterface
           const contract = new ethers.Contract(
             tag.tagAddress,
             ["function supportsInterface(bytes4 interfaceID) external view returns (bool)"],
             provider
           )
-      
+
           const isERC721 = await contract.supportsInterface("0x80ac58cd")
           if (isERC721) {
-            console.log("ERC721 (NFT) detected via supportsInterface, skipping...", tag)
+            console.log("ERC-721 (NFT) detected via supportsInterface, skipping...", tag)
             continue
           }
         } catch (e) {
-          console.log("Not an NFT, tag is valid, proceeding with tag:", tag)
+          console.log("Not an NFT/token/proxy, tag is valid, proceeding with tag:", tag)
         }
       } else {
         console.log("No chain config found, skipping...", tag)
@@ -107,9 +126,9 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     ).join(", ");
 
   const contractsTxt = `
-    
+
     addresses_gnosis:
-  
+
     ${parseContractsInChain("100")}
 
     addresses_avalanche_c
@@ -143,6 +162,10 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     addresses_arbitrum
 
     ${parseContractsInChain("42161")}
+
+    addresses_ethereum
+
+    ${parseContractsInChain("1")}
     `
 
   const filename = new Date().getTime()
@@ -153,7 +176,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   )
 
   console.log(
-    "Go to https://dune.com/queries/5586118 and paste in the query parameters in",
+    "Go to https://dune.com/queries/5890718 and paste in the query parameters in",
     `${filename}_tags.txt`
   )
 }

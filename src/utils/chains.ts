@@ -67,14 +67,14 @@ export const chains = [
     explorer: 'solscan.io',
     rpc: 'https://api.mainnet-beta.solana.com'
   },
-  // {
-  //   id: '1',
-  //   namespaceId: 'eip155',
-  //   name: 'Ethereum Mainnet',
-  //   label: 'ETH',
-  //   explorer: 'etherscan.io',
-  //   rpc: 'https://eth.llamarpc.com'
-  // },
+  {
+    id: '1',
+    namespaceId: 'eip155',
+    name: 'Ethereum Mainnet',
+    label: 'ETH',
+    explorer: 'etherscan.io',
+    rpc: 'https://eth.llamarpc.com'
+  },
   // {
   //   id: '137',
   //   namespaceId: 'eip155',
