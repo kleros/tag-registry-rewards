@@ -16,12 +16,9 @@ const fetchTagsByAddressInRegistry = async (
   const subgraphQuery = {
     query: `
       {
-        litems(where: {
-          registry: "${registry}",
-          metadata_: {
-            key0_starts_with_nocase: "${caipAddress}",
-            key0_ends_with_nocase: "${caipAddress}"
-          }
+        litems:LItem(where: {
+          registry_id: { _eq: "${registry}"},
+            key0: {_eq: "${caipAddress}"},
         }) {
           status
           requests {
@@ -43,6 +40,7 @@ const fetchTagsByAddressInRegistry = async (
   })
 
   const { data } = await response.json()
+
   const items: Item[] = data.litems
 
   return items
@@ -60,12 +58,11 @@ const fetchTagsBatchByRegistry = async (
   const subgraphQuery = {
     query: `
       {
-        litems(where: {
-          registryAddress: "${registry}",
-          status_in: [Registered, ClearingRequested],
-          latestRequestResolutionTime_gte: ${start},
-  	      latestRequestResolutionTime_lt: ${end}
-        }, first: 1000) {
+      litems:LItem(where: {
+          registryAddress: {_eq:"${registry}"},
+          status: {_in: ["Registered", "ClearingRequested"]},
+          latestRequestResolutionTime: {_gte: ${start}, _lt: ${end}},
+        }, limit: 1000) {
           id
           latestRequestResolutionTime
           requests {
@@ -73,15 +70,13 @@ const fetchTagsBatchByRegistry = async (
             requestType
             resolutionTime
           }
-          metadata {
-            props {
-              value
-            }
-            key0
-            key1
-            key2
-            key3
+          props {
+            value
           }
+          key0
+          key1
+          key2
+          key3
         }
       }
     `,
@@ -95,6 +90,7 @@ const fetchTagsBatchByRegistry = async (
   })
 
   const { data } = await response.json()
+
   const tags: Item[] = data.litems
 
   return tags
@@ -111,9 +107,9 @@ const itemToTag = async (
   item: Item,
   registryType: "addressTags" | "tokens" | "domains"
 ): Promise<Tag | null> => {
-  const caip = item?.metadata?.key0
+  const caip = item?.key0
   if (!caip) {
-    console.warn(`Skipping item ${item.id} – missing metadata.key0`)
+    console.warn(`Skipping item ${item.id} – missing key0`)
     return null
   }
 
@@ -126,10 +122,9 @@ const itemToTag = async (
     submitter: item.requests[0].requester,
     tagAddress: address,
     isTokenOnAddressTags:
-      registryType === "addressTags" &&
-      /\btoken\b\s*$/i.test(item?.metadata?.key1 || ""),
+      registryType === "addressTags" && /\btoken\b\s*$/i.test(item?.key1 || ""),
     addressTagName:
-      registryType === "addressTags" ? item?.metadata?.key1?.toLowerCase() : "",
+      registryType === "addressTags" ? item?.key1?.toLowerCase() : "",
   }
 }
 
@@ -137,7 +132,7 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
   const nonTokenDomains: Item[] = []
   for (const item of domainItems) {
     const tagMatches = await fetchTagsByAddressInRegistry(
-      item?.metadata?.key0,
+      item?.key0,
       "tokens",
       conf.XDAI_GTCR_SUBGRAPH_URL
     )
