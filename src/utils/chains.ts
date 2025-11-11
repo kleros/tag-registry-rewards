@@ -106,5 +106,13 @@ export const chains = [
     label: 'OP',
     explorer: 'optimistic.etherscan.io',
     rpc: 'https://op-pokt.nodies.app'
+  },
+  {
+    id: '59144',
+    namespaceId: 'eip155',
+    name: 'Linea',
+    label: 'Linea',
+    explorer: 'lineascan.build',
+    rpc: 'https://rpc.linea.build'
   }
 ]
