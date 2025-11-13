@@ -166,6 +166,10 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     addresses_ethereum
 
     ${parseContractsInChain("1")}
+
+    addresses_linea
+
+    ${parseContractsInChain("59144")}
     `
 
   const filename = new Date().getTime()
@@ -176,7 +180,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
   )
 
   console.log(
-    "Go to https://dune.com/queries/5890718 and paste in the query parameters in",
+    "Go to https://dune.com/queries/6135548 and paste in the query parameters in",
     `${filename}_tags.txt`
   )
 }

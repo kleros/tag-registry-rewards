@@ -113,13 +113,26 @@ const itemToTag = async (
     return null
   }
 
+  // Find the LATEST registration request (most recent by resolutionTime)
+  // An item can be removed and re-registered, so we reward the latest registration submitter
+  const registrationRequests = item.requests
+    .filter(req => req.requestType === "RegistrationRequested")
+    .sort((a, b) => b.resolutionTime - a.resolutionTime)
+
+  if (registrationRequests.length === 0) {
+    console.warn(`Skipping item ${item.id} – no registration request found`)
+    return null
+  }
+
+  const latestRegistrationSubmitter = registrationRequests[0].requester
+
   const { chain, address } = parseCaip(caip)
   return {
     id: item.id,
     registry: registryType,
     chain,
     latestRequestResolutionTime: Number(item.latestRequestResolutionTime),
-    submitter: item.requests[0].requester,
+    submitter: latestRegistrationSubmitter,
     tagAddress: address,
     isTokenOnAddressTags:
       registryType === "addressTags" && /\btoken\b\s*$/i.test(item?.key1 || ""),
