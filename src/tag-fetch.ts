@@ -193,18 +193,16 @@ export const fetchTags = async (period: Period): Promise<Tag[]> => {
     nonTokenDomainsItems.map((item) => itemToTag(item, "domains"))
   )
 
-  return (
-    addressTags
-      .concat(tokens)
-      .concat(domains)
-      // hack to filter out auxiliary address
-      .filter(
-        (tag) =>
-          tag !== null &&
-          tag.submitter !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6" &&
-          tag.submitter !== "0xd0e76cfaa8af741f3a8b107eca76d393f734dace" &&
-          tag.submitter !== "0x6f8e399b94e117d9e44311306c4c756369682720" &&
-          tag.submitter !== "0xbf45d3c81f587833635b3a1907f5a26c208532e7"
+  return addressTags
+    .concat(tokens)
+    .concat(domains)
+    .filter((tag): tag is Tag => {
+      if (!tag) return false
+      return (
+        tag.submitter !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6" &&
+        tag.submitter !== "0xd0e76cfaa8af741f3a8b107eca76d393f734dace" &&
+        tag.submitter !== "0x6f8e399b94e117d9e44311306c4c756369682720" &&
+        tag.submitter !== "0xbf45d3c81f587833635b3a1907f5a26c208532e7"
       )
-  )
+    })
 }

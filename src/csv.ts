@@ -41,7 +41,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
   console.info("=== Building csv file ===")
   const filename = new Date().getTime()
   if (!existsSync(`./${conf.FILES_DIR}`)) {
-    mkdirSync(`./${conf.FILES_DIR}`)
+    mkdirSync(`./${conf.FILES_DIR}`, { recursive: true })
   }
   const csvWriter = createObjectCsvWriter({
     path: `./${conf.FILES_DIR}/${filename}.csv`,
@@ -74,6 +74,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
       "250": "Fantom",
       "534352": "Scroll",
       "59144": "Linea",
+      "4326": "MegaETH Mainnet",
     }[reward.contractInfo.chain]
 
     return {
