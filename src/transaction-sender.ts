@@ -17,7 +17,12 @@ export const humanizeAmount = (bn: BigNumber): number => {
 }
 
 const sendReward = async (r: Transaction, nonce: number, pnk: Contract) => {
-  await pnk.transfer(r.recipient, r.amount, { nonce })
+  await pnk.transfer(r.recipient, r.amount, {
+    nonce,
+    maxPriorityFeePerGas: ethers.utils.parseUnits("10", "gwei"), // High tip for validators
+    maxFeePerGas: ethers.utils.parseUnits("20", "gwei"), // High max fee
+    gasLimit: 100000 // Generous gas limit for ERC20 transfer
+  })
 }
 
 export const sendAllRewards = async (rewards: Transaction[]): Promise<void> => {

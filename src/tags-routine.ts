@@ -38,7 +38,7 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     }
   
     if (tag.registry === 'tokens' && String(tag.chain).toLowerCase() === String(solanaChain!.id).toLowerCase()) {
-      const holderCount = await getSolanaTokenHolderCount(tag.tagAddress.toLowerCase(), conf.HELIUS_SOLANA_API_KEY)
+      const holderCount = await getSolanaTokenHolderCount(tag.tagAddress, conf.HELIUS_SOLANA_API_KEY)
   
       if (holderCount < solanaTokenHolderThreshold) {
         console.log(`Token holder count below threshold (${solanaTokenHolderThreshold}), skipping...`, tag)
@@ -170,6 +170,14 @@ const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
     addresses_linea
 
     ${parseContractsInChain("59144")}
+
+    addresses_polygon
+
+    ${parseContractsInChain("137")}
+
+    addresses_megaeth
+
+    ${parseContractsInChain("4326")}
     `
 
   const filename = new Date().getTime()

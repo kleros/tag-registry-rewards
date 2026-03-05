@@ -19,25 +19,61 @@ const contractInfosToRewards = (
     `pending recursion... ${contractInfos.length} submissions${registryLabel}, stipend remaining:`,
     formatEther(stipend.toString())
   )
-  const counter = { itemCount: 0, txCount: 0 }
+  const counter = { itemCount: 0, txCount: 0, sumSqrtTxCount: 0 }
   for (const ci of contractInfos) {
     counter.itemCount++
     counter.txCount += ci.txCount
+    counter.sumSqrtTxCount += Math.sqrt(ci.txCount)
   }
 
+  const isTokenRegistry = registryName === "tokens"
+
   const rewards = contractInfos.map((ci) => {
-    const unitaryStipend = counter.txCount === 0 ? stipend : stipend.div(BigNumber.from(2))
-    const unitaryReward = unitaryStipend.div(BigNumber.from(counter.itemCount))
-    const txStipend = counter.txCount === 0 ? BigNumber.from(0) : stipend.div(BigNumber.from(2))
-    const txReward = counter.txCount === 0 
-      ? BigNumber.from(0)
-      : txStipend
+    let totalReward: BigNumber
+
+    if (isTokenRegistry) {
+      // Token Registry formula: 50% linear tx-weighted + 50% sqrt tx-weighted
+      // reward = (txCount / totalTxCount) * 0.5 * stipend + (sqrt(txCount) / sumSqrt) * 0.5 * stipend
+      if (counter.txCount === 0) {
+        // fallback: equal distribution when no transactions exist
+        totalReward = stipend.div(BigNumber.from(counter.itemCount))
+      } else {
+        const halfStipend = stipend.div(BigNumber.from(2))
+
+        // linear component: (txCount / totalTxCount) * 0.5 * stipend
+        const linearReward = halfStipend
           .mul(BigNumber.from(ci.txCount))
           .mul(BigNumber.from(normalizer))
           .div(BigNumber.from(counter.txCount))
           .div(BigNumber.from(normalizer))
 
-    const totalReward = unitaryReward.add(txReward)
+        // sqrt component: (sqrt(txCount) / sumSqrtTxCount) * 0.5 * stipend
+        const sqrtWeight = counter.sumSqrtTxCount === 0
+          ? 0
+          : Math.floor((Math.sqrt(ci.txCount) / counter.sumSqrtTxCount) * normalizer)
+        const sqrtReward = halfStipend
+          .mul(BigNumber.from(sqrtWeight))
+          .div(BigNumber.from(normalizer))
+
+        totalReward = linearReward.add(sqrtReward)
+      }
+    } else {
+      // ATR & CDN formula: 50% equal distribution + 50% linear tx-weighted
+      // reward = stipend / (2 * itemCount) + (txCount / totalTxCount) * 0.5 * stipend
+      const unitaryStipend = counter.txCount === 0 ? stipend : stipend.div(BigNumber.from(2))
+      const unitaryReward = unitaryStipend.div(BigNumber.from(counter.itemCount))
+      const txStipend = counter.txCount === 0 ? BigNumber.from(0) : stipend.div(BigNumber.from(2))
+      const txReward = counter.txCount === 0
+        ? BigNumber.from(0)
+        : txStipend
+            .mul(BigNumber.from(ci.txCount))
+            .mul(BigNumber.from(normalizer))
+            .div(BigNumber.from(counter.txCount))
+            .div(BigNumber.from(normalizer))
+
+      totalReward = unitaryReward.add(txReward)
+    }
+
     const reward: Reward = {
       id: ci.id,
       amount: totalReward,
@@ -68,7 +104,8 @@ const contractInfosToRewards = (
   const lesserRewards = contractInfosToRewards(
     lessAwardedContracts,
     newStipend,
-    maxReward
+    maxReward,
+    registryName
   )
   return [...cappedRewards, ...lesserRewards]
 }

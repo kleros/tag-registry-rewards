@@ -75,14 +75,22 @@ export const chains = [
     explorer: 'etherscan.io',
     rpc: 'https://eth.llamarpc.com'
   },
-  // {
-  //   id: '137',
-  //   namespaceId: 'eip155',
-  //   name: 'Polygon',
-  //   label: 'MATIC',
-  //   explorer: 'polygonscan.com',
-  //   rpc: 'https://polygon-rpc.com'
-  // },
+  {
+    id: '137',
+    namespaceId: 'eip155',
+    name: 'Polygon',
+    label: 'MATIC',
+    explorer: 'polygonscan.com',
+    rpc: 'https://polygon-rpc.com'
+  },
+  {
+    id: '4326',
+    namespaceId: 'eip155',
+    name: 'MegaETH',
+    label: 'megaETH',
+    explorer: 'mega.etherscan.io',
+    rpc: 'https://mainnet.megaeth.com/rpc'
+  },
   // {
   //   id: '56',
   //   namespaceId: 'eip155',

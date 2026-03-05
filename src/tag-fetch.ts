@@ -39,9 +39,25 @@ const fetchTagsByAddressInRegistry = async (
     },
   })
 
-  const { data } = await response.json()
+  const responseJson = await response.json()
 
+  if (!response.ok) {
+    console.error("GraphQL request failed:", response.status, responseJson)
+    throw new Error(`GraphQL request failed with status ${response.status}`)
+  }
+
+  if (!responseJson.data) {
+    console.error("No data in response:", responseJson)
+    throw new Error("GraphQL response missing data field")
+  }
+
+  const { data } = responseJson
   const items: Item[] = data.litems
+
+  if (!items) {
+    console.error("No litems in response data:", data)
+    throw new Error("GraphQL response missing litems field")
+  }
 
   return items
 }
@@ -89,9 +105,25 @@ const fetchTagsBatchByRegistry = async (
     },
   })
 
-  const { data } = await response.json()
+  const responseJson = await response.json()
 
+  if (!response.ok) {
+    console.error("GraphQL request failed:", response.status, responseJson)
+    throw new Error(`GraphQL request failed with status ${response.status}`)
+  }
+
+  if (!responseJson.data) {
+    console.error("No data in response:", responseJson)
+    throw new Error("GraphQL response missing data field")
+  }
+
+  const { data } = responseJson
   const tags: Item[] = data.litems
+
+  if (!tags) {
+    console.error("No litems in response data:", data)
+    throw new Error("GraphQL response missing litems field")
+  }
 
   return tags
 }

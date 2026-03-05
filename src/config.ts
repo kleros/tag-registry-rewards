@@ -11,6 +11,7 @@ interface Config {
   TX_NETWORK_ID: string
   FILES_DIR: string
   HELIUS_SOLANA_API_KEY: string
+  GNOSIS_RPC_URL?: string
 }
 
 const getSanitizedConfig = (config: unknown): Config => {
