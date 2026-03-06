@@ -1,7 +1,20 @@
 import { Tag } from "../types"
 import { executeDuneSql, getDuneApiKey } from "./dune-client"
+import conf from "../config"
 
-const SOLANA_CHUNK_SIZE = 50
+const SOLANA_TX_CHUNK_SIZE = 25
+const SOLANA_HOLDERS_CHUNK_SIZE = 50
+const SOLANA_DUNE_CONCURRENCY = 1
+
+const getSolanaTxLookbackDays = (): number | null => {
+  const raw = conf.SOLANA_TX_LOOKBACK_DAYS
+  if (!raw || raw.trim() === "" || raw.trim() === "0") return null // null = all-time
+  const days = Number(raw)
+  if (!Number.isFinite(days) || days < 1) {
+    throw new Error(`Invalid SOLANA_TX_LOOKBACK_DAYS="${raw}". Expected a positive number or empty for all-time.`)
+  }
+  return days
+}
 
 const splitChunks = <T>(items: T[], size: number): T[][] => {
   const chunks: T[][] = []
@@ -11,33 +24,70 @@ const splitChunks = <T>(items: T[], size: number): T[][] => {
   return chunks
 }
 
+const runWithConcurrency = async <T>(
+  tasks: (() => Promise<T>)[],
+  concurrency: number
+): Promise<T[]> => {
+  const results: T[] = new Array(tasks.length)
+  let nextIndex = 0
+
+  const worker = async () => {
+    while (nextIndex < tasks.length) {
+      const idx = nextIndex++
+      results[idx] = await tasks[idx]()
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, tasks.length) },
+    () => worker()
+  )
+  await Promise.all(workers)
+  return results
+}
+
 const getBatchTotalTxns = async (
   apiKey: string,
   addresses: string[]
 ): Promise<{ [address: string]: number }> => {
   if (addresses.length === 0) return {}
 
-  const result: { [address: string]: number } = {}
-  const chunks = splitChunks(addresses, SOLANA_CHUNK_SIZE)
+  const lookbackDays = getSolanaTxLookbackDays()
+  const timeFilter = lookbackDays
+    ? `AND block_date >= CURRENT_DATE - INTERVAL '${lookbackDays}' day`
+    : ""
 
-  for (let idx = 0; idx < chunks.length; idx++) {
-    const chunk = chunks[idx]
+  if (lookbackDays) {
+    console.log(`[solana-tx] Using lookback window of ${lookbackDays} days`)
+  } else {
+    console.log(`[solana-tx] Using all-time tx counts (no SOLANA_TX_LOOKBACK_DAYS set — may be slow)`)
+  }
+
+  const result: { [address: string]: number } = {}
+  const chunks = splitChunks(addresses, SOLANA_TX_CHUNK_SIZE)
+
+  console.log(
+    `[solana-tx] ${chunks.length} chunks of up to ${SOLANA_TX_CHUNK_SIZE} addresses, concurrency=${SOLANA_DUNE_CONCURRENCY}`
+  )
+
+  const tasks = chunks.map((chunk, idx) => async () => {
     console.log(
       `[solana-tx] chunk ${idx + 1}/${chunks.length} addresses=${chunk.length}`
     )
-    const valuesList = chunk.map((a) => `('${a}')`).join(",\n    ")
+    const inList = chunk.map((a) => `'${a}'`).join(", ")
     const sql = `
-WITH input(address) AS (
-  VALUES
-    ${valuesList}
-)
-SELECT aa.address, approx_distinct(aa.tx_id) AS total_txns
-FROM solana.account_activity aa
-JOIN input i ON aa.address = i.address
-WHERE aa.tx_success = true
-GROUP BY aa.address
+SELECT address, approx_distinct(tx_id) AS total_txns
+FROM solana.account_activity
+WHERE address IN (${inList})
+  AND tx_success = true
+  ${timeFilter}
+GROUP BY address
 `
-    const rows = await executeDuneSql(apiKey, sql, "solana-tx-batch")
+    return executeDuneSql(apiKey, sql, `solana-tx-${idx + 1}`)
+  })
+
+  const allRows = await runWithConcurrency(tasks, SOLANA_DUNE_CONCURRENCY)
+  for (const rows of allRows) {
     for (const row of rows) {
       result[String(row.address || "")] = Number(row.total_txns || 0)
     }
@@ -52,25 +102,24 @@ const getBatchTotalHolders = async (
   if (mintAddresses.length === 0) return {}
 
   const result: { [address: string]: number } = {}
-  const chunks = splitChunks(mintAddresses, SOLANA_CHUNK_SIZE)
+  const chunks = splitChunks(mintAddresses, SOLANA_HOLDERS_CHUNK_SIZE)
 
-  for (let idx = 0; idx < chunks.length; idx++) {
-    const chunk = chunks[idx]
+  const tasks = chunks.map((chunk, idx) => async () => {
     console.log(
       `[solana-holders] chunk ${idx + 1}/${chunks.length} mints=${chunk.length}`
     )
-    const valuesList = chunk.map((a) => `('${a}')`).join(",\n    ")
+    const inList = chunk.map((a) => `'${a}'`).join(", ")
     const sql = `
-WITH input(mint) AS (
-  VALUES
-    ${valuesList}
-)
-SELECT ta.token_mint_address, COUNT(DISTINCT ta.token_balance_owner) AS total_holders
-FROM solana_utils.token_accounts ta
-JOIN input i ON ta.token_mint_address = i.mint
-GROUP BY ta.token_mint_address
+SELECT token_mint_address, COUNT(DISTINCT token_balance_owner) AS total_holders
+FROM solana_utils.token_accounts
+WHERE token_mint_address IN (${inList})
+GROUP BY token_mint_address
 `
-    const rows = await executeDuneSql(apiKey, sql, "solana-holders-batch")
+    return executeDuneSql(apiKey, sql, `solana-holders-${idx + 1}`)
+  })
+
+  const allRows = await runWithConcurrency(tasks, SOLANA_DUNE_CONCURRENCY)
+  for (const rows of allRows) {
     for (const row of rows) {
       result[String(row.token_mint_address || "")] = Number(
         row.total_holders || 0
@@ -99,7 +148,7 @@ export const enrichSolanaTagsBatch = async (
       tags
         .filter((t) => t.registry === "tokens")
         .map((t) => t.tagAddress)
-            )
+    )
   )
 
   console.log(
@@ -114,12 +163,21 @@ export const enrichSolanaTagsBatch = async (
 
   for (const tag of tags) {
     const cacheKey = `${tag.chain}:${tag.registry}:${tag.tagAddress}`
+    let totalHolders: number | null = null
+    if (tag.registry === "tokens") {
+      const holders = holderCountMap[tag.tagAddress]
+      if (holders === undefined) {
+        console.warn(
+          `[solana-batch] No holder data returned by Dune for token mint ${tag.tagAddress} — defaulting to 0 (will be dropped by holder threshold)`
+        )
+        totalHolders = 0
+      } else {
+        totalHolders = holders
+      }
+    }
     result[cacheKey] = {
       txCount: txCountMap[tag.tagAddress] || 0,
-      totalHolders:
-        tag.registry === "tokens"
-          ? holderCountMap[tag.tagAddress] ?? 0
-          : null,
+      totalHolders,
     }
   }
 

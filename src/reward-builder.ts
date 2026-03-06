@@ -140,14 +140,9 @@ const tokenizeFormula = (
         i = j
         continue
       }
-      if (
-        !formulaIdentifierSet.has(rawIdentifier as FormulaIdentifier) &&
-        !formulaFunctionSet.has(rawIdentifier as FormulaFunction)
-      ) {
-        throw new Error(
-          `Unknown identifier "${rawIdentifier}" in formula for ${registry}. Allowed identifiers: reward_pool, total_submissions, token_tx, txns_with_contract, total_txns_with_all_contracts, sum_sqrt_total_txns_with_all_contracts. Allowed functions: sqrt(...).`
-        )
-      }
+      throw new Error(
+        `Unknown identifier "${rawIdentifier}" in formula for ${registry}. Allowed identifiers: reward_pool, total_submissions, token_tx, txns_with_contract, total_txns_with_all_contracts, sum_sqrt_total_txns_with_all_contracts. Allowed functions: sqrt(...).`
+      )
     }
 
     if (ch === "+" || ch === "-" || ch === "*" || ch === "/") {
@@ -338,6 +333,7 @@ const evalFormula = (
         stack.push(scaledSqrt(value))
         continue
       }
+      throw new Error(`Unknown function "${token.value}" in formula for ${registry}.`)
     }
 
     if (stack.length < 2) {

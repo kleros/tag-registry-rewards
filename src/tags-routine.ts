@@ -76,7 +76,7 @@ const applyFetchFilters = async (tags: Tag[]): Promise<Tag[]> => {
       )
       for (const { tag, reason } of results) {
         if (reason) {
-          console.log(`${reason}, skipping...`, tag.tagAddress)
+          console.log(`[filter] Address tag not rewardable (${reason}):`, tag.tagAddress, `| chain: ${tag.chain}`)
           excludedSet.add(tag.id)
         }
       }

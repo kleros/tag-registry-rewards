@@ -2,6 +2,8 @@ import { Item, Period, Tag } from "./types"
 import fetch from "node-fetch"
 import conf from "./config"
 
+const PAGE_SIZE = 1000
+
 const fetchTagsBatchByRegistry = async (
   period: Period,
   subgraphEndpoint: string,
@@ -11,50 +13,61 @@ const fetchTagsBatchByRegistry = async (
     Math.floor(period.start.getTime() / 1000),
     Math.floor(period.end.getTime() / 1000),
   ]
-  const subgraphQuery = {
-    query: `
-      {
-      litems:LItem(where: {
-          registryAddress: {_eq:"${registry}"},
-          status: {_in: ["Registered", "ClearingRequested"]},
-          latestRequestResolutionTime: {_gte: ${start}, _lt: ${end}},
-        }, limit: 1000) {
-          id
-          latestRequestResolutionTime
-          requests {
-            requester
-            requestType
-            resolutionTime
+
+  const allItems: Item[] = []
+  let offset = 0
+
+  while (true) {
+    const subgraphQuery = {
+      query: `
+        {
+        litems:LItem(where: {
+            registryAddress: {_eq:"${registry}"},
+            status: {_in: ["Registered", "ClearingRequested"]},
+            latestRequestResolutionTime: {_gte: ${start}, _lt: ${end}},
+          }, limit: ${PAGE_SIZE}, offset: ${offset}, order_by: {id: asc}) {
+            id
+            latestRequestResolutionTime
+            requests {
+              requester
+              requestType
+              resolutionTime
+            }
+            props {
+              value
+            }
+            key0
+            key1
+            key2
+            key3
           }
-          props {
-            value
-          }
-          key0
-          key1
-          key2
-          key3
         }
-      }
-    `,
+      `,
+    }
+    const response = await fetch(subgraphEndpoint, {
+      method: "POST",
+      body: JSON.stringify(subgraphQuery),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    })
+
+    const json = await response.json()
+    const data = json.data
+    if (!data) {
+      console.warn("[fetchTagsBatch] Unexpected subgraph response for registry:", registry, JSON.stringify(json).slice(0, 500))
+      break
+    }
+
+    const items: Item[] = data.litems || []
+    allItems.push(...items)
+
+    if (items.length < PAGE_SIZE) break
+    offset += PAGE_SIZE
+    console.log(`[fetchTagsBatch] Fetched ${allItems.length} items so far for registry ${registry}, fetching more...`)
   }
-  const response = await fetch(subgraphEndpoint, {
-    method: "POST",
-    body: JSON.stringify(subgraphQuery),
-    headers: {
-      "Content-Type": "application/json",
-    },
-  })
 
-  const json = await response.json()
-  const data = json.data
-  if (!data) {
-    console.warn("[fetchTagsBatch] Unexpected subgraph response for registry:", registry, JSON.stringify(json).slice(0, 500))
-    return []
-  }
-
-  const tags: Item[] = data.litems
-
-  return tags
+  return allItems
 }
 
 const parseCaip = (caip?: string): { address: string; chain: string } => {
@@ -112,39 +125,49 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
   if (caipAddresses.length === 0) return domainItems
 
   // Batch query: find all items in the tokens registry matching any of these key0 values
-  const subgraphQuery = {
-    query: `
-      {
-        litems:LItem(where: {
-          registry_id: { _eq: "${conf.XDAI_REGISTRY_TOKENS}"},
-          key0: {_in: ${JSON.stringify(caipAddresses)}},
-          status: {_in: ["Registered", "ClearingRequested"]},
-        }, limit: 1000) {
-          key0
-          status
+  const allTokenItems: Item[] = []
+  let offset = 0
+
+  while (true) {
+    const subgraphQuery = {
+      query: `
+        {
+          litems:LItem(where: {
+            registry_id: { _eq: "${conf.XDAI_REGISTRY_TOKENS}"},
+            key0: {_in: ${JSON.stringify(caipAddresses)}},
+            status: {_in: ["Registered", "ClearingRequested"]},
+          }, limit: ${PAGE_SIZE}, offset: ${offset}, order_by: {id: asc}) {
+            key0
+            status
+          }
         }
-      }
-    `,
-  }
+      `,
+    }
 
-  const response = await fetch(conf.XDAI_GTCR_SUBGRAPH_URL, {
-    method: "POST",
-    body: JSON.stringify(subgraphQuery),
-    headers: {
-      "Content-Type": "application/json",
-    },
-  })
+    const response = await fetch(conf.XDAI_GTCR_SUBGRAPH_URL, {
+      method: "POST",
+      body: JSON.stringify(subgraphQuery),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    })
 
-  const json = await response.json()
-  const data = json.data
-  if (!data) {
-    console.warn("[nonTokensFromDomains] Unexpected subgraph response:", JSON.stringify(json).slice(0, 500))
-    return domainItems
+    const json = await response.json()
+    const data = json.data
+    if (!data) {
+      console.warn("[nonTokensFromDomains] Unexpected subgraph response:", JSON.stringify(json).slice(0, 500))
+      return domainItems
+    }
+
+    const items: Item[] = data.litems || []
+    allTokenItems.push(...items)
+
+    if (items.length < PAGE_SIZE) break
+    offset += PAGE_SIZE
   }
-  const tokenItems: Item[] = data.litems || []
 
   // Build a set of key0 values that are active tokens
-  const tokenKey0Set = new Set(tokenItems.map((item) => item.key0))
+  const tokenKey0Set = new Set(allTokenItems.map((item) => item.key0))
 
   // A domain is kept only if its key0 is NOT in the tokens registry
   return domainItems.filter((item) => !tokenKey0Set.has(item.key0))

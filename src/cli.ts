@@ -93,12 +93,20 @@ const main = async () => {
     let { start, end } = getExpectedDates()
     start = argv.start ? parseDate(argv.start) : start
     end = argv.end ? parseDate(argv.end) : end
+    const fetchStart = new Date()
+    console.log(`Fetch started at: ${fetchStart.toISOString()}`)
     console.log(`Run directory: ${process.cwd()}`)
     console.log(`Output directory: ${resolve(process.cwd(), conf.FILES_DIR)}`)
     const manifest = await tagsRoutine({ start, end })
     console.log(`Fetch CSV output: ${manifest.fullCsvFile}`)
     console.log(`Generate tags file: ${manifest.generateTagsFile}`)
     console.log(`Generate gas file: ${manifest.generateGasFile}`)
+    const fetchEnd = new Date()
+    const elapsedMs = fetchEnd.getTime() - fetchStart.getTime()
+    const elapsedMin = Math.floor(elapsedMs / 60000)
+    const elapsedSec = Math.floor((elapsedMs % 60000) / 1000)
+    console.log(`Fetch ended at: ${fetchEnd.toISOString()}`)
+    console.log(`Total fetch time: ${elapsedMin}m ${elapsedSec}s`)
   } else if (mode === "filter-check") {
     let { start, end } = getExpectedDates()
     start = argv.start ? parseDate(argv.start) : start
