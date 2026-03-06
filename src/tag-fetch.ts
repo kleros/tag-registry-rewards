@@ -1,50 +1,6 @@
 import { Item, Period, Tag } from "./types"
 import fetch from "node-fetch"
 import conf from "./config"
-import { sleep } from "./transaction-sender"
-
-const fetchTagsByAddressInRegistry = async (
-  caipAddress: string,
-  registryType: "addressTags" | "tokens" | "domains",
-  subgraphEndpoint: string
-): Promise<Item[]> => {
-  const registry = {
-    addressTags: conf.XDAI_REGISTRY_ADDRESS_TAGS,
-    tokens: conf.XDAI_REGISTRY_TOKENS,
-    domains: conf.XDAI_REGISTRY_DOMAINS,
-  }[registryType]
-  const subgraphQuery = {
-    query: `
-      {
-        litems:LItem(where: {
-          registry_id: { _eq: "${registry}"},
-            key0: {_eq: "${caipAddress}"},
-        }) {
-          status
-          requests {
-            requestType
-            resolutionTime
-            requester
-          }
-        }
-      }
-    `,
-  }
-
-  const response = await fetch(subgraphEndpoint, {
-    method: "POST",
-    body: JSON.stringify(subgraphQuery),
-    headers: {
-      "Content-Type": "application/json",
-    },
-  })
-
-  const { data } = await response.json()
-
-  const items: Item[] = data.litems
-
-  return items
-}
 
 const fetchTagsBatchByRegistry = async (
   period: Period,
@@ -89,7 +45,12 @@ const fetchTagsBatchByRegistry = async (
     },
   })
 
-  const { data } = await response.json()
+  const json = await response.json()
+  const data = json.data
+  if (!data) {
+    console.warn("[fetchTagsBatch] Unexpected subgraph response for registry:", registry, JSON.stringify(json).slice(0, 500))
+    return []
+  }
 
   const tags: Item[] = data.litems
 
@@ -142,56 +103,69 @@ const itemToTag = async (
 }
 
 const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
-  const nonTokenDomains: Item[] = []
-  for (const item of domainItems) {
-    const tagMatches = await fetchTagsByAddressInRegistry(
-      item?.key0,
-      "tokens",
-      conf.XDAI_GTCR_SUBGRAPH_URL
-    )
-    await sleep(2)
-    // check that every single one is out. this means the filter above must be length 0.
-    // ow it's a token
-    const includedItems = tagMatches.filter((item) =>
-      ["Registered", "RemovalRequested"].includes(item.status as string)
-    )
-    if (includedItems.length === 0) nonTokenDomains.push(item)
+  if (domainItems.length === 0) return []
+
+  const caipAddresses = domainItems
+    .map((item) => item?.key0)
+    .filter((k): k is string => !!k)
+
+  if (caipAddresses.length === 0) return domainItems
+
+  // Batch query: find all items in the tokens registry matching any of these key0 values
+  const subgraphQuery = {
+    query: `
+      {
+        litems:LItem(where: {
+          registry_id: { _eq: "${conf.XDAI_REGISTRY_TOKENS}"},
+          key0: {_in: ${JSON.stringify(caipAddresses)}},
+          status: {_in: ["Registered", "ClearingRequested"]},
+        }, limit: 1000) {
+          key0
+          status
+        }
+      }
+    `,
   }
-  return nonTokenDomains
+
+  const response = await fetch(conf.XDAI_GTCR_SUBGRAPH_URL, {
+    method: "POST",
+    body: JSON.stringify(subgraphQuery),
+    headers: {
+      "Content-Type": "application/json",
+    },
+  })
+
+  const json = await response.json()
+  const data = json.data
+  if (!data) {
+    console.warn("[nonTokensFromDomains] Unexpected subgraph response:", JSON.stringify(json).slice(0, 500))
+    return domainItems
+  }
+  const tokenItems: Item[] = data.litems || []
+
+  // Build a set of key0 values that are active tokens
+  const tokenKey0Set = new Set(tokenItems.map((item) => item.key0))
+
+  // A domain is kept only if its key0 is NOT in the tokens registry
+  return domainItems.filter((item) => !tokenKey0Set.has(item.key0))
 }
 
 export const fetchTags = async (period: Period): Promise<Tag[]> => {
-  const addressTagsItems: Item[] = await fetchTagsBatchByRegistry(
-    period,
-    conf.XDAI_GTCR_SUBGRAPH_URL,
-    conf.XDAI_REGISTRY_ADDRESS_TAGS
-  )
-
-  const addressTags = await Promise.all(
-    addressTagsItems.map((item) => itemToTag(item, "addressTags"))
-  )
-
-  const tokensItems: Item[] = await fetchTagsBatchByRegistry(
-    period,
-    conf.XDAI_GTCR_SUBGRAPH_URL,
-    conf.XDAI_REGISTRY_TOKENS
-  )
-  const tokens = await Promise.all(
-    tokensItems.map((item) => itemToTag(item, "tokens"))
-  )
-
-  const domainsItems: Item[] = await fetchTagsBatchByRegistry(
-    period,
-    conf.XDAI_GTCR_SUBGRAPH_URL,
-    conf.XDAI_REGISTRY_DOMAINS
-  )
+  // Fetch all 3 registries in parallel
+  const [addressTagsItems, tokensItems, domainsItems] = await Promise.all([
+    fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_REGISTRY_ADDRESS_TAGS),
+    fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_REGISTRY_TOKENS),
+    fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_REGISTRY_DOMAINS),
+  ])
 
   console.log("Filtering Tokens away from Domains for rewards")
   const nonTokenDomainsItems = await nonTokensFromDomains(domainsItems)
 
-  const domains = await Promise.all(
-    nonTokenDomainsItems.map((item) => itemToTag(item, "domains"))
-  )
+  const [addressTags, tokens, domains] = await Promise.all([
+    Promise.all(addressTagsItems.map((item) => itemToTag(item, "addressTags"))),
+    Promise.all(tokensItems.map((item) => itemToTag(item, "tokens"))),
+    Promise.all(nonTokenDomainsItems.map((item) => itemToTag(item, "domains"))),
+  ])
 
   return addressTags
     .concat(tokens)

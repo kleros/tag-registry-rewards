@@ -1,9 +1,10 @@
 import { Reward, Transaction } from "./types"
 
 import { createObjectCsvWriter } from "csv-writer"
-import { existsSync, mkdirSync, writeFileSync } from "fs"
+import { writeFileSync } from "fs"
 import { humanizeAmount } from "./transaction-sender"
 import conf from "./config"
+import { ensureFilesDir, formatRegistry } from "./utils/output-helpers"
 
 const rewardsHeader = [
   { id: "submitter", title: "Submitter" },
@@ -40,24 +41,16 @@ const generateTransactions = (rewards: Reward[]): Transaction[] => {
 const buildCsv = async (rewards: Reward[]): Promise<void> => {
   console.info("=== Building csv file ===")
   const filename = new Date().getTime()
-  if (!existsSync(`./${conf.FILES_DIR}`)) {
-    mkdirSync(`./${conf.FILES_DIR}`, { recursive: true })
-  }
+  ensureFilesDir()
   const csvWriter = createObjectCsvWriter({
     path: `./${conf.FILES_DIR}/${filename}.csv`,
     header: rewardsHeader,
   })
   const rows = rewards.map((reward) => {
-    const { submitter, txCount, latestRequestResolutionTime, tagAddress, addressTagName } =
+    const { submitter, txCount, latestRequestResolutionTime, tagAddress } =
       reward.contractInfo
 
     const humanAmount = humanizeAmount(reward.amount)
-
-    const prettierRegistryName = {
-      addressTags: "Address Tags",
-      tokens: "Kleros Tokens",
-      domains: "Domains", // todo?
-    }[reward.contractInfo.registry]
 
     const prettierChainName = {
       "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "Solana",
@@ -83,9 +76,8 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
       latestRequestResolutionTime: new Date(
         latestRequestResolutionTime * 1000
       ).toISOString(),
-      tagAddress: tagAddress,
-      addressTagName: addressTagName,
-      registry: prettierRegistryName,
+      tagAddress,
+      registry: formatRegistry(reward.contractInfo.registry),
       chain: prettierChainName,
       amount: humanAmount,
     }

@@ -1,31 +1,20 @@
 import { createObjectCsvWriter } from "csv-writer"
-import { existsSync, mkdirSync, writeFileSync } from "fs"
+import { writeFileSync } from "fs"
 import conf from "../config"
 import { EnrichedTag, FetchManifest, GasDune, GenerateInput, Tag } from "../types"
-
-const ensureFilesDir = (): void => {
-  if (!existsSync(`./${conf.FILES_DIR}`)) {
-    mkdirSync(`./${conf.FILES_DIR}`, { recursive: true })
-  }
-}
-
-const formatRegistry = (value: Tag["registry"]): string => {
-  if (value === "addressTags") return "Address Tags"
-  if (value === "tokens") return "Kleros Tokens"
-  return "Domains"
-}
+import { ensureFilesDir, formatRegistry } from "./output-helpers"
 
 const toGasEntryAddress = (tagAddress: string, namespaceId: string): string => {
   if (namespaceId === "eip155") {
     return tagAddress.toLowerCase().replace(/^0x/i, "")
   }
-  return tagAddress.toLowerCase()
+  return tagAddress
 }
 
 const buildGasFileRows = (tags: EnrichedTag[]): GasDune[] => {
   const bag: { [key: string]: GasDune } = {}
   for (const tag of tags) {
-    const key = `${tag.chain}:${tag.tagAddress.toLowerCase()}`
+    const key = `${tag.chain}:${tag.namespaceId === "eip155" ? tag.tagAddress.toLowerCase() : tag.tagAddress}`
     if (!bag[key]) {
       bag[key] = {
         chain: tag.chain,

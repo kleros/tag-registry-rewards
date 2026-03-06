@@ -1,115 +1,112 @@
-import { ethers } from "ethers"
 import { fetchTags } from "./tag-fetch"
-import { ChainConfig, EnrichedTag, FetchManifest, Period, Tag } from "./types"
-import { chains } from "./utils/chains"
-import { enrichEvmAddressesBatch } from "./utils/evm-enrichment"
-import { enrichSolanaTag } from "./utils/solana-enrichment"
+import { EnrichedTag, FetchManifest, Period, Tag } from "./types"
+import { findChainConfig } from "./utils/chains"
+import { enrichAllEvmAddresses } from "./utils/evm-enrichment"
+import { enrichSolanaTagsBatch } from "./utils/solana-enrichment"
 import { writeFetchOutputs } from "./utils/fetch-output"
+import { isTaggedOnEtherscan } from "./utils/is-tagged-on-etherscan"
+import { getAddressTagExclusionReason } from "./utils/address-tag-validation"
 import { sleep } from "./transaction-sender"
 
 const SOLANA_HOLDER_THRESHOLD = 5000
 
-const isAddressTagValid = async (
-  tag: Tag,
-  chainCfg: ChainConfig
-): Promise<boolean> => {
-  if (chainCfg.namespaceId === "solana") {
-    return true
-  }
-
-  try {
-    const provider = new ethers.providers.JsonRpcProvider(chainCfg.rpc)
-    const bytecode = await provider.getCode(tag.tagAddress)
-
-    if (!bytecode || bytecode === "0x") {
-      console.log("Not a contract, skipping...", tag)
-      return false
-    }
-
-    const bytecodeNormalized = bytecode.toLowerCase().replace(/^0x/, "")
-    if (bytecodeNormalized.length === 90) {
-      const match = /^363d3d373d3d3d363d73([a-f0-9]{40})5af43d82803e903d91602b57fd5bf3$/.exec(
-        bytecodeNormalized
-      )
-      if (match) {
-        const implementation = ethers.utils.getAddress(match[1])
-        const implementationCode = await provider.getCode(implementation)
-        if (implementationCode && implementationCode !== "0x") {
-          console.log(
-            "EIP-1167 minimal proxy detected and skipped:",
-            tag.tagAddress
-          )
-          return false
-        }
-      }
-    }
-
-    const contract = new ethers.Contract(
-      tag.tagAddress,
-      ["function supportsInterface(bytes4 interfaceID) external view returns (bool)"],
-      provider
-    )
-    const isERC721 = await contract.supportsInterface("0x80ac58cd")
-    if (isERC721) {
-      console.log("ERC-721 detected and skipped:", tag.tagAddress)
-      return false
-    }
-  } catch (err) {
-    console.log(
-      "Address Tags extra-check failed, keeping tag by default:",
-      tag.tagAddress,
-      err
-    )
-  }
-
-  return true
-}
+const RPC_CONCURRENCY = 5
 
 const applyFetchFilters = async (tags: Tag[]): Promise<Tag[]> => {
-  const filtered: Tag[] = []
+  // Phase 1: sync filters
+  const afterFilters: Tag[] = []
 
   for (const tag of tags) {
-    const chainCfg = chains.find(
-      (c) => String(c.id).toLowerCase() === String(tag.chain).toLowerCase()
-    )
+    const chainCfg = findChainConfig(tag.chain)
     if (!chainCfg) {
       console.log("Chain not configured for rewards, skipping...", tag)
       continue
     }
 
-    if (tag.registry === "addressTags") {
-      const valid = await isAddressTagValid(tag, chainCfg)
-      if (!valid) continue
+    const isAlreadyTagged = await isTaggedOnEtherscan(
+      chainCfg.explorer,
+      tag.tagAddress
+    )
+    await sleep(2)
+
+    if (isAlreadyTagged) {
+      console.log(
+        "Already tagged on explorer, skipping...",
+        tag
+      )
+      continue
     }
 
-    filtered.push(tag)
+    if (tag.isTokenOnAddressTags) {
+      console.log("Token submitted inside Address Tag Registry, skipping...", tag)
+      continue
+    }
+
+    afterFilters.push(tag)
   }
 
-  return filtered
+  // Phase 2: parallel RPC validation for addressTags (concurrency-limited)
+  const addressTagsToValidate = afterFilters.filter(
+    (tag) => tag.registry === "addressTags"
+  )
+  const nonAddressTags = afterFilters.filter(
+    (tag) => tag.registry !== "addressTags"
+  )
+
+  // Group by chain so we don't blast a single RPC with concurrent requests
+  const byChain: { [chainId: string]: Tag[] } = {}
+  for (const tag of addressTagsToValidate) {
+    if (!byChain[tag.chain]) byChain[tag.chain] = []
+    byChain[tag.chain].push(tag)
+  }
+
+  const excludedSet = new Set<string>()
+  for (const chainId of Object.keys(byChain)) {
+    const chainTags = byChain[chainId]
+    const chainCfg = findChainConfig(chainId)
+    if (!chainCfg) continue
+
+    for (let i = 0; i < chainTags.length; i += RPC_CONCURRENCY) {
+      const chunk = chainTags.slice(i, i + RPC_CONCURRENCY)
+      const results = await Promise.all(
+        chunk.map(async (tag) => {
+          const reason = await getAddressTagExclusionReason(tag, chainCfg)
+          return { tag, reason }
+        })
+      )
+      for (const { tag, reason } of results) {
+        if (reason) {
+          console.log(`${reason}, skipping...`, tag.tagAddress)
+          excludedSet.add(tag.id)
+        }
+      }
+      if (i + RPC_CONCURRENCY < chainTags.length) {
+        await sleep(1)
+      }
+    }
+  }
+
+  const validAddressTags = addressTagsToValidate.filter(
+    (tag) => !excludedSet.has(tag.id)
+  )
+
+  return nonAddressTags.concat(validAddressTags)
 }
 
 const enrichTags = async (
   tags: Tag[]
 ): Promise<{ enrichedTags: EnrichedTag[]; droppedBySolanaHoldersCount: number }> => {
-  const evmCache: { [key: string]: { txCount: number } } = {}
   const evmBatchCacheByChain: {
     [chainId: string]: { [addressLower: string]: { txCount: number } }
-  } = {}
-  const solanaCache: {
-    [key: string]: {
-      txCount: number
-      totalHolders: number | null
-    }
   } = {}
   const output: EnrichedTag[] = []
   let droppedBySolanaHoldersCount = 0
   console.log(`Starting enrichment for ${tags.length} tags...`)
 
+  // --- EVM: single UNION ALL query across all chains ---
   const evmAddressesByChain: { [chainId: string]: string[] } = {}
   for (const tag of tags) {
-    const chainCfg = chains.find(
-      (c) => String(c.id).toLowerCase() === String(tag.chain).toLowerCase()
-    )
+    const chainCfg = findChainConfig(tag.chain)
     if (!chainCfg || chainCfg.namespaceId !== "eip155") continue
     if (!evmAddressesByChain[tag.chain]) {
       evmAddressesByChain[tag.chain] = []
@@ -117,29 +114,31 @@ const enrichTags = async (
     evmAddressesByChain[tag.chain].push(tag.tagAddress)
   }
 
-  for (const chainId of Object.keys(evmAddressesByChain)) {
-    const addresses = evmAddressesByChain[chainId]
-    try {
-      evmBatchCacheByChain[chainId] = await enrichEvmAddressesBatch(
-        chainId,
-        addresses
-      )
-      await sleep(1)
-    } catch (err) {
-      console.warn(
-        `[enrich] EVM batch lookup failed for chain=${chainId}, using txCount=0`,
-        err
-      )
-      evmBatchCacheByChain[chainId] = {}
+  try {
+    const evmResults = await enrichAllEvmAddresses(evmAddressesByChain)
+    for (const chainId of Object.keys(evmResults)) {
+      evmBatchCacheByChain[chainId] = evmResults[chainId]
     }
+  } catch (err) {
+    console.warn(
+      `[enrich] EVM batch lookup failed, using txCount=0 for all chains`,
+      err
+    )
   }
 
+  // --- Solana: batch all tags into 2 Dune queries ---
+  const solanaTags = tags.filter((tag) => {
+    const chainCfg = findChainConfig(tag.chain)
+    return chainCfg && chainCfg.namespaceId === "solana"
+  })
+  const solanaCache =
+    solanaTags.length > 0 ? await enrichSolanaTagsBatch(solanaTags) : {}
+
+  // --- Assemble enriched tags ---
   for (let index = 0; index < tags.length; index++) {
     const tag = tags[index]
     const progress = `${index + 1}/${tags.length}`
-    const chainCfg = chains.find(
-      (c) => String(c.id).toLowerCase() === String(tag.chain).toLowerCase()
-    )
+    const chainCfg = findChainConfig(tag.chain)
     if (!chainCfg) continue
     if (index === 0 || (index + 1) % 10 === 0 || index === tags.length - 1) {
       console.log(
@@ -156,22 +155,14 @@ const enrichTags = async (
     }
 
     if (chainCfg.namespaceId === "eip155") {
-      const cacheKey = `${tag.chain}:${tag.tagAddress.toLowerCase()}`
-      if (!evmCache[cacheKey]) {
-        const addressLower = tag.tagAddress.toLowerCase()
-        const chainBatch = evmBatchCacheByChain[tag.chain] || {}
-        evmCache[cacheKey] = chainBatch[addressLower] || { txCount: 0 }
-      }
-      base.txCount = evmCache[cacheKey].txCount
+      const addressLower = tag.tagAddress.toLowerCase()
+      const chainBatch = evmBatchCacheByChain[tag.chain] || {}
+      base.txCount = (chainBatch[addressLower] || { txCount: 0 }).txCount
     } else {
-      const cacheKey = `${tag.chain}:${tag.registry}:${tag.tagAddress.toLowerCase()}`
-      if (!solanaCache[cacheKey]) {
-        console.log(`[enrich ${progress}] Solana lookup start`)
-        solanaCache[cacheKey] = await enrichSolanaTag(tag)
-        await sleep(1)
-      }
-      base.txCount = solanaCache[cacheKey].txCount
-      const totalHolders = solanaCache[cacheKey].totalHolders
+      const cacheKey = `${tag.chain}:${tag.registry}:${tag.tagAddress}`
+      const cached = solanaCache[cacheKey] || { txCount: 0, totalHolders: null }
+      base.txCount = cached.txCount
+      const totalHolders = cached.totalHolders
       if (
         tag.registry === "tokens" &&
         totalHolders !== null &&

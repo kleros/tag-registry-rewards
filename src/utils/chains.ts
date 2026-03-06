@@ -1,5 +1,8 @@
 import { ChainConfig } from "../types"
 
+export const findChainConfig = (chainId: string): ChainConfig | undefined =>
+  chains.find((c) => String(c.id).toLowerCase() === String(chainId).toLowerCase())
+
 // these chains are considered rewarded by the curate incentive program,
 // if any chain becomes unrewarded by the program, make sure to comment that chain here,
 // and the script will exclude it from the rewards.
@@ -43,7 +46,7 @@ export const chains: ChainConfig[] = [
     name: 'Base Mainnet',
     label: 'Base',
     explorer: 'basescan.org',
-    rpc: 'https://base.meowrpc.com'
+    rpc: 'https://mainnet.base.org'
   },
   // {
   //   id: '250',
@@ -83,7 +86,7 @@ export const chains: ChainConfig[] = [
     name: 'Polygon',
     label: 'MATIC',
     explorer: 'polygonscan.com',
-    rpc: 'https://polygon-rpc.com'
+    rpc: 'https://polygon.drpc.org'
   },
   // {
   //   id: '56',
@@ -99,7 +102,7 @@ export const chains: ChainConfig[] = [
     name: 'Arbitrum One',
     label: 'ARB',
     explorer: 'arbiscan.io',
-    rpc: 'https://arbitrum.llamarpc.com'
+    rpc: 'https://arb1.arbitrum.io/rpc'
   },
   {
     id: '10',

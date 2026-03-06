@@ -27,7 +27,6 @@ npx tsc --noEmit
 Fill `.env` values:
 
 - `DUNE_API_KEY` (required for Solana and EVM enrichment)
-- `ETHERSCAN_API_KEY` (optional, currently unused for EVM tx count)
 - `REWARD_FORMULA_ADDRESS_TAGS` (expression formula)
 - `REWARD_FORMULA_TOKENS` (expression formula)
 - `REWARD_FORMULA_DOMAINS` (expression formula)
@@ -78,6 +77,7 @@ yarn start --mode fetch --start YYYY-MM-DD --end YYYY-MM-DD
 What it does:
 
 - fetches from Address Tags, Tokens, Domains registries
+- skips addresses already tagged on etherscan-based explorers
 - applies only the Address Tags extra contract checks:
   - skip EOA (`getCode == 0x`)
   - skip EIP-1167 proxy when implementation has code
@@ -110,6 +110,7 @@ What it does:
 - runs only exclusion checks (no Dune tx-count, no Helius/Solana holders)
 - reports exclusions from:
   - chain not configured for rewards
+  - already tagged on etherscan-based explorer
   - Address Tags: not a contract (`getCode == 0x`)
   - Address Tags: EIP-1167 proxy
   - Address Tags: ERC-721 contract

@@ -1,58 +1,10 @@
-import { ethers } from "ethers"
 import { fetchTags } from "./tag-fetch"
-import { ChainConfig, FilterCheckReason, FilterCheckReport, FilterCheckRow, Period, Tag } from "./types"
-import { chains } from "./utils/chains"
+import { FilterCheckReason, FilterCheckReport, FilterCheckRow, Period, Tag } from "./types"
+import { findChainConfig } from "./utils/chains"
+import { isTaggedOnEtherscan } from "./utils/is-tagged-on-etherscan"
+import { getAddressTagExclusionReason } from "./utils/address-tag-validation"
 import { writeFilterCheckOutput } from "./utils/filter-check-output"
-
-const getAddressTagExclusionReason = async (
-  tag: Tag,
-  chainCfg: ChainConfig
-): Promise<FilterCheckReason | null> => {
-  if (chainCfg.namespaceId === "solana") {
-    return null
-  }
-
-  try {
-    const provider = new ethers.providers.JsonRpcProvider(chainCfg.rpc)
-    const bytecode = await provider.getCode(tag.tagAddress)
-
-    if (!bytecode || bytecode === "0x") {
-      return "not a contract (getCode == 0x)"
-    }
-
-    const bytecodeNormalized = bytecode.toLowerCase().replace(/^0x/, "")
-    if (bytecodeNormalized.length === 90) {
-      const match = /^363d3d373d3d3d363d73([a-f0-9]{40})5af43d82803e903d91602b57fd5bf3$/.exec(
-        bytecodeNormalized
-      )
-      if (match) {
-        const implementation = ethers.utils.getAddress(match[1])
-        const implementationCode = await provider.getCode(implementation)
-        if (implementationCode && implementationCode !== "0x") {
-          return "eip-1167 minimal proxy"
-        }
-      }
-    }
-
-    const contract = new ethers.Contract(
-      tag.tagAddress,
-      ["function supportsInterface(bytes4 interfaceID) external view returns (bool)"],
-      provider
-    )
-    const isERC721 = await contract.supportsInterface("0x80ac58cd")
-    if (isERC721) {
-      return "erc-721 contract"
-    }
-  } catch (err) {
-    console.log(
-      "Filter-check Address Tags validation failed, not excluding by default:",
-      tag.tagAddress,
-      err
-    )
-  }
-
-  return null
-}
+import { sleep } from "./transaction-sender"
 
 const toFilterCheckRow = (tag: Tag, reason: FilterCheckReason): FilterCheckRow => ({
   id: tag.id,
@@ -75,11 +27,20 @@ export const filterCheckRoutine = async (period: Period): Promise<FilterCheckRep
     const tag = tags[index]
     const progress = `${index + 1}/${tags.length}`
 
-    const chainCfg = chains.find(
-      (chain) => String(chain.id).toLowerCase() === String(tag.chain).toLowerCase()
-    )
+    const chainCfg = findChainConfig(tag.chain)
     if (!chainCfg) {
       excludedRows.push(toFilterCheckRow(tag, "chain not configured for rewards"))
+      continue
+    }
+
+    const isAlreadyTagged = await isTaggedOnEtherscan(
+      chainCfg.explorer,
+      tag.tagAddress
+    )
+    await sleep(2)
+
+    if (isAlreadyTagged) {
+      excludedRows.push(toFilterCheckRow(tag, "already tagged on explorer"))
       continue
     }
 

@@ -11,9 +11,6 @@ interface Config {
   DUNE_HTTP_MAX_RETRIES: string
   DUNE_HTTP_RETRY_BASE_MS: string
   DUNE_STATUS_LOG_EVERY_POLLS: string
-  HELIUS_RPC_URL: string
-  ETHERSCAN_API_KEY: string
-  NODE_ENV: string
   WALLET_PRIVATE_KEY: string
   PNK: string
   STIPEND: string
@@ -27,7 +24,6 @@ interface Config {
   SOLANA_TX_DIVIDER: string
   TX_NETWORK_ID: string
   FILES_DIR: string
-  HELIUS_SOLANA_API_KEY: string
 }
 
 const getSanitizedConfig = (config: unknown): Config => {

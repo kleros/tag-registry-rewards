@@ -1,22 +1,11 @@
 import { createObjectCsvWriter } from "csv-writer"
-import { existsSync, mkdirSync } from "fs"
 import conf from "../config"
-import { FilterCheckReason, FilterCheckRow, Tag } from "../types"
-
-const ensureFilesDir = (): void => {
-  if (!existsSync(`./${conf.FILES_DIR}`)) {
-    mkdirSync(`./${conf.FILES_DIR}`, { recursive: true })
-  }
-}
-
-const formatRegistry = (value: Tag["registry"]): string => {
-  if (value === "addressTags") return "Address Tags"
-  if (value === "tokens") return "Kleros Tokens"
-  return "Domains"
-}
+import { FilterCheckReason, FilterCheckRow } from "../types"
+import { ensureFilesDir, formatRegistry } from "./output-helpers"
 
 const REASON_ORDER: FilterCheckReason[] = [
   "chain not configured for rewards",
+  "already tagged on explorer",
   "not a contract (getCode == 0x)",
   "eip-1167 minimal proxy",
   "erc-721 contract",
