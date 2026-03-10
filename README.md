@@ -1,53 +1,152 @@
-# Tag Registry Rewards
+# Tag Registry Rewards 2.0
 
-Script to distribute rewards for the Address Tags TCRs, given a period and a stipend. It will send the tokens directly to the users. So, it should send these rewards in a chain with negligible gas fees, like Gnosis Chain.
+Unified reward pipeline combining:
 
-## Installation
+- tag fetching from `tag-registry-rewards`
+- EVM enrichment logic via Dune SQL
+- Solana enrichment logic from `solana_only`
 
-`cp .env.example .env; yarn`
+The `generate` and `send` steps stay compatible with the old reward flow.
 
-Set the missing .env key variables
+## Install
 
-## Format
+```bash
+cp .env.example .env
+yarn
+```
 
-`yarn start --mode <mode> --start <start_date> --end <end_date> --tags <tags_filename> --gas <gas_filename> --rewards <rewards_filename>`
+If `yarn install` fails with OpenSSL/cipher errors on Windows, use Node 18 + npm:
 
-Most variables have defaults set in the `.env` file. You should set the stipend in the `.env` to avoid mistyping it when you run the command. Same with the new-tag-ratio.
+```bash
+nvm install 18.20.5
+nvm use 18.20.5
+npm install
+npx tsc --noEmit
+```
 
-Dates are `YYYY-MM-DD` strings e.g. `2022-05-01`. If you don't pass them, they will default to the dates that enclose the past month.
+Fill `.env` values:
 
-There are three modes, that need different arguments. They are three steps, in order:
+- `DUNE_API_KEY` (required for Solana and EVM enrichment)
+- `REWARD_FORMULA_ADDRESS_TAGS` (expression formula)
+- `REWARD_FORMULA_TOKENS` (expression formula)
+- `REWARD_FORMULA_DOMAINS` (expression formula)
+- `REWARD_REDISTRIBUTE_CAPPED_ADDRESS_TAGS` (`true` or `false`)
+- `REWARD_REDISTRIBUTE_CAPPED_TOKENS` (`true` or `false`)
+- `REWARD_REDISTRIBUTE_CAPPED_DOMAINS` (`true` or `false`)
+- `SOLANA_TX_DIVIDER` (number `>= 1`; applied in `generate` before formula evaluation)
+- wallet settings are required only for `send`
+- Optional Dune stability tuning:
+  - `DUNE_HTTP_MAX_RETRIES`
+  - `DUNE_HTTP_RETRY_BASE_MS`
+  - `DUNE_STATUS_LOG_EVERY_POLLS`
 
-- `fetch`, will get the awarded submissions and output some data to query gas used per contract.
-- `generate`, will create the csv file of the rewards, along with the transactions.
-- `send`, will send the transactions.
+Formula syntax:
 
-## Fetching tags
+- supported operators: `+`, `-`, `*`, `/`, parentheses
+- supported function: `sqrt(...)`
+- supported variables:
+  - `reward_pool`
+  - `total_submissions`
+  - `token_tx` (alias of `txns_with_contract`)
+  - `txns_with_contract`
+  - `total_txns_with_all_contracts`
+  - `sum_sqrt_total_txns_with_all_contracts`
+- default formula (same logic as before):
+  - `(reward_pool/(2*total_submissions)) + ((reward_pool*txns_with_contract)/(2*total_txns_with_all_contracts))`
+- capped reward redistribution toggle:
+  - `true`: current behavior, recursively redistributes leftover stipend until no entry is above `MAX_REWARD`
+  - `false`: one-pass cap only (`min(formula_reward, MAX_REWARD)`), no recursive redistribution
+- Solana reducer:
+  - effective `txCount` for Solana entries is `floor(txCount / SOLANA_TX_DIVIDER)` before any formula math
+  - non-Solana entries are not changed
 
-Fetching the tags is the first step, and will not send transactions. `--mode fetch` will generate a txt file with some variables to paste in a Dune query. The Dune query will return a JSON file (use network tab), deep into this file there's a `data` property that will contain an array. This array must be copied and pasted into a new JSON file under the `files` directory, and will be used within the next command to obtain the gas used, to generate the rewards.
+## Modes
 
-`yarn start --mode fetch`
+Run all commands from this folder:
 
-[Dune Query](https://dune.com/queries/6135548) 
+```bash
+yarn start --mode <fetch|filter-check|generate|send> [args]
+```
 
-## Generating rewards
+### 1) Fetch
 
-Generating the rewards with `--mode generate` is safe and won't send transactions. It allows to inspect the rewards, and to share the rewards to the community before committing to send them. To do so, run the script with `--mode generate --tags ${filename}_tags.json --gas ${filename}.json`.
+```bash
+yarn start --mode fetch --start YYYY-MM-DD --end YYYY-MM-DD
+```
 
-This will create a csv file you can export to a calc sheet with every reward detail, and a JSON and csv with the final transactions that will place. This JSON will be the one that you will use to distribute the rewards.
+What it does:
 
-Things that could go wrong:
+- fetches from Address Tags, Tokens, Domains registries
+- skips addresses already tagged on etherscan-based explorers
+- applies only the Address Tags extra contract checks:
+  - skip EOA (`getCode == 0x`)
+  - skip EIP-1167 proxy when implementation has code
+  - skip ERC-721 (`supportsInterface(0x80ac58cd)`)
+  - keep Solana Address Tags without bytecode checks
+  - skip when chain config is missing
+- enriches EVM and Solana rows:
+  - `txn count`
+  - Solana holders (tokens only)
+- filters out Solana token rows with holders `< 5000`
 
-- Wrong stipend
+Files written under `files/`:
 
-Stipend is kept in the `.env`. That way, you only need to check them if there are any changes on how the rewards are distributed. At the current time, the stipend is 93_000 PNK, the maximum amount awarded per registry.
+- `<runId>_full.csv` (audit output)
+- `<runId>_full.json` (same data as JSON)
+- `<runId>_generate_input.json` (combined input for `generate`)
+- `<runId>_generate_tags.json` (tags file, compatibility)
+- `<runId>_generate_gas.json` (tx counts file, compatibility)
+- `<runId>_fetch_manifest.json`
+- `latest_fetch_manifest.json`
 
-## Distributing rewards
+### 2) Filter-check
 
-`yarn start --mode send --rewards ${filename}.json`
+```bash
+yarn start --mode filter-check --start YYYY-MM-DD --end YYYY-MM-DD
+```
 
-You must pass a file containing the transactions with `--rewards filename.json`.
+What it does:
 
-Note, the stipend is used here to revert if the stipend is greater than the current balance. It will not affect the transactions in any way, because they have alredy been generated.
+- runs only exclusion checks (no Dune tx-count, no Helius/Solana holders)
+- reports exclusions from:
+  - chain not configured for rewards
+  - already tagged on etherscan-based explorer
+  - Address Tags: not a contract (`getCode == 0x`)
+  - Address Tags: EIP-1167 proxy
+  - Address Tags: ERC-721 contract
+- writes a standalone CSV report and does not touch fetch manifest files
 
-There are no tests.
+File written under `files/`:
+
+- `<runId>_filter_check.csv` (detail rows + summary rows with totals by reason)
+
+### 3) Generate
+
+```bash
+yarn start --mode generate
+```
+
+By default it reads `files/latest_fetch_manifest.json` and uses that run’s:
+
+- `generate_tags`
+- `generate_gas`
+
+You can still override explicitly:
+
+```bash
+yarn start --mode generate --tags <file>.json --gas <file>.json
+```
+
+Outputs:
+
+- rewards CSV
+- transaction JSON
+- transaction CSV
+
+### 4) Send
+
+```bash
+yarn start --mode send --rewards <file>.json
+```
+
+Uses the generated transactions JSON and sends transfers exactly as before.

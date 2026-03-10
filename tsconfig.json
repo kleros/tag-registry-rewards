@@ -1,9 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES6",
+    "lib": ["ES2019", "DOM"],
     "module": "CommonJS",
     "resolveJsonModule": true,
     "strictNullChecks": true,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "types": ["node"]
   }
 }

@@ -2,3 +2,5 @@ notes
 node_modules
 .env
 files
+.yarn/
+.DS_Store

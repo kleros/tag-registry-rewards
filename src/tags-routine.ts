@@ -1,212 +1,120 @@
-import { writeFileSync } from "fs"
 import { fetchTags } from "./tag-fetch"
-import { Period, Tag } from "./types"
-import conf from "./config"
-import { isTaggedOnEtherscan } from "./utils/is-tagged-on-etherscan"
-import { sleep } from "./transaction-sender"
-import { chains } from "./utils/chains"
-import { getSolanaTokenHolderCount } from './utils/fetch-solana-token-holder-count'
-import { ethers } from "ethers";
+import { EnrichedTag, FetchManifest, Period, Tag } from "./types"
+import { findChainConfig } from "./utils/chains"
+import { enrichAllEvmAddresses } from "./utils/evm-enrichment"
+import { enrichSolanaTagsBatch } from "./utils/solana-enrichment"
+import { writeFetchOutputs } from "./utils/fetch-output"
+import { applyTagFilters } from "./utils/tag-filters"
 
-const exportContractsQuery = async (tags: Tag[]): Promise<void> => {
-  const contractTags: Tag[] = []
-  const solanaChain = chains.find(c => c.namespaceId === 'solana')
-  const solanaTokenHolderThreshold = 5000
+const SOLANA_HOLDER_THRESHOLD = 5000
 
+const enrichTags = async (
+  tags: Tag[]
+): Promise<{ enrichedTags: EnrichedTag[]; droppedBySolanaHoldersCount: number }> => {
+  const evmBatchCacheByChain: {
+    [chainId: string]: { [addressLower: string]: { txCount: number } }
+  } = {}
+  const output: EnrichedTag[] = []
+  let droppedBySolanaHoldersCount = 0
+  console.log(`Starting enrichment for ${tags.length} tags...`)
+
+  // --- EVM: single UNION ALL query across all chains ---
+  const evmAddressesByChain: { [chainId: string]: string[] } = {}
   for (const tag of tags) {
-    // skip non rewarded stuff
-    const rewardedChain = chains.find(c => c.id === String(tag.chain))
-
-    if (!rewardedChain) {
-      console.log("Non-rewarded tag, skipping...", tag)
-      continue
+    const chainCfg = findChainConfig(tag.chain)
+    if (!chainCfg || chainCfg.namespaceId !== "eip155") continue
+    if (!evmAddressesByChain[tag.chain]) {
+      evmAddressesByChain[tag.chain] = []
     }
-
-    const isAlreadyTagged = await isTaggedOnEtherscan(
-      rewardedChain.explorer,
-      tag.tagAddress
-    )
-
-    await sleep(2)
-
-    if (isAlreadyTagged) {
-      console.log(
-        "this tag is already tagged on an etherscan based browser, non-rewarded tag, skipping...",
-        tag
-      )
-      continue
-    }
-  
-    if (tag.registry === 'tokens' && String(tag.chain).toLowerCase() === String(solanaChain!.id).toLowerCase()) {
-      const holderCount = await getSolanaTokenHolderCount(tag.tagAddress.toLowerCase(), conf.HELIUS_SOLANA_API_KEY)
-  
-      if (holderCount < solanaTokenHolderThreshold) {
-        console.log(`Token holder count below threshold (${solanaTokenHolderThreshold}), skipping...`, tag)
-        continue
-      }
-    }
-
-    if (tag.isTokenOnAddressTags) {
-      console.log("Token submitted inside Address Tag Registry, Non-rewarded tag, skipping...", tag)
-      continue
-    }
-
-    // checks if an NFT, token, or minimal proxy was submitted on the Address Tag registry, and excludes it from rewards.
-    if (tag.registry === "addressTags") {
-      const chainCfg = chains.find(c => String(c.id).toLowerCase() === String(tag.chain).toLowerCase())
-
-      // For Solana chains, skip the contract validation since all addresses are valid
-      if (chainCfg && chainCfg.namespaceId === 'solana') {
-        console.log("Solana address tag, proceeding without contract validation...", tag)
-      }
-      // For EIP155 chains, perform contract validation
-      else if (chainCfg && chainCfg.namespaceId === 'eip155') {
-        try {
-          const provider = new ethers.providers.JsonRpcProvider(chainCfg.rpc)
-          const bytecode = await provider.getCode(tag.tagAddress)
-
-          if (!bytecode || bytecode === "0x") {
-            console.log("Not a contract, skipping...", tag)
-            continue
-          }
-
-          // Check for EIP-1167 minimal proxy pattern
-          const bytecodeNormalized = bytecode.toLowerCase().replace(/^0x/, '')
-          if (bytecodeNormalized.length === 90) {
-            const m = /^363d3d373d3d3d363d73([a-f0-9]{40})5af43d82803e903d91602b57fd5bf3$/.exec(bytecodeNormalized)
-            if (m) {
-              const implementation = ethers.utils.getAddress(m[1])
-              const implCode = await provider.getCode(implementation)
-              const implementationHasCode = implCode && implCode !== "0x"
-
-              if (implementationHasCode) {
-                console.log("EIP-1167 minimal proxy detected; implementation:", implementation, "skipping...", tag)
-                continue
-              } else {
-                console.log("EIP-1167-like pattern but implementation has no code; treating as false positive, proceeding...", tag)
-              }
-            }
-          }
-
-          // Check for ERC-721 via supportsInterface
-          const contract = new ethers.Contract(
-            tag.tagAddress,
-            ["function supportsInterface(bytes4 interfaceID) external view returns (bool)"],
-            provider
-          )
-
-          const isERC721 = await contract.supportsInterface("0x80ac58cd")
-          if (isERC721) {
-            console.log("ERC-721 (NFT) detected via supportsInterface, skipping...", tag)
-            continue
-          }
-        } catch (e) {
-          console.log("Not an NFT/token/proxy, tag is valid, proceeding with tag:", tag)
-        }
-      } else {
-        console.log("No chain config found, skipping...", tag)
-        continue
-      }
-    }
-    // we used to check whether if the address pointed to a contract
-    // or not. but we don't need to do that, since we're already trusting the registry
-    contractTags.push(tag)
+    evmAddressesByChain[tag.chain].push(tag.tagAddress)
   }
 
-  // Filter by chain, turn into a set to remove dupes, parse into Dune friendly format
-  const parseContractsInChain = (chain) =>
-    [
-      ...new Set(
-        contractTags
-          .filter((tag) => tag.chain.toLowerCase() === chain.toLowerCase())
-          .map((tag) => tag.tagAddress)
+  try {
+    const evmResults = await enrichAllEvmAddresses(evmAddressesByChain)
+    for (const chainId of Object.keys(evmResults)) {
+      evmBatchCacheByChain[chainId] = evmResults[chainId]
+    }
+  } catch (err) {
+    console.warn(
+      `[enrich] EVM batch lookup failed, using txCount=0 for all chains`,
+      err
+    )
+  }
+
+  // --- Solana: batch all tags into 2 Dune queries ---
+  const solanaTags = tags.filter((tag) => {
+    const chainCfg = findChainConfig(tag.chain)
+    return chainCfg && chainCfg.namespaceId === "solana"
+  })
+  const solanaCache =
+    solanaTags.length > 0 ? await enrichSolanaTagsBatch(solanaTags) : {}
+
+  // --- Assemble enriched tags ---
+  for (let index = 0; index < tags.length; index++) {
+    const tag = tags[index]
+    const progress = `${index + 1}/${tags.length}`
+    const chainCfg = findChainConfig(tag.chain)
+    if (!chainCfg) continue
+    if (index === 0 || (index + 1) % 10 === 0 || index === tags.length - 1) {
+      console.log(
+        `[enrich ${progress}] registry=${tag.registry} chain=${chainCfg.id} address=${tag.tagAddress}`
       )
-    ].map((addr) =>
-      chain === "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" ? `'${addr}'` : addr
-    ).join(", ");
+    }
 
-  const contractsTxt = `
+    const chainCaip2 = `${chainCfg.namespaceId}:${chainCfg.id}`
+    const base: EnrichedTag = {
+      ...tag,
+      chainCaip2,
+      namespaceId: chainCfg.namespaceId,
+      txCount: 0,
+    }
 
-    addresses_gnosis:
+    if (chainCfg.namespaceId === "eip155") {
+      const addressLower = tag.tagAddress.toLowerCase()
+      const chainBatch = evmBatchCacheByChain[tag.chain] || {}
+      base.txCount = (chainBatch[addressLower] || { txCount: 0 }).txCount
+    } else {
+      const cacheKey = `${tag.chain}:${tag.registry}:${tag.tagAddress}`
+      const cached = solanaCache[cacheKey] || { txCount: 0, totalHolders: null }
+      base.txCount = cached.txCount
+      const totalHolders = cached.totalHolders
+      if (
+        tag.registry === "tokens" &&
+        totalHolders !== null &&
+        totalHolders < SOLANA_HOLDER_THRESHOLD
+      ) {
+        droppedBySolanaHoldersCount++
+        console.log(
+          `[enrich ${progress}] skipped=${base.tagAddress} reason=solana holders < ${SOLANA_HOLDER_THRESHOLD}`
+        )
+        continue
+      }
+    }
+    output.push(base)
+  }
 
-    ${parseContractsInChain("100")}
-
-    addresses_avalanche_c
-
-    ${parseContractsInChain("43114")}
-
-    addresses_zksync
-
-    ${parseContractsInChain("324")}
-
-    addresses_scroll
-
-    ${parseContractsInChain("534352")}
-
-    addresses_celo
-
-    ${parseContractsInChain("42220")}
-
-    addresses_base
-
-    ${parseContractsInChain("8453")}
-
-    addresses_solana
-
-    ${parseContractsInChain("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")}
-
-    addresses_optimism
-
-    ${parseContractsInChain("10")}
-
-    addresses_arbitrum
-
-    ${parseContractsInChain("42161")}
-
-    addresses_ethereum
-
-    ${parseContractsInChain("1")}
-
-    addresses_linea
-
-    ${parseContractsInChain("59144")}
-    `
-
-  const filename = new Date().getTime()
-  writeFileSync(`./${conf.FILES_DIR}/${filename}_queries.txt`, contractsTxt)
-  writeFileSync(
-    `./${conf.FILES_DIR}/${filename}_tags.json`,
-    JSON.stringify(contractTags)
-  )
-
-  console.log(
-    "Go to https://dune.com/queries/6135548 and paste in the query parameters in",
-    `${filename}_tags.txt`
-  )
+  return { enrichedTags: output, droppedBySolanaHoldersCount }
 }
 
-export const tagsRoutine = async (period: Period): Promise<void> => {
+export const tagsRoutine = async (period: Period): Promise<FetchManifest> => {
   console.log("Period:", period)
   const tags = await fetchTags(period)
+  console.log("Fetched tags:", tags.length)
 
-  console.log("Tag count:")
+  const { passed: filteredTags, excluded } = await applyTagFilters(tags)
+  for (const { tag, reason } of excluded) {
+    console.log(`[filter] Excluded (${reason}):`, tag.tagAddress, `| chain: ${tag.chain}`)
+  }
+  console.log("Tags after fetch filtering:", filteredTags.length)
 
-  const countRegistry = (name: "addressTags" | "tokens" | "domains") =>
-    tags
-      .filter((t) => t.registry === name)
-      .reduce((b, a) => {
-        if (b[a.chain] === undefined) return { [a.chain]: 1, ...b }
-        else return { ...b, [a.chain]: b[a.chain] + 1 }
-      }, {})
+  const { enrichedTags, droppedBySolanaHoldersCount } = await enrichTags(filteredTags)
+  const runId = String(new Date().getTime())
+  const manifest = await writeFetchOutputs(
+    runId,
+    enrichedTags,
+    droppedBySolanaHoldersCount
+  )
 
-  console.log("A.T.", tags.filter((t) => t.registry === "addressTags").length)
-  console.log(countRegistry("addressTags"))
-
-  console.log("Tokens", tags.filter((t) => t.registry === "tokens").length)
-  console.log(countRegistry("tokens"))
-
-  console.log("Domains", tags.filter((t) => t.registry === "domains").length)
-  console.log(countRegistry("domains"))
-
-  await exportContractsQuery(tags)
+  console.log("Fetch completed:", manifest)
+  return manifest
 }

@@ -39,6 +39,64 @@ export interface Tag {
   addressTagName: string
 }
 
+export interface ChainConfig {
+  id: string
+  namespaceId: "eip155" | "solana"
+  name: string
+  label: string
+  explorer: string
+  rpc: string
+}
+
+export interface EnrichedTag extends Tag {
+  chainCaip2: string
+  namespaceId: "eip155" | "solana"
+  txCount: number
+}
+
+export interface FetchManifest {
+  runId: string
+  generatedAt: string
+  fullCsvFile: string
+  fullJsonFile: string
+  generateInputFile?: string
+  generateTagsFile: string
+  generateGasFile: string
+  includedCount: number
+  excludedCount?: number
+  droppedBySolanaHoldersCount?: number
+}
+
+export interface GenerateInput {
+  tags: Tag[]
+  gas: GasDune[]
+}
+
+export type FilterCheckReason =
+  | "chain not configured for rewards"
+  | "already tagged on explorer"
+  | "token on address tags"
+  | "not a contract (getCode == 0x)"
+  | "eip-1167 minimal proxy"
+  | "erc-721 contract"
+
+export interface FilterCheckRow {
+  id: string
+  submitter: string
+  registry: Tag["registry"]
+  chain: string
+  tagAddress: string
+  latestRequestResolutionTime: number
+  reason: FilterCheckReason
+}
+
+export interface FilterCheckReport {
+  runId: string
+  csvFile: string
+  excludedCount: number
+  summaryByReason: Array<{ reason: FilterCheckReason; count: number }>
+}
+
 export interface GasDune {
   chain: string
   address: string

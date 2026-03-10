@@ -6,9 +6,13 @@ export const generateContractInfos = (
   gasDunes: GasDune[]
 ): ContractInfo[] => {
   const contractInfos: ContractInfo[] = tags.map((tag) => {
+    const isEvm = tag.tagAddress.startsWith("0x") || tag.tagAddress.startsWith("0X")
+    const normalizedTagAddress = isEvm
+      ? tag.tagAddress.toLowerCase().replace(/^0x/i, "")
+      : tag.tagAddress
     const matchGas = gasDunes.find(
       (gasDune) =>
-        gasDune.address.toLowerCase() === tag.tagAddress.toLocaleLowerCase().replace(/^0x/i, '') &&
+        (isEvm ? gasDune.address.toLowerCase() : gasDune.address) === normalizedTagAddress &&
         String(gasDune.chain).toLowerCase() === String(tag.chain).toLowerCase()
     )
     if (!matchGas) {

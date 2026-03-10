@@ -1,8 +1,13 @@
+import { ChainConfig } from "../types"
+
+export const findChainConfig = (chainId: string): ChainConfig | undefined =>
+  chains.find((c) => String(c.id).toLowerCase() === String(chainId).toLowerCase())
+
 // these chains are considered rewarded by the curate incentive program,
 // if any chain becomes unrewarded by the program, make sure to comment that chain here,
 // and the script will exclude it from the rewards.
 
-export const chains = [
+export const chains: ChainConfig[] = [
   {
     id: '100',
     namespaceId: 'eip155',
@@ -41,7 +46,7 @@ export const chains = [
     name: 'Base Mainnet',
     label: 'Base',
     explorer: 'basescan.org',
-    rpc: 'https://base.meowrpc.com'
+    rpc: 'https://mainnet.base.org'
   },
   // {
   //   id: '250',
@@ -75,14 +80,14 @@ export const chains = [
     explorer: 'etherscan.io',
     rpc: 'https://eth.llamarpc.com'
   },
-  // {
-  //   id: '137',
-  //   namespaceId: 'eip155',
-  //   name: 'Polygon',
-  //   label: 'MATIC',
-  //   explorer: 'polygonscan.com',
-  //   rpc: 'https://polygon-rpc.com'
-  // },
+  {
+    id: '137',
+    namespaceId: 'eip155',
+    name: 'Polygon',
+    label: 'MATIC',
+    explorer: 'polygonscan.com',
+    rpc: 'https://polygon.drpc.org'
+  },
   // {
   //   id: '56',
   //   namespaceId: 'eip155',
@@ -97,7 +102,7 @@ export const chains = [
     name: 'Arbitrum One',
     label: 'ARB',
     explorer: 'arbiscan.io',
-    rpc: 'https://arbitrum.llamarpc.com'
+    rpc: 'https://arb1.arbitrum.io/rpc'
   },
   {
     id: '10',
@@ -114,5 +119,13 @@ export const chains = [
     label: 'Linea',
     explorer: 'lineascan.build',
     rpc: 'https://rpc.linea.build'
+  },
+  {
+    id: '4326',
+    namespaceId: 'eip155',
+    name: 'MegaETH Mainnet',
+    label: 'MegaETH',
+    explorer: 'megaeth.blockscout.com',
+    rpc: 'https://mainnet.megaeth.com/rpc'
   }
 ]
