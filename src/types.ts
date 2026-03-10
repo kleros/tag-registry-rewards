@@ -75,6 +75,7 @@ export interface GenerateInput {
 export type FilterCheckReason =
   | "chain not configured for rewards"
   | "already tagged on explorer"
+  | "token on address tags"
   | "not a contract (getCode == 0x)"
   | "eip-1167 minimal proxy"
   | "erc-721 contract"

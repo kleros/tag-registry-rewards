@@ -4,94 +4,9 @@ import { findChainConfig } from "./utils/chains"
 import { enrichAllEvmAddresses } from "./utils/evm-enrichment"
 import { enrichSolanaTagsBatch } from "./utils/solana-enrichment"
 import { writeFetchOutputs } from "./utils/fetch-output"
-import { isTaggedOnEtherscan } from "./utils/is-tagged-on-etherscan"
-import { getAddressTagExclusionReason } from "./utils/address-tag-validation"
-import { sleep } from "./transaction-sender"
+import { applyTagFilters } from "./utils/tag-filters"
 
 const SOLANA_HOLDER_THRESHOLD = 5000
-
-const RPC_CONCURRENCY = 5
-
-const applyFetchFilters = async (tags: Tag[]): Promise<Tag[]> => {
-  // Phase 1: sync filters
-  const afterFilters: Tag[] = []
-
-  for (const tag of tags) {
-    const chainCfg = findChainConfig(tag.chain)
-    if (!chainCfg) {
-      console.log("Chain not configured for rewards, skipping...", tag)
-      continue
-    }
-
-    const isAlreadyTagged = await isTaggedOnEtherscan(
-      chainCfg.explorer,
-      tag.tagAddress
-    )
-    await sleep(2)
-
-    if (isAlreadyTagged) {
-      console.log(
-        "Already tagged on explorer, skipping...",
-        tag
-      )
-      continue
-    }
-
-    if (tag.isTokenOnAddressTags) {
-      console.log("Token submitted inside Address Tag Registry, skipping...", tag)
-      continue
-    }
-
-    afterFilters.push(tag)
-  }
-
-  // Phase 2: parallel RPC validation for addressTags (concurrency-limited)
-  const addressTagsToValidate = afterFilters.filter(
-    (tag) => tag.registry === "addressTags"
-  )
-  const nonAddressTags = afterFilters.filter(
-    (tag) => tag.registry !== "addressTags"
-  )
-
-  // Group by chain so we don't blast a single RPC with concurrent requests
-  const byChain: { [chainId: string]: Tag[] } = {}
-  for (const tag of addressTagsToValidate) {
-    if (!byChain[tag.chain]) byChain[tag.chain] = []
-    byChain[tag.chain].push(tag)
-  }
-
-  const excludedSet = new Set<string>()
-  for (const chainId of Object.keys(byChain)) {
-    const chainTags = byChain[chainId]
-    const chainCfg = findChainConfig(chainId)
-    if (!chainCfg) continue
-
-    for (let i = 0; i < chainTags.length; i += RPC_CONCURRENCY) {
-      const chunk = chainTags.slice(i, i + RPC_CONCURRENCY)
-      const results = await Promise.all(
-        chunk.map(async (tag) => {
-          const reason = await getAddressTagExclusionReason(tag, chainCfg)
-          return { tag, reason }
-        })
-      )
-      for (const { tag, reason } of results) {
-        if (reason) {
-          console.log(`[filter] Address tag not rewardable (${reason}):`, tag.tagAddress, `| chain: ${tag.chain}`)
-          excludedSet.add(tag.id)
-        }
-      }
-      if (i + RPC_CONCURRENCY < chainTags.length) {
-        await sleep(1)
-      }
-    }
-  }
-
-  const validAddressTags = addressTagsToValidate.filter(
-    (tag) => !excludedSet.has(tag.id)
-  )
-
-  return nonAddressTags.concat(validAddressTags)
-}
 
 const enrichTags = async (
   tags: Tag[]
@@ -186,7 +101,10 @@ export const tagsRoutine = async (period: Period): Promise<FetchManifest> => {
   const tags = await fetchTags(period)
   console.log("Fetched tags:", tags.length)
 
-  const filteredTags = await applyFetchFilters(tags)
+  const { passed: filteredTags, excluded } = await applyTagFilters(tags)
+  for (const { tag, reason } of excluded) {
+    console.log(`[filter] Excluded (${reason}):`, tag.tagAddress, `| chain: ${tag.chain}`)
+  }
   console.log("Tags after fetch filtering:", filteredTags.length)
 
   const { enrichedTags, droppedBySolanaHoldersCount } = await enrichTags(filteredTags)
