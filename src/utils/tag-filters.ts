@@ -17,7 +17,7 @@ export const applyTagFilters = async (
   const passed: Tag[] = []
   const excluded: FilterResult["excluded"] = []
 
-  // Phase 1: sync filters + optional explorer check
+  // Phase 1: sync filters + explorer check
   const afterPhase1: Tag[] = []
 
   for (const tag of tags) {
