@@ -1,10 +1,28 @@
-import { Reward, Transaction } from "./types"
+import { GenerateManifest, Reward, RewardRecord, Transaction } from "./types"
 
 import { createObjectCsvWriter } from "csv-writer"
 import { writeFileSync } from "fs"
 import { humanizeAmount } from "./transaction-sender"
 import conf from "./config"
 import { ensureFilesDir, formatRegistry } from "./utils/output-helpers"
+
+const PRETTY_CHAIN_NAME: { [chainId: string]: string } = {
+  "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "Solana",
+  "1": "Ethereum Mainnet",
+  "56": "Binance Smart Chain",
+  "100": "Gnosis Chain",
+  "137": "Polygon",
+  "42161": "Arbitrum",
+  "10": "Optimism",
+  "324": "zkSync",
+  "43114": "Avalanche",
+  "42220": "Celo",
+  "8453": "Base",
+  "250": "Fantom",
+  "534352": "Scroll",
+  "59144": "Linea",
+  "4326": "MegaETH Mainnet",
+}
 
 const rewardsHeader = [
   { id: "submitter", title: "Submitter" },
@@ -52,23 +70,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
 
     const humanAmount = humanizeAmount(reward.amount)
 
-    const prettierChainName = {
-      "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "Solana",
-      "1": "Ethereum Mainnet",
-      "56": "Binance Smart Chain",
-      "100": "Gnosis Chain",
-      "137": "Polygon",
-      "42161": "Arbitrum",
-      "10": "Optimism",
-      "324": "zkSync",
-      "43114": "Avalanche",
-      "42220": "Celo",
-      "8453": "Base",
-      "250": "Fantom",
-      "534352": "Scroll",
-      "59144": "Linea",
-      "4326": "MegaETH Mainnet",
-    }[reward.contractInfo.chain]
+    const prettierChainName = PRETTY_CHAIN_NAME[reward.contractInfo.chain]
 
     return {
       submitter,
@@ -108,6 +110,37 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
   })
 
   await csvWriterTx.writeRecords(rowsTx)
+
+  // Persist breakdown-rich reward records + a manifest so the `document` step
+  // can merge submissions with removals for the same period.
+  const rewardRecords: RewardRecord[] = rewards.map((reward) => ({
+    recipient: reward.recipient,
+    id: reward.id,
+    registry: reward.contractInfo.registry,
+    chain: reward.contractInfo.chain,
+    chainName:
+      PRETTY_CHAIN_NAME[reward.contractInfo.chain] || reward.contractInfo.chain,
+    tagAddress: reward.contractInfo.tagAddress,
+    amount: reward.amount.toString(),
+  }))
+  const rewardsFile = `${filename}_rewards.json`
+  writeFileSync(
+    `./${conf.FILES_DIR}/${rewardsFile}`,
+    JSON.stringify(rewardRecords, null, 2),
+    { encoding: "utf-8" }
+  )
+
+  const manifest: GenerateManifest = {
+    runId: String(filename),
+    generatedAt: new Date().toISOString(),
+    rewardsFile,
+    transactionsFile: `${filename}.json`,
+  }
+  writeFileSync(
+    `./${conf.FILES_DIR}/latest_generate_manifest.json`,
+    JSON.stringify(manifest, null, 2),
+    { encoding: "utf-8" }
+  )
 }
 
 export default buildCsv

@@ -82,7 +82,7 @@ yarn start --mode send --rewards <transactions-file>.json
 Run all commands from this folder:
 
 ```bash
-yarn start --mode <fetch|filter-check|generate|send> [args]
+yarn start --mode <fetch|filter-check|removals|generate|send> [args]
 ```
 
 ### 1) Fetch
@@ -141,7 +141,47 @@ File written under `files/`:
 
 - `<runId>_filter_check.csv` (detail rows + summary rows with totals by reason)
 
-### 3) Generate
+### 3) Removals + ATQ
+
+```bash
+yarn start --mode removals [--start YYYY-MM-DD] [--end YYYY-MM-DD]
+```
+
+`--start` and `--end` are optional (same default as fetch).
+
+What it does:
+
+- detects items **removed** within the period (status `Absent`, `numberOfRequests > 1`, whose latest `ClearingRequested` resolved in range) across Address Tags, Tokens, Domains
+- rewards the **remover** (the requester of the winning removal) with a flat, capped, per-registry amount:
+  - `min(REMOVAL_REWARD_POOL_<registry> / removals_in_period, REMOVAL_MAX_PER_REMOVAL_<registry>)`
+  - one-pass cap, no recursive redistribution (unlike submissions)
+  - no Dune enrichment and no tx-weighting (removals are not weighted by tx count)
+- deduplicates per registry + tagged address + chain (keeps the latest removal)
+- also **rewards ATQ** activity for the ATQ registry (`XDAI_REGISTRY_ATQ`): every ATQ registration and removal in the period pays a flat, capped, shared-pool amount:
+  - `min(REWARD_POOL_ATQ / atq_events_in_period, MAX_PER_ATQ)` (registered + removed counted together)
+  - rewards the ATQ requester (submitter for registrations, remover for removals)
+  - produces its own send file, so removals and ATQ are disbursed separately from submissions
+
+Files written under `files/`:
+
+- `<runId>_removals.csv` (detail: submitter, registry, chain, address, removed at, reward)
+- `<runId>_removals.json` (full reward data)
+- `<runId>_removals_transactions.json` (removals, aggregated per recipient — **compatible with `--mode send`**)
+- `<runId>_removals_transactions.csv`
+- `<runId>_atq.json` (full ATQ reward data)
+- `<runId>_atq_transactions.json` (ATQ, aggregated per recipient — **compatible with `--mode send`**)
+- `<runId>_atq_transactions.csv`
+- `<runId>_atq_registered.csv`, `<runId>_atq_absent.csv` (reports, now with the `Rewarded` amount filled in)
+- `<runId>_removals_manifest.json`, `latest_removals_manifest.json`
+
+Both transaction files are disbursed the same way as submissions:
+
+```bash
+yarn start --mode send --rewards <runId>_removals_transactions.json
+yarn start --mode send --rewards <runId>_atq_transactions.json
+```
+
+### 4) Generate
 
 ```bash
 yarn start --mode generate
@@ -164,10 +204,79 @@ Outputs:
 - transaction JSON
 - transaction CSV
 
-### 4) Send
+### 5) Send
 
 ```bash
 yarn start --mode send --rewards <file>.json
 ```
 
-Uses the generated transactions JSON and sends transfers exactly as before.
+Uses the generated transactions JSON and sends transfers exactly as before. Run
+it once per transactions file (submissions and removals are separate files).
+
+### 6) Document (publish to IPFS)
+
+```bash
+yarn start --mode document [--period YYYY-MM]
+yarn start --mode document --submissions <file>.json --removals <file>.json --period YYYY-MM
+```
+
+Borrowing the structure of the Kleros staking-rewards flow (but without any
+merkle tree or claim contract — rewards are disbursed directly by `send`), this
+merges the submission, removal, and ATQ rewards of a period into one structured
+JSON and publishes it so recipients can look their rewards up.
+
+What it does:
+
+- reads the latest `generate` rewards (`latest_generate_manifest.json`) and the
+  latest `removals` + ATQ rewards (`latest_removals_manifest.json`) unless
+  `--submissions` / `--removals` / `--atq` are given
+- merges them per recipient (case-insensitive) into `curate-rewards/v1`:
+  `{ period, totals, recipients: { "0x…": { total, submissions[], removals[], atq[] } } }`
+- uploads the JSON to IPFS via Filebase when `FILEBASE_TOKEN` is set
+  (→ `https://cdn.kleros.link/ipfs/<cid>`); otherwise it just writes it locally
+- upserts the period into `curate-rewards-index.json` (newest first)
+
+Outputs are written to `files/` (gitignored): `curate-rewards-<period>.json` and
+`curate-rewards-index.json`.
+
+Optional env (`.env`): `FILEBASE_TOKEN`, `IPFS_GATEWAY` (defaults to
+`https://cdn.kleros.link/ipfs`).
+
+## Public rewards page
+
+The read-only page that shows recipients their submission/removal/ATQ rewards
+lives in the **gtcr** frontend (`gtcr/public/curate-rewards.html`), served at
+`/curate-rewards.html` — the Curate analog of court's `staking-rewards.html`.
+
+This repo only produces the data. To publish a period, copy the
+`curate-rewards-index.json` (and, unless the snapshots are on IPFS, the
+`curate-rewards-<period>.json` files) from `files/` into the gtcr frontend's
+`public/data/`. The page loads `./data/curate-rewards-index.json` by default
+(override with `?index=<url>`); when an index entry has an IPFS `url` the
+snapshot is fetched from `cdn.kleros.link`, otherwise from `./data/`.
+
+## Full monthly flow
+
+Everything except the on-chain disbursement can run in one command:
+
+```bash
+yarn start --mode all --period YYYY-MM
+# = fetch -> generate -> removals -> document (in order)
+```
+
+`all` deliberately does **not** send. Review the amounts, then disburse manually:
+
+```bash
+yarn start --mode send --rewards <runId>.json                       # pay submissions
+yarn start --mode send --rewards <runId>_removals_transactions.json # pay removals
+yarn start --mode send --rewards <runId>_atq_transactions.json      # pay ATQ
+```
+
+Or run each step by hand:
+
+```bash
+yarn start --mode fetch        # submissions: tags + enrich
+yarn start --mode generate     # submissions: reward allocations
+yarn start --mode removals     # removals + ATQ rewards + reports
+yarn start --mode document --period YYYY-MM   # publish the combined record to IPFS
+```

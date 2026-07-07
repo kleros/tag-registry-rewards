@@ -10,6 +10,8 @@ import { existsSync, readFileSync } from "fs"
 import { resolve } from "path"
 import { tagsRoutine } from "./tags-routine"
 import { filterCheckRoutine } from "./filter-check-routine"
+import { removalsRoutine } from "./removals-routine"
+import { documentRoutine } from "./document-routine"
 
 const getExpectedDates = (): { start: Date; end: Date } => {
   const now = new Date()
@@ -29,15 +31,22 @@ const argv: any = yargs(hideBin(process.argv))
       $0 --mode fetch --start <start-date> --end <end-date>
     Filter-check exclusions:
       $0 --mode filter-check --start <start-date> --end <end-date>
+    Detect removals + ATQ reports:
+      $0 --mode removals --start <start-date> --end <end-date>
     Generate rewards file:
       $0 --mode generate --tags \${filename}.json --gas \${filename}.json
       $0 --mode generate # uses files/latest_fetch_manifest.json
+    Document rewards to IPFS:
+      $0 --mode document --period YYYY-MM
+      $0 --mode document # merges latest generate + removals outputs
+    Run the full compute + publish (everything except send):
+      $0 --mode all --period YYYY-MM
     Send rewards:
       $0 --mode send --rewards \${filename}.json`
   )
   .option("m", {
     description:
-      "The mode of the execution. Steps: 'fetch', 'filter-check', 'generate', and 'send'",
+      "The mode of the execution. Steps: 'fetch', 'filter-check', 'removals', 'generate', 'document', 'all', and 'send'",
     alias: "mode",
   })
   .option("s", {
@@ -62,6 +71,18 @@ const argv: any = yargs(hideBin(process.argv))
   .option("r", {
     description: "The name of the rewards file",
     alias: "rewards",
+  })
+  .option("period", {
+    description: "Period label (YYYY-MM) for the document mode",
+  })
+  .option("submissions", {
+    description: "Submission rewards JSON file for the document mode",
+  })
+  .option("removals", {
+    description: "Removals rewards JSON file for the document mode",
+  })
+  .option("atq", {
+    description: "ATQ rewards JSON file for the document mode",
   }).argv
 
 const parseDate = (s: string): Date => {
@@ -80,11 +101,62 @@ const getLatestManifest = (): FetchManifest => {
   return JSON.parse(readFileSync(filename).toString()) as FetchManifest
 }
 
+const toPeriodLabel = (d: Date): string =>
+  `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`
+
+// Resolve the reward period from CLI flags. `--period YYYY-MM` derives the whole
+// month window; explicit `--start`/`--end` win; otherwise defaults to last month.
+// The label is always derived from the resolved `start`, so it stays normalized
+// (zero-padded) and can never disagree with the actual window.
+const resolvePeriod = (): { start: Date; end: Date; label: string } => {
+  let { start, end } = getExpectedDates()
+  if (argv.period && !argv.start && !argv.end) {
+    const [y, m] = String(argv.period)
+      .split("-")
+      .map((n: string) => Number(n))
+    if (!Number.isInteger(y) || !Number.isInteger(m) || m < 1 || m > 12) {
+      throw new Error(`Invalid --period "${argv.period}". Expected YYYY-MM.`)
+    }
+    start = new Date(Date.UTC(y, m - 1, 1))
+    end = new Date(Date.UTC(y, m, 1))
+  } else {
+    start = argv.start ? parseDate(argv.start) : start
+    end = argv.end ? parseDate(argv.end) : end
+  }
+  return { start, end, label: toPeriodLabel(start) }
+}
+
+// Build submission rewards from the given tags/gas files, or the latest fetch
+// manifest when omitted. Shared by `generate` and `all`.
+const runGenerate = async (
+  tagsFilename?: string,
+  gasFilename?: string
+): Promise<void> => {
+  const stipend = BigNumber.from(conf.STIPEND)
+  const maxReward = BigNumber.from(conf.MAX_REWARD)
+
+  if (!tagsFilename || !gasFilename) {
+    const manifest = getLatestManifest()
+    tagsFilename = manifest.generateTagsFile
+    gasFilename = manifest.generateGasFile
+    console.log(`Using latest manifest run ${manifest.runId}`)
+  }
+
+  const tags: Tag[] = JSON.parse(
+    readFileSync(`./${conf.FILES_DIR}/${tagsFilename}`).toString()
+  )
+  const gasDunes: GasDune[] = JSON.parse(
+    readFileSync(`./${conf.FILES_DIR}/${gasFilename}`).toString()
+  )
+  const rewards = await buildRewards(stipend, maxReward, tags, gasDunes)
+  await buildCsv(rewards)
+}
+
 const main = async () => {
   const mode = argv.mode as string | undefined
   if (mode === undefined) {
     throw new Error(
-      "You must choose a mode, 'fetch' | 'filter-check' | 'generate' | 'send'"
+      "You must choose a mode, 'fetch' | 'filter-check' | 'removals' | 'generate' | 'document' | 'all' | 'send'"
     )
   }
   if (mode === "fetch") {
@@ -116,28 +188,66 @@ const main = async () => {
     const report = await filterCheckRoutine({ start, end })
     console.log(`Filter-check CSV output: ${report.csvFile}`)
     console.log(`Filter-check excluded total: ${report.excludedCount}`)
+  } else if (mode === "removals") {
+    // detect removals (items removed within the period) and reward the removers,
+    // plus emit the ATQ registered/removed informational reports. The transactions
+    // file it writes is compatible with `--mode send`.
+    let { start, end } = getExpectedDates()
+    start = argv.start ? parseDate(argv.start) : start
+    end = argv.end ? parseDate(argv.end) : end
+    console.log(`Run directory: ${process.cwd()}`)
+    console.log(`Output directory: ${resolve(process.cwd(), conf.FILES_DIR)}`)
+    const manifest = await removalsRoutine({ start, end })
+    console.log(`Removals CSV output: ${manifest.removalsCsvFile}`)
+    console.log(`Removals transactions file: ${manifest.transactionsFile}`)
+    console.log(`ATQ transactions file: ${manifest.atqTransactionsFile}`)
+    console.log(`ATQ registered CSV: ${manifest.atqRegisteredCsvFile}`)
+    console.log(`ATQ removed CSV: ${manifest.atqAbsentCsvFile}`)
+  } else if (mode === "document") {
+    // merge submission + removal rewards for a period into one structured JSON,
+    // upload it to IPFS, and update the index the public page reads.
+    const { start, end, label: periodLabel } = resolvePeriod()
+    const entry = await documentRoutine({
+      period: { start, end },
+      periodLabel,
+      submissionsFile: argv.submissions,
+      removalsFile: argv.removals,
+      atqFile: argv.atq,
+    })
+    console.log(`Document period: ${entry.period}`)
+    console.log(`Recipients: ${entry.recipientCount}`)
+    if (entry.url) console.log(`IPFS URL: ${entry.url}`)
   } else if (mode === "generate") {
     // generate the rewards from tags and tx counts.
-    const stipend = BigNumber.from(conf.STIPEND)
-    const maxReward = BigNumber.from(conf.MAX_REWARD)
-    let tagsFilename = argv.tags
-    let gasFilename = argv.gas
+    await runGenerate(argv.tags, argv.gas)
+  } else if (mode === "all") {
+    // run the full monthly compute + publish in order: fetch -> generate ->
+    // removals -> document. `send` is intentionally NOT included: it moves real
+    // PNK on-chain and must be run manually after reviewing the amounts.
+    const { start, end, label: periodLabel } = resolvePeriod()
+    console.log(`=== [all] period ${periodLabel} (${start.toISOString()} -> ${end.toISOString()}) ===`)
 
-    if (!tagsFilename || !gasFilename) {
-      const manifest = getLatestManifest()
-      tagsFilename = manifest.generateTagsFile
-      gasFilename = manifest.generateGasFile
-      console.log(`Using latest manifest run ${manifest.runId}`)
-    }
+    console.log("\n=== [all] 1/4 fetch (submissions) ===")
+    await tagsRoutine({ start, end })
 
-    const tags: Tag[] = JSON.parse(
-      readFileSync(`./${conf.FILES_DIR}/${tagsFilename}`).toString()
+    console.log("\n=== [all] 2/4 generate (submissions) ===")
+    await runGenerate()
+
+    console.log("\n=== [all] 3/4 removals + ATQ ===")
+    await removalsRoutine({ start, end })
+
+    console.log("\n=== [all] 4/4 document (IPFS) ===")
+    const entry = await documentRoutine({ period: { start, end }, periodLabel })
+
+    console.log("\n=== [all] done ===")
+    console.log(`Documented ${entry.recipientCount} recipients for ${entry.period}.`)
+    if (entry.url) console.log(`IPFS URL: ${entry.url}`)
+    console.log(
+      "Nothing was sent on-chain. Review the amounts, then disburse manually:\n" +
+        "  yarn start --mode send --rewards <submissions-transactions>.json\n" +
+        "  yarn start --mode send --rewards <runId>_removals_transactions.json\n" +
+        "  yarn start --mode send --rewards <runId>_atq_transactions.json"
     )
-    const gasDunes: GasDune[] = JSON.parse(
-      readFileSync(`./${conf.FILES_DIR}/${gasFilename}`).toString()
-    )
-    const rewards = await buildRewards(stipend, maxReward, tags, gasDunes)
-    await buildCsv(rewards)
   } else if (mode === "send") {
     // disburse rewards
     const file = argv.rewards
