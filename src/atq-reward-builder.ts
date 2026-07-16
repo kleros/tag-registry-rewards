@@ -13,32 +13,30 @@ const parseWei = (key: string, raw: string): BigNumber => {
   }
 }
 
-// Flat, capped ATQ reward: every rewardable ATQ event (a registration or a
-// removal in the ATQ registry) gets min(pool / events, cap). One shared pool,
-// registered and removed events counted together. No redistribution.
-export const buildAtqRewards = (
-  registered: AtqRow[],
-  absent: AtqRow[]
+// Each ATQ kind (registrations vs removals) has its own pool and cap, computed
+// independently: every event of a kind gets min(pool / count, cap). This mirrors
+// the historical practice where the submissions pool is fully distributed among
+// registrations (e.g. 60k PNK/month) while removals earn a flat capped amount
+// (500 PNK each) on top — a single shared pool cannot produce both.
+const rewardKind = (
+  rows: AtqRow[],
+  kind: "registered" | "removed",
+  rewardPool: BigNumber,
+  maxPerEvent: BigNumber
 ): AtqReward[] => {
-  const events: Array<{ row: AtqRow; kind: "registered" | "removed" }> = [
-    ...registered.map((row) => ({ row, kind: "registered" as const })),
-    ...absent.map((row) => ({ row, kind: "removed" as const })),
-  ].filter((e) => e.row.requester && e.row.requester.length > 0)
-
+  const events = rows.filter((r) => r.requester && r.requester.length > 0)
   const count = events.length
   if (count === 0) return []
 
-  const rewardPool = parseWei("REWARD_POOL_ATQ", conf.REWARD_POOL_ATQ)
-  const maxPerAtq = parseWei("MAX_PER_ATQ", conf.MAX_PER_ATQ)
   const perEventRaw = rewardPool.div(BigNumber.from(count))
-  const perEvent = perEventRaw.gt(maxPerAtq) ? maxPerAtq : perEventRaw
+  const perEvent = perEventRaw.gt(maxPerEvent) ? maxPerEvent : perEventRaw
 
   console.log(
-    `[atq] ${count} rewardable events, ${humanizeAmount(perEvent)} PNK each ` +
-      `(pool ${humanizeAmount(rewardPool)}, cap ${humanizeAmount(maxPerAtq)})`
+    `[atq] ${kind}: ${count} events, ${humanizeAmount(perEvent)} PNK each ` +
+      `(pool ${humanizeAmount(rewardPool)}, cap ${humanizeAmount(maxPerEvent)})`
   )
 
-  return events.map(({ row, kind }) => ({
+  return events.map((row) => ({
     recipient: row.requester,
     id: `${row.itemID}:${kind}`,
     kind,
@@ -47,3 +45,21 @@ export const buildAtqRewards = (
     amount: perEvent,
   }))
 }
+
+export const buildAtqRewards = (
+  registered: AtqRow[],
+  absent: AtqRow[]
+): AtqReward[] => [
+  ...rewardKind(
+    registered,
+    "registered",
+    parseWei("REWARD_POOL_ATQ_SUBMISSIONS", conf.REWARD_POOL_ATQ_SUBMISSIONS),
+    parseWei("MAX_PER_ATQ_SUBMISSION", conf.MAX_PER_ATQ_SUBMISSION)
+  ),
+  ...rewardKind(
+    absent,
+    "removed",
+    parseWei("REWARD_POOL_ATQ_REMOVALS", conf.REWARD_POOL_ATQ_REMOVALS),
+    parseWei("MAX_PER_ATQ_REMOVAL", conf.MAX_PER_ATQ_REMOVAL)
+  ),
+]

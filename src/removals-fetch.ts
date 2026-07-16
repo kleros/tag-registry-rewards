@@ -1,7 +1,7 @@
 import fetch from "node-fetch"
 import conf from "./config"
 import { AtqRow, Item, ItemRequest, Period, Removal, Tag } from "./types"
-import { findChainConfig } from "./utils/chains"
+import { chainDisplayName } from "./utils/chains"
 
 const PAGE_SIZE = 1000
 
@@ -116,9 +116,6 @@ const inPeriod = (unixSeconds: number, period: Period): boolean => {
   const end = Math.floor(period.end.getTime() / 1000)
   return unixSeconds >= start && unixSeconds < end
 }
-
-const chainDisplayName = (chain: string): string =>
-  findChainConfig(chain)?.name ?? `Chain ${chain}`
 
 // Absent items whose removal (ClearingRequested) resolved within the period.
 // Rewards the remover (requester of the latest ClearingRequested).

@@ -82,7 +82,7 @@ yarn start --mode send --rewards <transactions-file>.json
 Run all commands from this folder:
 
 ```bash
-yarn start --mode <fetch|filter-check|removals|generate|send> [args]
+yarn start --mode <fetch|filter-check|removals|generate|document|all|send> [args]
 ```
 
 ### 1) Fetch
@@ -157,8 +157,9 @@ What it does:
   - one-pass cap, no recursive redistribution (unlike submissions)
   - no Dune enrichment and no tx-weighting (removals are not weighted by tx count)
 - deduplicates per registry + tagged address + chain (keeps the latest removal)
-- also **rewards ATQ** activity for the ATQ registry (`XDAI_REGISTRY_ATQ`): every ATQ registration and removal in the period pays a flat, capped, shared-pool amount:
-  - `min(REWARD_POOL_ATQ / atq_events_in_period, MAX_PER_ATQ)` (registered + removed counted together)
+- also **rewards ATQ** activity for the ATQ registry (`XDAI_REGISTRY_ATQ`), with registrations and removals computed **independently** (each kind has its own pool and cap):
+  - registrations: `min(REWARD_POOL_ATQ_SUBMISSIONS / registrations_in_period, MAX_PER_ATQ_SUBMISSION)` — official policy: 60,000 PNK pool, capped at 3,000 PNK per submission
+  - removals: `min(REWARD_POOL_ATQ_REMOVALS / removals_in_period, MAX_PER_ATQ_REMOVAL)` — official policy: 6,500 PNK pool, capped at 500 PNK per removal
   - rewards the ATQ requester (submitter for registrations, remover for removals)
   - produces its own send file, so removals and ATQ are disbursed separately from submissions
 
