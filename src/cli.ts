@@ -178,9 +178,8 @@ const main = async () => {
   if (mode === "fetch") {
     // fetch the tags according to a period. first step.
     // after operator generates the tags, follow the instructions and run `generate` next.
-    let { start, end } = getExpectedDates()
-    start = argv.start ? parseDate(argv.start) : start
-    end = argv.end ? parseDate(argv.end) : end
+    const { start, end, label } = resolvePeriod()
+    console.log(`Fetch period: ${label} (${start.toISOString()} → ${end.toISOString()})`)
     const fetchStart = new Date()
     console.log(`Fetch started at: ${fetchStart.toISOString()}`)
     console.log(`Run directory: ${process.cwd()}`)
@@ -196,9 +195,8 @@ const main = async () => {
     console.log(`Fetch ended at: ${fetchEnd.toISOString()}`)
     console.log(`Total fetch time: ${elapsedMin}m ${elapsedSec}s`)
   } else if (mode === "filter-check") {
-    let { start, end } = getExpectedDates()
-    start = argv.start ? parseDate(argv.start) : start
-    end = argv.end ? parseDate(argv.end) : end
+    const { start, end, label } = resolvePeriod()
+    console.log(`Filter-check period: ${label} (${start.toISOString()} → ${end.toISOString()})`)
     console.log(`Run directory: ${process.cwd()}`)
     console.log(`Output directory: ${resolve(process.cwd(), conf.FILES_DIR)}`)
     const report = await filterCheckRoutine({ start, end })
@@ -208,9 +206,8 @@ const main = async () => {
     // detect removals (items removed within the period) and reward the removers,
     // plus emit the ATQ registered/removed informational reports. The transactions
     // file it writes is compatible with `--mode send`.
-    let { start, end } = getExpectedDates()
-    start = argv.start ? parseDate(argv.start) : start
-    end = argv.end ? parseDate(argv.end) : end
+    const { start, end, label } = resolvePeriod()
+    console.log(`Removals period: ${label} (${start.toISOString()} → ${end.toISOString()})`)
     console.log(`Run directory: ${process.cwd()}`)
     console.log(`Output directory: ${resolve(process.cwd(), conf.FILES_DIR)}`)
     const manifest = await removalsRoutine({ start, end })

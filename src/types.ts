@@ -62,6 +62,9 @@ export interface EnrichedTag extends Tag {
 export interface FetchManifest {
   runId: string
   generatedAt: string
+  // Period the tags were fetched for (absent in manifests from older runs).
+  periodStart?: string
+  periodEnd?: string
   fullCsvFile: string
   fullJsonFile: string
   generateInputFile?: string

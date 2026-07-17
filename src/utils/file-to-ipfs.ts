@@ -38,17 +38,15 @@ export const uploadToIpfs = async (
     return null
   }
 
-  try {
-    const filebase = new FilebaseClient({ token })
-    const content = readFileSync(filePath)
-    const fileName = basename(filePath)
-    const cid: string = await filebase.storeDirectory([
-      new FileCtor([content], fileName, { type: "application/json" }),
-    ])
-    const url = `${IPFS_GATEWAY}/${cid}/${fileName}`
-    return { cid, url }
-  } catch (err) {
-    console.warn("[ipfs] Upload failed, wrote local JSON only:", err)
-    return null
-  }
+  const filebase = new FilebaseClient({ token })
+  const content = readFileSync(filePath)
+  const fileName = basename(filePath)
+  // A configured token that fails to upload is an error, not a fallback: the
+  // caller would otherwise publish an index entry with cid/url null while the
+  // snapshot never reached IPFS. Let the failure propagate (non-zero exit).
+  const cid: string = await filebase.storeDirectory([
+    new FileCtor([content], fileName, { type: "application/json" }),
+  ])
+  const url = `${IPFS_GATEWAY}/${cid}/${fileName}`
+  return { cid, url }
 }

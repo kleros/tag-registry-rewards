@@ -1,8 +1,9 @@
-import { existsSync, readFileSync } from "fs"
+import { existsSync, readFileSync, writeFileSync } from "fs"
 import conf from "./config"
 import {
   AtqRewardRecord,
   CurateIndexEntry,
+  FetchManifest,
   GenerateManifest,
   Period,
   RemovalsManifest,
@@ -71,6 +72,13 @@ const resolveAtq = (explicit?: string, removalsFile?: string): AtqRewardRecord[]
   // explicitly, pair it with its sibling ATQ file rather than the latest run.
   if (!file && removalsFile && /_removals\.json$/.test(removalsFile)) {
     file = removalsFile.replace(/_removals\.json$/, "_atq.json")
+  } else if (!file && removalsFile) {
+    console.warn(
+      `[document] WARNING: --removals "${removalsFile}" doesn't match the ` +
+        "<runId>_removals.json pattern, so its sibling ATQ file can't be " +
+        "derived — falling back to the LATEST removals run's ATQ file, which " +
+        "may belong to a different period. Pass --atq explicitly to pin it."
+    )
   }
   if (!file) {
     const manifestPath = `./${conf.FILES_DIR}/latest_removals_manifest.json`
@@ -92,21 +100,45 @@ const monthLabel = (iso: string): string => {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`
 }
 
-// Guard against publishing a mislabeled record: the latest removals manifest
-// records its own period, so warn if it doesn't match what we're documenting
-// (only relevant when defaulting to the latest manifest, not an explicit file).
+// Guard against publishing a mislabeled record: the latest removals and fetch
+// manifests record their own periods, so warn if either doesn't match what
+// we're documenting (only relevant when defaulting to the latest manifests,
+// not explicit files).
 const warnOnPeriodMismatch = (periodLabel: string): void => {
   const manifestPath = `./${conf.FILES_DIR}/latest_removals_manifest.json`
+  if (existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(
+        readFileSync(manifestPath).toString()
+      ) as RemovalsManifest
+      const removalsLabel = monthLabel(manifest.periodStart)
+      if (removalsLabel !== periodLabel) {
+        console.warn(
+          `[document] WARNING: latest removals were computed for ${removalsLabel} but ` +
+            `documenting ${periodLabel}. Pass --removals explicitly to avoid mixing periods.`
+        )
+      }
+    } catch {
+      /* ignore malformed manifest */
+    }
+  }
+}
+
+// Same guard for submissions: the fetch manifest records the fetch period
+// (present in manifests written after that field was added).
+const warnOnSubmissionsPeriodMismatch = (periodLabel: string): void => {
+  const manifestPath = `./${conf.FILES_DIR}/latest_fetch_manifest.json`
   if (!existsSync(manifestPath)) return
   try {
     const manifest = JSON.parse(
       readFileSync(manifestPath).toString()
-    ) as RemovalsManifest
-    const removalsLabel = monthLabel(manifest.periodStart)
-    if (removalsLabel !== periodLabel) {
+    ) as FetchManifest
+    if (!manifest.periodStart) return
+    const fetchLabel = monthLabel(manifest.periodStart)
+    if (fetchLabel !== periodLabel) {
       console.warn(
-        `[document] WARNING: latest removals were computed for ${removalsLabel} but ` +
-          `documenting ${periodLabel}. Pass --removals explicitly to avoid mixing periods.`
+        `[document] WARNING: latest fetch (submissions) was for ${fetchLabel} but ` +
+          `documenting ${periodLabel}. Pass --submissions explicitly to avoid mixing periods.`
       )
     }
   } catch {
@@ -122,6 +154,7 @@ export const documentRoutine = async (opts: {
   atqFile?: string
 }): Promise<CurateIndexEntry> => {
   if (!opts.removalsFile) warnOnPeriodMismatch(opts.periodLabel)
+  if (!opts.submissionsFile) warnOnSubmissionsPeriodMismatch(opts.periodLabel)
   const submissions = resolveSubmissions(opts.submissionsFile)
   const removals = resolveRemovals(opts.removalsFile)
   const atq = resolveAtq(opts.atqFile, opts.removalsFile)
@@ -153,11 +186,28 @@ export const documentRoutine = async (opts: {
     total: snapshot.totals.total,
     recipientCount: snapshot.totals.recipientCount,
   }
-  updateCurateIndex(entry)
+  const index = updateCurateIndex(entry)
   console.log(`[document] Updated ${conf.FILES_DIR}/curate-rewards-index.json`)
-  console.log(
-    "[document] Publish: copy the index (+ snapshot, unless on IPFS) into the " +
-      "gtcr frontend's public/data/ to update the rewards page."
+
+  // Frontends (e.g. the rewards dashboard) consume a plain array of snapshot
+  // URLs rather than the rich entry objects — emit that form alongside.
+  const urls = index
+    .map((e) => e.url)
+    .filter((u): u is string => typeof u === "string" && u.length > 0)
+  writeFileSync(
+    `./${conf.FILES_DIR}/curate-rewards-index.urls.json`,
+    JSON.stringify(urls, null, 1),
+    { encoding: "utf-8" }
+  )
+  console.log(`[document] Wrote ${conf.FILES_DIR}/curate-rewards-index.urls.json`)
+
+  // files/ is gitignored, so on a fresh machine this index only contains the
+  // periods generated locally — publishing it wholesale would erase history.
+  console.warn(
+    `[document] Publish: the local index holds ${index.length} period(s). The ` +
+      "deployed index likely holds more — MERGE this period's entry/URL into the " +
+      "frontend's existing index (gtcr public/data/, rewards-dashboard " +
+      "src/assets/); never overwrite it with this file wholesale."
   )
 
   return entry

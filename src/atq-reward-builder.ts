@@ -25,6 +25,14 @@ const rewardKind = (
   maxPerEvent: BigNumber
 ): AtqReward[] => {
   const events = rows.filter((r) => r.requester && r.requester.length > 0)
+  const dropped = rows.length - events.length
+  if (dropped > 0) {
+    console.warn(
+      `[atq] WARNING: ${dropped} ${kind} row(s) have no requester (subgraph gap?) ` +
+        "and were dropped — their pool share redistributes to the remaining " +
+        "events. Investigate before sending/publishing."
+    )
+  }
   const count = events.length
   if (count === 0) return []
 

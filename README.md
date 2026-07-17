@@ -243,6 +243,23 @@ Outputs are written to `files/` (gitignored): `curate-rewards-<period>.json` and
 Optional env (`.env`): `FILEBASE_TOKEN`, `IPFS_GATEWAY` (defaults to
 `https://cdn.kleros.link/ipfs`).
 
+Notes on publishing:
+
+- **Merge, never overwrite.** `files/` is gitignored, so on a fresh machine
+  `curate-rewards-index.json` only contains the periods generated locally.
+  When updating a frontend (gtcr `public/data/`, rewards-dashboard
+  `src/assets/curate-rewards-index.json`), merge the new period's entry/URL
+  into the deployed index — copying the local file wholesale would erase all
+  historical months.
+- `curate-rewards-index.urls.json` is emitted alongside the rich index: a plain
+  array of gateway URLs, the format the rewards dashboard bundles.
+- If `FILEBASE_TOKEN` is set and the upload fails, `document` now exits
+  non-zero instead of silently writing a `cid: null` index entry. Without a
+  token it still writes the local JSON only (dev flow).
+- Per-event rewards use floor division of the pool, so a period's totals can
+  undershoot the configured pools by a few wei. This is expected: the snapshot
+  stays self-consistent because totals are summed from the actual line amounts.
+
 ## Exclusions: fixing rewards after they were generated
 
 Scenario: the monthly run is done — jsons, csvs, even the IPFS record — and
