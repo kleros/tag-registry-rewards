@@ -259,6 +259,9 @@ Notes on publishing:
 - Per-event rewards use floor division of the pool, so a period's totals can
   undershoot the configured pools by a few wei. This is expected: the snapshot
   stays self-consistent because totals are summed from the actual line amounts.
+- If `document` fails after writing the local snapshot (e.g. the upload
+  errors), the index is NOT updated — the local snapshot and index disagree
+  until you re-run `document` for that period, which is safe and idempotent.
 
 ## Exclusions: fixing rewards after they were generated
 
@@ -341,8 +344,10 @@ an earlier legitimate removal of the same item count instead.
 yarn start --mode document --period YYYY-MM
 ```
 
-Then copy the refreshed index (and snapshot, unless on IPFS) into the gtcr
-frontend's `public/data/` as usual.
+Then **merge the refreshed period's entry** (and snapshot, unless on IPFS) into
+the frontend's existing index — see "Notes on publishing" above: the local
+index only holds locally-generated periods, so copying it wholesale would
+erase the historical months.
 
 **5. Verify before sending.** Compare old vs new transactions csv — only the
 affected registry's recipients should have moved. Then `--mode send` the new
@@ -362,12 +367,17 @@ The read-only page that shows recipients their submission/removal/ATQ rewards
 lives in the **gtcr** frontend (`gtcr/public/curate-rewards.html`), served at
 `/curate-rewards.html` — the Curate analog of court's `staking-rewards.html`.
 
-This repo only produces the data. To publish a period, copy the
-`curate-rewards-index.json` (and, unless the snapshots are on IPFS, the
-`curate-rewards-<period>.json` files) from `files/` into the gtcr frontend's
-`public/data/`. The page loads `./data/curate-rewards-index.json` by default
-(override with `?index=<url>`); when an index entry has an IPFS `url` the
-snapshot is fetched from `cdn.kleros.link`, otherwise from `./data/`.
+This repo only produces the data. To publish a period, **merge the new
+period's entry** from `files/curate-rewards-index.json` (and, unless the
+snapshot is on IPFS, its `curate-rewards-<period>.json` file) into the gtcr
+frontend's existing `public/data/curate-rewards-index.json` — never overwrite
+the deployed index wholesale (see "Notes on publishing"). The page loads
+`./data/curate-rewards-index.json` by default (override with `?index=<url>`);
+when an index entry has an IPFS `url` the snapshot is fetched from
+`cdn.kleros.link`, otherwise from `./data/`. The rewards dashboard instead
+bundles a plain URL array — append the new snapshot's URL there
+(`curate-rewards-index.urls.json` has that shape, regenerated on every
+document run; it can go stale if you hand-edit the rich index).
 
 ## Full monthly flow
 
@@ -378,12 +388,17 @@ yarn start --mode all --period YYYY-MM
 # = fetch -> generate -> removals -> document (in order)
 ```
 
-`all` deliberately does **not** send. Review the amounts, then disburse manually:
+`all` deliberately does **not** send. Review the amounts, then disburse
+manually. Note the run ids differ per step: the submissions transactions file
+is named with the **generate** run's timestamp, while the removals and ATQ
+files share the **removals** run's timestamp (check
+`latest_generate_manifest.json` / `latest_removals_manifest.json` for the
+exact filenames):
 
 ```bash
-yarn start --mode send --rewards <runId>.json                       # pay submissions
-yarn start --mode send --rewards <runId>_removals_transactions.json # pay removals
-yarn start --mode send --rewards <runId>_atq_transactions.json      # pay ATQ
+yarn start --mode send --rewards <generateRunId>.json                       # pay submissions
+yarn start --mode send --rewards <removalsRunId>_removals_transactions.json # pay removals
+yarn start --mode send --rewards <removalsRunId>_atq_transactions.json      # pay ATQ
 ```
 
 Or run each step by hand:

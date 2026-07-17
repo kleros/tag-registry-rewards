@@ -26,16 +26,17 @@ export const uploadToIpfs = async (
   let FilebaseClient: any
   let FileCtor: any
   try {
-    // Loaded lazily so the mode works even if @filebase/client isn't installed.
+    // Loaded lazily so tooling that never uploads doesn't need the package.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const mod = require("@filebase/client")
     FilebaseClient = mod.FilebaseClient
     FileCtor = mod.File
   } catch {
-    console.warn(
-      "[ipfs] @filebase/client not installed — run `yarn add @filebase/client`. Wrote local JSON only."
+    // A token is configured, so an upload is expected: failing to load the
+    // client must not silently degrade into a cid:null index entry.
+    throw new Error(
+      "[ipfs] FILEBASE_TOKEN is set but @filebase/client is not installed — run `yarn install`."
     )
-    return null
   }
 
   const filebase = new FilebaseClient({ token })

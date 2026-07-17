@@ -76,8 +76,9 @@ const resolveAtq = (explicit?: string, removalsFile?: string): AtqRewardRecord[]
     console.warn(
       `[document] WARNING: --removals "${removalsFile}" doesn't match the ` +
         "<runId>_removals.json pattern, so its sibling ATQ file can't be " +
-        "derived — falling back to the LATEST removals run's ATQ file, which " +
-        "may belong to a different period. Pass --atq explicitly to pin it."
+        "derived. The LATEST removals run's ATQ file will be used if one " +
+        "exists (it may belong to a different period), otherwise NO ATQ " +
+        "rewards are included. Pass --atq explicitly to pin it."
     )
   }
   if (!file) {
@@ -124,22 +125,41 @@ const warnOnPeriodMismatch = (periodLabel: string): void => {
   }
 }
 
-// Same guard for submissions: the fetch manifest records the fetch period
-// (present in manifests written after that field was added).
+// Same guard for submissions. Two checks, because the rewards actually come
+// from latest_generate_manifest.json (which records no period): the fetch
+// manifest's period must match, AND generate must not predate the fetch it is
+// supposed to have consumed (a stale generate would publish old amounts).
 const warnOnSubmissionsPeriodMismatch = (periodLabel: string): void => {
-  const manifestPath = `./${conf.FILES_DIR}/latest_fetch_manifest.json`
-  if (!existsSync(manifestPath)) return
+  const fetchPath = `./${conf.FILES_DIR}/latest_fetch_manifest.json`
+  if (!existsSync(fetchPath)) return
   try {
-    const manifest = JSON.parse(
-      readFileSync(manifestPath).toString()
+    const fetchManifest = JSON.parse(
+      readFileSync(fetchPath).toString()
     ) as FetchManifest
-    if (!manifest.periodStart) return
-    const fetchLabel = monthLabel(manifest.periodStart)
-    if (fetchLabel !== periodLabel) {
-      console.warn(
-        `[document] WARNING: latest fetch (submissions) was for ${fetchLabel} but ` +
-          `documenting ${periodLabel}. Pass --submissions explicitly to avoid mixing periods.`
-      )
+    if (fetchManifest.periodStart) {
+      const fetchLabel = monthLabel(fetchManifest.periodStart)
+      if (fetchLabel !== periodLabel) {
+        console.warn(
+          `[document] WARNING: latest fetch (submissions) was for ${fetchLabel} but ` +
+            `documenting ${periodLabel}. Pass --submissions explicitly to avoid mixing periods.`
+        )
+      }
+    }
+    const generatePath = `./${conf.FILES_DIR}/latest_generate_manifest.json`
+    if (existsSync(generatePath)) {
+      const generateManifest = JSON.parse(
+        readFileSync(generatePath).toString()
+      ) as GenerateManifest
+      if (
+        new Date(generateManifest.generatedAt).getTime() <
+        new Date(fetchManifest.generatedAt).getTime()
+      ) {
+        console.warn(
+          "[document] WARNING: latest generate output predates the latest fetch — " +
+            "its rewards were built from an OLDER fetch. Run `--mode generate` " +
+            "again (or pass --submissions explicitly) before documenting."
+        )
+      }
     }
   } catch {
     /* ignore malformed manifest */

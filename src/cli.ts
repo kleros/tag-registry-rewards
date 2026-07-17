@@ -18,11 +18,14 @@ import {
   warnUnmatchedExclusions,
 } from "./utils/exclusions"
 
+// Default period: the previous calendar month, computed purely in UTC.
+// (The old local-time + offset arithmetic used the CURRENT date's DST offset
+// for both boundaries, so runs in the month after a DST transition shifted
+// the window into the wrong UTC month.)
 const getExpectedDates = (): { start: Date; end: Date } => {
   const now = new Date()
-  const timezone = now.getTimezoneOffset() / 60
-  const start = new Date(now.getFullYear(), now.getMonth() - 1, 1, -timezone)
-  const end = new Date(now.getFullYear(), now.getMonth(), 1, -timezone)
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1))
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
   return { start, end }
 }
 
@@ -115,6 +118,12 @@ const toPeriodLabel = (d: Date): string =>
 // (zero-padded) and can never disagree with the actual window.
 const resolvePeriod = (): { start: Date; end: Date; label: string } => {
   let { start, end } = getExpectedDates()
+  if (argv.period && (argv.start || argv.end)) {
+    throw new Error(
+      "--period cannot be combined with --start/--end: pass either the month " +
+        "label or an explicit window, not both."
+    )
+  }
   if (argv.period && !argv.start && !argv.end) {
     const [y, m] = String(argv.period)
       .split("-")
@@ -247,7 +256,7 @@ const main = async () => {
     await runGenerate()
 
     console.log("\n=== [all] 3/4 removals + ATQ ===")
-    await removalsRoutine({ start, end })
+    const removalsManifest = await removalsRoutine({ start, end })
 
     console.log("\n=== [all] 4/4 document (IPFS) ===")
     const entry = await documentRoutine({ period: { start, end }, periodLabel })
@@ -255,11 +264,21 @@ const main = async () => {
     console.log("\n=== [all] done ===")
     console.log(`Documented ${entry.recipientCount} recipients for ${entry.period}.`)
     if (entry.url) console.log(`IPFS URL: ${entry.url}`)
+    // Print the exact filenames — submissions use the generate run's timestamp,
+    // removals/ATQ the removals run's, so a single <runId> placeholder misleads.
+    let submissionsTxFile = "<see latest_generate_manifest.json: transactionsFile>"
+    try {
+      submissionsTxFile = (JSON.parse(
+        readFileSync(`./${conf.FILES_DIR}/latest_generate_manifest.json`).toString()
+      ) as { transactionsFile: string }).transactionsFile
+    } catch {
+      /* keep placeholder */
+    }
     console.log(
       "Nothing was sent on-chain. Review the amounts, then disburse manually:\n" +
-        "  yarn start --mode send --rewards <submissions-transactions>.json\n" +
-        "  yarn start --mode send --rewards <runId>_removals_transactions.json\n" +
-        "  yarn start --mode send --rewards <runId>_atq_transactions.json"
+        `  yarn start --mode send --rewards ${submissionsTxFile}\n` +
+        `  yarn start --mode send --rewards ${removalsManifest.transactionsFile}\n` +
+        `  yarn start --mode send --rewards ${removalsManifest.atqTransactionsFile}`
     )
   } else if (mode === "send") {
     // disburse rewards
@@ -277,4 +296,9 @@ const main = async () => {
   }
 }
 
-main()
+// Explicit catch so failures exit non-zero on every Node version (an unhandled
+// rejection only crashes on Node >= 15) — cron/CI wrappers rely on the code.
+main().catch((err) => {
+  console.error(err)
+  process.exit(1)
+})

@@ -29,8 +29,9 @@ const rewardKind = (
   if (dropped > 0) {
     console.warn(
       `[atq] WARNING: ${dropped} ${kind} row(s) have no requester (subgraph gap?) ` +
-        "and were dropped — their pool share redistributes to the remaining " +
-        "events. Investigate before sending/publishing."
+        "and were dropped — those recipients get nothing (their share is " +
+        "redistributed only while the per-event cap isn't binding; otherwise " +
+        "it simply goes unspent). Investigate before sending/publishing."
     )
   }
   const count = events.length
