@@ -12,6 +12,11 @@ import { tagsRoutine } from "./tags-routine"
 import { filterCheckRoutine } from "./filter-check-routine"
 import { removalsRoutine } from "./removals-routine"
 import { documentRoutine } from "./document-routine"
+import {
+  applyTagExclusions,
+  loadExclusions,
+  warnUnmatchedExclusions,
+} from "./utils/exclusions"
 
 const getExpectedDates = (): { start: Date; end: Date } => {
   const now = new Date()
@@ -142,12 +147,23 @@ const runGenerate = async (
     console.log(`Using latest manifest run ${manifest.runId}`)
   }
 
-  const tags: Tag[] = JSON.parse(
+  const allTags: Tag[] = JSON.parse(
     readFileSync(`./${conf.FILES_DIR}/${tagsFilename}`).toString()
   )
   const gasDunes: GasDune[] = JSON.parse(
     readFileSync(`./${conf.FILES_DIR}/${gasFilename}`).toString()
   )
+  // Drop manually excluded tags before the pool math so their share is
+  // redistributed to the remaining submissions (see README "Exclusions").
+  const exclusions = loadExclusions()
+  const tags = applyTagExclusions(exclusions, allTags)
+  if (tags.length !== allTags.length) {
+    console.log(
+      `[exclusions] ${allTags.length - tags.length} submission(s) excluded, ` +
+        `${tags.length} remain.`
+    )
+  }
+  warnUnmatchedExclusions(exclusions, ["submissions"])
   const rewards = await buildRewards(stipend, maxReward, tags, gasDunes)
   await buildCsv(rewards)
 }

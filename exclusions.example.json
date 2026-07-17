@@ -1,0 +1,37 @@
+[
+  {
+    "tagAddress": "0x0000000000000000000000000000000000000001",
+    "chain": "1",
+    "registry": "addressTags",
+    "scope": "submissions",
+    "reason": "EXAMPLE (the common case) — one specific submission: address + chain + registry. Found already tagged on etherscan 2026-07-16. Scoped to submissions so a future removal of this item still earns its removal reward. Fields: registry is one of addressTags | tokens | domains; scope is one of submissions | removals | atq | all (default all)."
+  },
+  {
+    "tagAddress": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "chain": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+    "registry": "tokens",
+    "scope": "submissions",
+    "reason": "EXAMPLE — non-EVM works too: chain is the CAIP-2 reference, i.e. the chain id for EVM (1, 137, 8453, 42161, ...) or the genesis-hash reference for Solana, exactly as it appears in the Chain column of the fetch/removals CSVs."
+  },
+  {
+    "tagAddress": "0x0000000000000000000000000000000000000002",
+    "scope": "all",
+    "reason": "EXAMPLE (blanket ban) — chain and registry omitted = this address matches on EVERY chain and in EVERY registry; scope all = never rewarded again, neither as submission nor as removal. Use for spam / bad-faith addresses."
+  },
+  {
+    "tagAddress": "0x0000000000000000000000000000000000000003",
+    "chain": "42161",
+    "registry": "domains",
+    "scope": "removals",
+    "reason": "EXAMPLE — a removal that should not be rewarded (e.g. remover cleared their own bogus submission). Applied before dedupe, so an earlier legitimate removal of the same item still counts."
+  },
+  {
+    "itemID": "0x0000000000000000000000000000000000000000000000000000000000000004",
+    "scope": "atq",
+    "reason": "EXAMPLE — ATQ entries match by itemID only (ATQ rows have no tagged address). Take the Item ID from the <runId>_atq_registered.csv / <runId>_atq_absent.csv reports."
+  },
+  {
+    "itemID": "0x0000000000000000000000000000000000000000000000000000000000000005",
+    "reason": "EXAMPLE — itemID also works for the three main registries when you want to pin one exact Curate item instead of an address; both the bare itemID and the <itemID>@<registry-address> id form match. No scope = all. Every entry MUST have a reason and at least one of tagAddress / itemID; matching is case-insensitive; an entry that matches nothing prints a WARNING; a malformed file aborts the run."
+  }
+]

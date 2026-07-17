@@ -243,6 +243,102 @@ Outputs are written to `files/` (gitignored): `curate-rewards-<period>.json` and
 Optional env (`.env`): `FILEBASE_TOKEN`, `IPFS_GATEWAY` (defaults to
 `https://cdn.kleros.link/ipfs`).
 
+## Exclusions: fixing rewards after they were generated
+
+Scenario: the monthly run is done — jsons, csvs, even the IPFS record — and
+**then** you find out two of the rewarded tags shouldn't count (e.g. they were
+already tagged on the explorer). You do **not** need to refetch anything, and
+you must **not** hand-edit the generated jsons:
+
+> ⚠️ Rewards are **pool-based**. Deleting 2 rows from a rewards/transactions
+> file leaves everyone else's amounts wrong — the excluded share must be
+> **redistributed** by re-running the (purely local, ~1s) pool math.
+
+### The fix, step by step
+
+**1. Record the exclusions** in `exclusions.json` at the repo root (committed,
+so every exclusion has an audit trail — copy `exclusions.example.json` to start):
+
+```json
+[
+  {
+    "tagAddress": "0x971Ff919f91fFd1Faa847e1a773e8a547e3eFc82",
+    "chain": "43114",
+    "registry": "addressTags",
+    "scope": "submissions",
+    "reason": "already tagged on snowscan, found manually 2026-07-16"
+  }
+]
+```
+
+Matching rules (everything is case-insensitive):
+
+- `tagAddress` — the tagged address; add `chain` (CAIP reference: `"1"`,
+  `"8453"`, Solana genesis hash…) and/or `registry`
+  (`addressTags|tokens|domains`) to narrow it. Omitted = matches all.
+- `itemID` — alternative precise matcher: the Curate item id (bare, or the
+  `<itemID>@<registry>` form). **Required** for ATQ entries (ATQ rows have no
+  tagged address).
+- `scope` — `submissions` | `removals` | `atq` | `all` (default `all`).
+  A tag wrongly rewarded as a *submission* usually shouldn't lose its future
+  *removal* reward — scope it to `submissions`.
+- `reason` — mandatory; printed every time the entry drops a reward.
+
+A malformed file **aborts the run** (money is involved), and an entry that
+matches nothing prints a `WARNING` so typos can't silently do nothing.
+
+**2. Recompute the submissions** — offline, seconds, using the inputs the
+original fetch already saved (`files/<runId>_generate_tags.json` + `_generate_gas.json`):
+
+```bash
+yarn start --mode generate   # uses files/latest_fetch_manifest.json
+# or pin the run explicitly:
+yarn start --mode generate --tags <runId>_generate_tags.json --gas <runId>_generate_gas.json
+```
+
+Look for the log lines:
+
+```
+[exclusions] Loaded 1 entrie(s) from exclusions.json
+[exclusions] Dropping submissions 0x971F...fC82 (chain 43114) [addressTags] — already tagged on snowscan...
+[exclusions] 1 submission(s) excluded, 621 remain.
+```
+
+This rewrites the rewards json, the transactions json/csv, and
+`latest_generate_manifest.json`. Registry totals stay pool-exact; the excluded
+share flows to the remaining submitters.
+
+**3. Only if a *removal* or *ATQ* reward was wrong:** re-run removals (subgraph
+only, ~1 min, no Dune):
+
+```bash
+yarn start --mode removals --start YYYY-MM-01 --end YYYY-MM+1-01
+```
+
+Exclusions are applied before dedupe, so excluding a bogus latest removal lets
+an earlier legitimate removal of the same item count instead.
+
+**4. Republish the period record** (replaces the period's entry in the index):
+
+```bash
+yarn start --mode document --period YYYY-MM
+```
+
+Then copy the refreshed index (and snapshot, unless on IPFS) into the gtcr
+frontend's `public/data/` as usual.
+
+**5. Verify before sending.** Compare old vs new transactions csv — only the
+affected registry's recipients should have moved. Then `--mode send` the new
+transactions file.
+
+> ⚠️ Do all of this **before** `--mode send`. Amounts redistribute, so if the
+> old rewards were already paid on-chain there is no automated diff/claw-back —
+> you'd have to compute and settle the differences manually.
+
+The list is applied on **every** future `generate`/`removals` run (including
+`--mode all`), so exclusions survive refetches. Point `EXCLUSIONS_FILE` in
+`.env` somewhere else to override the default `./exclusions.json`.
+
 ## Public rewards page
 
 The read-only page that shows recipients their submission/removal/ATQ rewards
