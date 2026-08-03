@@ -21,6 +21,36 @@ const emptyRecipient = (): CurateRecipient => ({
   atq: [],
 })
 
+// The published back-catalog (2022-04 onward) names registries by their
+// display names, and the dashboard's all-time "across N registries" stat
+// counts distinct raw strings across every month — so keep emitting the same
+// names the historical snapshots use, not the internal camelCase keys.
+const REGISTRY_DISPLAY_NAMES: { [key: string]: string } = {
+  addressTags: "Address Tags",
+  tokens: "Kleros Tokens",
+  domains: "Domains",
+}
+
+// An unmapped key still publishes (as the raw key), but warn the operator:
+// mixed naming across months breaks the dashboard's distinct-registry count.
+const warnedRegistries = new Set<string>()
+
+const displayRegistry = (registry: string): string => {
+  const hasName = Object.prototype.hasOwnProperty.call(
+    REGISTRY_DISPLAY_NAMES,
+    registry
+  )
+  if (!hasName && !warnedRegistries.has(registry)) {
+    warnedRegistries.add(registry)
+    console.warn(
+      `[document] Registry "${registry}" has no display name — emitting the ` +
+        "raw key. Add it to REGISTRY_DISPLAY_NAMES to keep snapshot naming " +
+        "consistent with the published back-catalog."
+    )
+  }
+  return hasName ? REGISTRY_DISPLAY_NAMES[registry] : registry
+}
+
 // Merge submission, removal, and ATQ reward records into one per-recipient
 // snapshot (the record a user looks up on the page).
 export const buildCurateSnapshot = (
@@ -49,7 +79,7 @@ export const buildCurateSnapshot = (
   }
 
   const lineOf = (record: RewardRecord): CurateRewardLine => ({
-    registry: record.registry,
+    registry: displayRegistry(record.registry),
     chain: record.chain,
     chainName: record.chainName,
     tagAddress: record.tagAddress,
@@ -92,7 +122,18 @@ export const buildCurateSnapshot = (
       total: submissionsTotal.add(removalsTotal).add(atqTotal).toString(),
       recipientCount: Object.keys(recipients).length,
     },
+    // One reward record is one rewarded entry in every category, so the
+    // counts are the record counts.
+    entryCounts: {
+      submissions: submissions.length,
+      removals: removals.length,
+      atq: atq.length,
+      total: submissions.length + removals.length + atq.length,
+    },
     recipients,
+    note:
+      "Submissions, removals and ATQ itemized per recipient (one line per " +
+      "rewarded entry); entryCounts are the rewarded entries per category.",
   }
 }
 

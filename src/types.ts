@@ -215,7 +215,17 @@ export interface CurateSnapshot {
     total: string
     recipientCount: number
   }
+  // Rewarded entries per category (one reward record = one entry). The
+  // published back-catalog carries these since the 2026-07-20 amendment, and
+  // the rewards dashboard prefers them over counting itemized lines.
+  entryCounts: {
+    submissions: number
+    removals: number
+    atq: number
+    total: number
+  }
   recipients: { [address: string]: CurateRecipient }
+  note: string
 }
 
 export interface CurateIndexEntry {
