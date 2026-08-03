@@ -10,15 +10,19 @@ import { writeRemovalsOutputs } from "./utils/removals-output"
 import {
   applyAtqExclusions,
   applyRemovalExclusions,
+  ExclusionList,
   loadExclusions,
   warnUnmatchedExclusions,
 } from "./utils/exclusions"
 
+// `all` passes its shared exclusion list so hits accumulate across steps and
+// the unmatched-entry check runs once for the whole run (see cli.ts).
 export const removalsRoutine = async (
-  period: Period
+  period: Period,
+  sharedExclusions?: ExclusionList
 ): Promise<RemovalsManifest> => {
   console.log("Removals period:", period)
-  const exclusions = loadExclusions()
+  const exclusions = sharedExclusions ?? loadExclusions()
 
   // Exclusions apply BEFORE dedupe: if the kept (latest) removal of a
   // duplicated item is excluded, an earlier legitimate removal still counts.
@@ -41,7 +45,7 @@ export const removalsRoutine = async (
 
   const atqRewards = buildAtqRewards(atqRegistered, atqAbsent)
   console.log("Rewarded ATQ events:", atqRewards.length)
-  warnUnmatchedExclusions(exclusions, ["removals", "atq"])
+  if (!sharedExclusions) warnUnmatchedExclusions(exclusions, ["removals", "atq"])
 
   const runId = String(new Date().getTime())
   const manifest = await writeRemovalsOutputs(

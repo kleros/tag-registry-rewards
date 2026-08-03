@@ -19,6 +19,39 @@ import { uploadToIpfs } from "./utils/file-to-ipfs"
 const readJson = <T>(filename: string): T =>
   JSON.parse(readFileSync(`./${conf.FILES_DIR}/${filename}`).toString()) as T
 
+// The document inputs are the *_rewards.json record files, NOT the send
+// transactions files (<runId>.json / *_transactions.json), whose amounts
+// serialize as BigNumber {type,hex} objects and carry no breakdown fields.
+// Mixing them up would silently publish a snapshot with undefined registries
+// and unreadable amounts — fail loud instead.
+const assertRecords = (
+  records: unknown,
+  file: string,
+  requiredStringFields: string[]
+): void => {
+  if (!Array.isArray(records)) {
+    throw new Error(`[document] ${file} is not a JSON array of reward records.`)
+  }
+  records.forEach((record: any, i: number) => {
+    for (const field of requiredStringFields) {
+      if (typeof record?.[field] !== "string" || record[field].length === 0) {
+        throw new Error(
+          `[document] ${file}[${i}] has no string "${field}" — this doesn't ` +
+            "look like a rewards record file. Pass the <runId>_rewards.json / " +
+            "<runId>_removals.json / <runId>_atq.json file, not the send " +
+            "transactions file."
+        )
+      }
+    }
+    if (!/^\d+$/.test(record.amount)) {
+      throw new Error(
+        `[document] ${file}[${i}].amount is not a decimal wei string — pass ` +
+          "the rewards record file, not the send transactions file."
+      )
+    }
+  })
+}
+
 const resolveSubmissions = (explicit?: string): RewardRecord[] => {
   let file = explicit
   if (!file) {
@@ -39,7 +72,9 @@ const resolveSubmissions = (explicit?: string): RewardRecord[] => {
     return []
   }
   console.log(`[document] Submissions from ${file}`)
-  return readJson<RewardRecord[]>(file)
+  const records = readJson<RewardRecord[]>(file)
+  assertRecords(records, file, ["recipient", "registry", "amount"])
+  return records
 }
 
 const resolveRemovals = (explicit?: string): RewardRecord[] => {
@@ -62,7 +97,9 @@ const resolveRemovals = (explicit?: string): RewardRecord[] => {
     return []
   }
   console.log(`[document] Removals from ${file}`)
-  return readJson<RewardRecord[]>(file)
+  const records = readJson<RewardRecord[]>(file)
+  assertRecords(records, file, ["recipient", "registry", "amount"])
+  return records
 }
 
 const resolveAtq = (explicit?: string, removalsFile?: string): AtqRewardRecord[] => {
@@ -93,7 +130,9 @@ const resolveAtq = (explicit?: string, removalsFile?: string): AtqRewardRecord[]
     return []
   }
   console.log(`[document] ATQ from ${file}`)
-  return readJson<AtqRewardRecord[]>(file)
+  const records = readJson<AtqRewardRecord[]>(file)
+  assertRecords(records, file, ["recipient", "itemID", "amount"])
+  return records
 }
 
 const monthLabel = (iso: string): string => {

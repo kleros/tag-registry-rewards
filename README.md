@@ -163,6 +163,16 @@ What it does:
   - rewards the ATQ requester (submitter for registrations, remover for removals)
   - produces its own send file, so removals and ATQ are disbursed separately from submissions
 
+> ⚠️ **Detection reads *current* statuses — run soon after the period ends.**
+> Removals are found by looking at items whose status is `Absent` (ATQ
+> registrations: `Registered`) *at run time*. An item removed in the period
+> but re-registered before the run is missed — and because rewards are
+> pool-based, one missed removal changes *everyone's* amounts in that
+> registry. Re-running a few days later (e.g. for exclusions) is fine;
+> re-running a months-old period is lossy and will not reproduce the original
+> amounts. Also note an ATQ item registered **and** removed within the same
+> period only earns the removal reward.
+
 Files written under `files/`:
 
 - `<runId>_removals.csv` (detail: submitter, registry, chain, address, removed at, reward)
@@ -336,7 +346,10 @@ yarn start --mode removals --start YYYY-MM-01 --end YYYY-MM+1-01
 ```
 
 Exclusions are applied before dedupe, so excluding a bogus latest removal lets
-an earlier legitimate removal of the same item count instead.
+an earlier legitimate removal of the same item count instead. Re-run promptly:
+removal detection reads *current* statuses (see the caveat in "Removals +
+ATQ"), so re-running a months-old period can miss items whose status has
+since changed and shift everyone's pool-based amounts.
 
 **4. Republish the period record** (replaces the period's entry in the index):
 

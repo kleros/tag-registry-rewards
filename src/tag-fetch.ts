@@ -51,12 +51,17 @@ const fetchTagsBatchByRegistry = async (
         "Content-Type": "application/json",
       },
     })
+    if (!response.ok) {
+      throw new Error(`[fetchTagsBatch] Subgraph HTTP ${response.status} for registry ${registry}`)
+    }
 
     const json = await response.json()
     const data = json.data
-    if (!data) {
-      console.warn("[fetchTagsBatch] Unexpected subgraph response for registry:", registry, JSON.stringify(json).slice(0, 500))
-      break
+    if (json.errors || !data) {
+      // Abort instead of continuing with a partial page set: rewards are
+      // pool-based, so silently missing tags would inflate everyone else's
+      // payout and unpay the missing submitters. A retry is cheap.
+      throw new Error(`[fetchTagsBatch] Bad subgraph response for registry ${registry}: ${JSON.stringify(json).slice(0, 500)}`)
     }
 
     const items: Item[] = data.litems || []
@@ -151,12 +156,16 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
         "Content-Type": "application/json",
       },
     })
+    if (!response.ok) {
+      throw new Error(`[nonTokensFromDomains] Subgraph HTTP ${response.status}`)
+    }
 
     const json = await response.json()
     const data = json.data
-    if (!data) {
-      console.warn("[nonTokensFromDomains] Unexpected subgraph response:", JSON.stringify(json).slice(0, 500))
-      return domainItems
+    if (json.errors || !data) {
+      // Returning the unfiltered list here would keep token-domains in the
+      // domains pool and reward them twice — abort and retry instead.
+      throw new Error(`[nonTokensFromDomains] Bad subgraph response: ${JSON.stringify(json).slice(0, 500)}`)
     }
 
     const items: Item[] = data.litems || []

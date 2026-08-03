@@ -37,7 +37,6 @@ const fetchItemsByStatus = async (
             numberOfRequests
             latestRequestResolutionTime
             latestRequestSubmissionTime
-            latestRequester
             registryAddress
             requests {
               requester
@@ -58,16 +57,22 @@ const fetchItemsByStatus = async (
       body: JSON.stringify(subgraphQuery),
       headers: { "Content-Type": "application/json" },
     })
+    if (!response.ok) {
+      throw new Error(
+        `[removals-fetch] Subgraph HTTP ${response.status} for registry ${registry}`
+      )
+    }
 
     const json = await response.json()
     const data = json.data
-    if (!data) {
-      console.warn(
-        "[removals-fetch] Unexpected subgraph response for registry:",
-        registry,
-        JSON.stringify(json).slice(0, 500)
+    if (json.errors || !data) {
+      // Abort instead of continuing with a partial page set: rewards are
+      // pool / count, so silently missing removals would INFLATE everyone
+      // else's payout and unpay the missing removers. A retry is cheap.
+      throw new Error(
+        `[removals-fetch] Bad subgraph response for registry ${registry}: ` +
+          JSON.stringify(json).slice(0, 500)
       )
-      break
     }
 
     const items: Item[] = data.litems || []
@@ -142,8 +147,19 @@ export const fetchRemovals = async (period: Period): Promise<Removal[]> => {
       const removedAt = requestResolvedAt(item, clearing)
       if (!inPeriod(removedAt, period)) continue
 
-      const recipient = clearing.requester || item.latestRequester || ""
-      if (!recipient) continue // cannot pay an unknown remover
+      // Pay only the on-chain requester of the winning ClearingRequested.
+      // item.latestRequester is NOT a safe fallback: it belongs to the item's
+      // latest request, which can be a later (rejected) re-registration by an
+      // unrelated account — skip loudly rather than pay the wrong person.
+      const recipient = clearing.requester || ""
+      if (!recipient) {
+        console.warn(
+          `[removals-fetch] WARNING: removal ${item.id} has no requester on its ` +
+            "ClearingRequested (subgraph gap?) — skipped, nobody is paid for it. " +
+            "Investigate before sending/publishing."
+        )
+        continue
+      }
 
       const parsed = parseCaip(item.key0)
 
@@ -181,7 +197,9 @@ export const fetchAtqRegistered = async (period: Period): Promise<AtqRow[]> => {
       itemID: item.itemID ?? item.id,
       submissionTime: Number(registration.submissionTime ?? 0),
       resolutionTime: Number(registration.resolutionTime ?? 0),
-      requester: registration.requester ?? item.latestRequester ?? "",
+      // No latestRequester fallback (it may belong to a different, later
+      // request): empty requesters are dropped with a warning by the builder.
+      requester: registration.requester ?? "",
       metadata: buildMetadata(item),
     })
   }
@@ -203,7 +221,7 @@ export const fetchAtqAbsent = async (period: Period): Promise<AtqRow[]> => {
       itemID: item.itemID ?? item.id,
       submissionTime: Number(clearing.submissionTime ?? 0),
       resolutionTime: Number(clearing.resolutionTime ?? 0),
-      requester: clearing.requester ?? item.latestRequester ?? "",
+      requester: clearing.requester ?? "",
       metadata: buildMetadata(item),
     })
   }

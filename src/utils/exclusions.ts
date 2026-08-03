@@ -119,10 +119,12 @@ const applyScoped = <T>(
 
   const kept: T[] = []
   for (const item of items) {
-    const hit = applicable.find((entry) => matcher(entry, item))
-    if (hit) {
-      hit.hits++
-      console.log(`[exclusions] Dropping ${scope} ${describe(item)} — ${hit.reason}`)
+    // Credit EVERY matching entry, not just the first: an overlapping entry
+    // that never gets sole credit would otherwise warn as unmatched.
+    const hits = applicable.filter((entry) => matcher(entry, item))
+    if (hits.length > 0) {
+      for (const hit of hits) hit.hits++
+      console.log(`[exclusions] Dropping ${scope} ${describe(item)} — ${hits[0].reason}`)
     } else {
       kept.push(item)
     }
@@ -171,16 +173,26 @@ export const applyAtqExclusions = (
 
 // An exclusion that matched nothing is usually a typo (wrong chain id, checksum
 // pasted into itemID, ...). Warn per mode, over the scopes that mode applied.
+// A scope:"all" entry can legitimately match only in a mode the current run
+// didn't cover (e.g. a removals-only address during `generate`), so when the
+// run covers fewer kinds than the entry the message hints at that instead of
+// flatly crying typo. `--mode all` passes every kind, where the check is exact.
 export const warnUnmatchedExclusions = (
   list: ExclusionList,
   scopes: ExclusionScope[]
 ): void => {
+  const KINDS: ExclusionScope[] = ["submissions", "removals", "atq"]
+  const runCoversAllKinds = KINDS.every((kind) => scopes.includes(kind))
   for (const entry of list.entries) {
     if (entry.hits > 0) continue
     if (!scopes.some((scope) => scopeApplies(entry, scope))) continue
+    const broaderThanRun = (entry.scope ?? "all") === "all" && !runCoversAllKinds
     console.warn(
-      `[exclusions] WARNING: entry ${entry.label} (${entry.reason}) matched nothing — ` +
-        "check for typos (address, chain id, registry, itemID)."
+      `[exclusions] WARNING: entry ${entry.label} (${entry.reason}) matched nothing` +
+        (broaderThanRun
+          ? ` in this run (checked: ${scopes.join(", ")}). Scope is "all", so it` +
+            " may still match in the other modes — otherwise check for typos."
+          : " — check for typos (address, chain id, registry, itemID).")
     )
   }
 }

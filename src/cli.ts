@@ -14,6 +14,7 @@ import { removalsRoutine } from "./removals-routine"
 import { documentRoutine } from "./document-routine"
 import {
   applyTagExclusions,
+  ExclusionList,
   loadExclusions,
   warnUnmatchedExclusions,
 } from "./utils/exclusions"
@@ -125,10 +126,11 @@ const resolvePeriod = (): { start: Date; end: Date; label: string } => {
     )
   }
   if (argv.period && !argv.start && !argv.end) {
-    const [y, m] = String(argv.period)
-      .split("-")
-      .map((n: string) => Number(n))
-    if (!Number.isInteger(y) || !Number.isInteger(m) || m < 1 || m > 12) {
+    // Strict YYYY-MM only: a loose split would silently accept "2026-07-15"
+    // (probably meant as --start) and document the whole month instead.
+    const match = /^(\d{4})-(\d{2})$/.exec(String(argv.period).trim())
+    const [y, m] = match ? [Number(match[1]), Number(match[2])] : [NaN, NaN]
+    if (!match || m < 1 || m > 12) {
       throw new Error(`Invalid --period "${argv.period}". Expected YYYY-MM.`)
     }
     start = new Date(Date.UTC(y, m - 1, 1))
@@ -141,10 +143,14 @@ const resolvePeriod = (): { start: Date; end: Date; label: string } => {
 }
 
 // Build submission rewards from the given tags/gas files, or the latest fetch
-// manifest when omitted. Shared by `generate` and `all`.
+// manifest when omitted. Shared by `generate` and `all`. When `all` passes its
+// shared exclusion list, hits accumulate across steps and the unmatched-entry
+// check runs once at the end instead of per step (a scope:"all" entry that
+// matches only a removal would otherwise falsely warn here).
 const runGenerate = async (
   tagsFilename?: string,
-  gasFilename?: string
+  gasFilename?: string,
+  sharedExclusions?: ExclusionList
 ): Promise<void> => {
   const stipend = BigNumber.from(conf.STIPEND)
   const maxReward = BigNumber.from(conf.MAX_REWARD)
@@ -164,7 +170,7 @@ const runGenerate = async (
   )
   // Drop manually excluded tags before the pool math so their share is
   // redistributed to the remaining submissions (see README "Exclusions").
-  const exclusions = loadExclusions()
+  const exclusions = sharedExclusions ?? loadExclusions()
   const tags = applyTagExclusions(exclusions, allTags)
   if (tags.length !== allTags.length) {
     console.log(
@@ -172,7 +178,7 @@ const runGenerate = async (
         `${tags.length} remain.`
     )
   }
-  warnUnmatchedExclusions(exclusions, ["submissions"])
+  if (!sharedExclusions) warnUnmatchedExclusions(exclusions, ["submissions"])
   const rewards = await buildRewards(stipend, maxReward, tags, gasDunes)
   await buildCsv(rewards)
 }
@@ -249,14 +255,19 @@ const main = async () => {
     const { start, end, label: periodLabel } = resolvePeriod()
     console.log(`=== [all] period ${periodLabel} (${start.toISOString()} -> ${end.toISOString()}) ===`)
 
+    // One exclusion list shared across generate + removals, so hits accumulate
+    // and the unmatched check below sees every scope of the whole run.
+    const exclusions = loadExclusions()
+
     console.log("\n=== [all] 1/4 fetch (submissions) ===")
     await tagsRoutine({ start, end })
 
     console.log("\n=== [all] 2/4 generate (submissions) ===")
-    await runGenerate()
+    await runGenerate(undefined, undefined, exclusions)
 
     console.log("\n=== [all] 3/4 removals + ATQ ===")
-    const removalsManifest = await removalsRoutine({ start, end })
+    const removalsManifest = await removalsRoutine({ start, end }, exclusions)
+    warnUnmatchedExclusions(exclusions, ["submissions", "removals", "atq"])
 
     console.log("\n=== [all] 4/4 document (IPFS) ===")
     const entry = await documentRoutine({ period: { start, end }, periodLabel })

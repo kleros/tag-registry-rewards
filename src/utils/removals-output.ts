@@ -23,17 +23,18 @@ const toIso = (unixSeconds: number): string =>
 const aggregateTransactions = (
   rewards: Array<{ recipient: string; amount: BigNumber }>
 ): Transaction[] => {
+  // Key case-insensitively so casing variants of one address can't split into
+  // two transfers; the first-seen casing is kept for the output.
   const map: { [recipient: string]: Transaction } = {}
   for (const reward of rewards) {
-    if (!map[reward.recipient]) {
-      map[reward.recipient] = {
+    const key = reward.recipient.toLowerCase()
+    if (!map[key]) {
+      map[key] = {
         recipient: reward.recipient,
         amount: reward.amount,
       }
     } else {
-      map[reward.recipient].amount = map[reward.recipient].amount.add(
-        reward.amount
-      )
+      map[key].amount = map[key].amount.add(reward.amount)
     }
   }
   return Object.values(map)

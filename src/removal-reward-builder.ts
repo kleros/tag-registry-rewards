@@ -2,22 +2,13 @@ import { BigNumber } from "ethers"
 import conf from "./config"
 import { Removal, RemovalReward, Tag } from "./types"
 import { humanizeAmount } from "./transaction-sender"
+import { parseWei } from "./utils/parse-wei"
 
 type RegistryKey = Tag["registry"]
 
 type RemovalRegistryConfig = {
   rewardPool: BigNumber
   maxPerRemoval: BigNumber
-}
-
-const parseWei = (key: string, raw: string): BigNumber => {
-  try {
-    const value = BigNumber.from(raw.trim())
-    if (value.isNegative()) throw new Error("negative")
-    return value
-  } catch {
-    throw new Error(`Invalid ${key}="${raw}". Expected a non-negative integer (wei).`)
-  }
 }
 
 const getRemovalConfig = (): Record<RegistryKey, RemovalRegistryConfig> => ({

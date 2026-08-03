@@ -9,7 +9,6 @@ export interface Item {
   itemID?: string
   latestRequestResolutionTime: string
   latestRequestSubmissionTime?: string
-  latestRequester?: string
   numberOfRequests?: number
   registryAddress?: string
   status?: string

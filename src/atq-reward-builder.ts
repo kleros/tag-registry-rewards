@@ -2,16 +2,7 @@ import { BigNumber } from "ethers"
 import conf from "./config"
 import { AtqReward, AtqRow } from "./types"
 import { humanizeAmount } from "./transaction-sender"
-
-const parseWei = (key: string, raw: string): BigNumber => {
-  try {
-    const value = BigNumber.from(raw.trim())
-    if (value.isNegative()) throw new Error("negative")
-    return value
-  } catch {
-    throw new Error(`Invalid ${key}="${raw}". Expected a non-negative integer (wei).`)
-  }
-}
+import { parseWei } from "./utils/parse-wei"
 
 // Each ATQ kind (registrations vs removals) has its own pool and cap, computed
 // independently: every event of a kind gets min(pool / count, cap). This mirrors
