@@ -9,6 +9,7 @@ export const findChainConfig = (chainId: string): ChainConfig | undefined =>
 export const unrewardedChainDisplayNames: { [chainId: string]: string } = {
   "56": "Binance Smart Chain",
   "250": "Fantom Opera",
+  "534352": "Scroll",
 }
 
 export const chainDisplayName = (chainId: string): string =>
@@ -69,14 +70,14 @@ export const chains: ChainConfig[] = [
   //   explorer: 'ftmscan.com',
   //   rpc: 'https://1rpc.io/ftm'
   // },
-  {
-    id: '534352',
-    namespaceId: 'eip155',
-    name: 'Scroll',
-    label: 'Scroll',
-    explorer: 'scrollscan.com',
-    rpc: 'https://rpc.scroll.io'
-  },
+  // {
+  //   id: '534352',
+  //   namespaceId: 'eip155',
+  //   name: 'Scroll',
+  //   label: 'Scroll',
+  //   explorer: 'scrollscan.com',
+  //   rpc: 'https://rpc.scroll.io'
+  // },
   {
     id: '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
     namespaceId: 'solana',
@@ -140,5 +141,13 @@ export const chains: ChainConfig[] = [
     label: 'MegaETH',
     explorer: 'megaeth.blockscout.com',
     rpc: 'https://mainnet.megaeth.com/rpc'
+  },
+  {
+    id: '4663',
+    namespaceId: 'eip155',
+    name: 'Robinhood Chain',
+    label: 'Robinhood',
+    explorer: 'robinhoodchain.blockscout.com',
+    rpc: 'https://rpc.mainnet.chain.robinhood.com'
   }
 ]

@@ -7,11 +7,11 @@ const EVM_DUNE_SCHEMA_BY_CHAIN_ID: { [chainId: string]: string } = {
   "137": "polygon",
   "324": "zksync",
   "4326": "megaeth",
+  "4663": "robinhood",
   "8453": "base",
   "42161": "arbitrum",
   "42220": "celo",
   "43114": "avalanche_c",
-  "534352": "scroll",
   "59144": "linea",
 }
 
