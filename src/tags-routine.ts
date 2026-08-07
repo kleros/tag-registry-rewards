@@ -112,7 +112,8 @@ export const tagsRoutine = async (period: Period): Promise<FetchManifest> => {
   const manifest = await writeFetchOutputs(
     runId,
     enrichedTags,
-    droppedBySolanaHoldersCount
+    droppedBySolanaHoldersCount,
+    period
   )
 
   console.log("Fetch completed:", manifest)

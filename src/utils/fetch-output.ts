@@ -1,7 +1,7 @@
 import { createObjectCsvWriter } from "csv-writer"
 import { writeFileSync } from "fs"
 import conf from "../config"
-import { EnrichedTag, FetchManifest, GasDune, GenerateInput, Tag } from "../types"
+import { EnrichedTag, FetchManifest, GasDune, GenerateInput, Period, Tag } from "../types"
 import { ensureFilesDir, formatRegistry } from "./output-helpers"
 
 const toGasEntryAddress = (tagAddress: string, namespaceId: string): string => {
@@ -29,7 +29,8 @@ const buildGasFileRows = (tags: EnrichedTag[]): GasDune[] => {
 export const writeFetchOutputs = async (
   runId: string,
   enrichedTags: EnrichedTag[],
-  droppedBySolanaHoldersCount = 0
+  droppedBySolanaHoldersCount = 0,
+  period?: Period
 ): Promise<FetchManifest> => {
   ensureFilesDir()
 
@@ -108,6 +109,8 @@ export const writeFetchOutputs = async (
   const manifest: FetchManifest = {
     runId,
     generatedAt: new Date().toISOString(),
+    periodStart: period ? period.start.toISOString() : undefined,
+    periodEnd: period ? period.end.toISOString() : undefined,
     fullCsvFile,
     fullJsonFile,
     generateInputFile,

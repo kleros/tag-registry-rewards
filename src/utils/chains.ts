@@ -3,6 +3,19 @@ import { ChainConfig } from "../types"
 export const findChainConfig = (chainId: string): ChainConfig | undefined =>
   chains.find((c) => String(c.id).toLowerCase() === String(chainId).toLowerCase())
 
+// Display names for chains that are NOT eligible for submission rewards (and so
+// are commented out of `chains` below) but can still appear in removal reports:
+// removals are rewarded regardless of chain, only the label is needed here.
+export const unrewardedChainDisplayNames: { [chainId: string]: string } = {
+  "56": "Binance Smart Chain",
+  "250": "Fantom Opera",
+}
+
+export const chainDisplayName = (chainId: string): string =>
+  findChainConfig(chainId)?.name ??
+  unrewardedChainDisplayNames[chainId] ??
+  `Chain ${chainId}`
+
 // these chains are considered rewarded by the curate incentive program,
 // if any chain becomes unrewarded by the program, make sure to comment that chain here,
 // and the script will exclude it from the rewards.
