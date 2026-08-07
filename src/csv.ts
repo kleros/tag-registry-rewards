@@ -5,24 +5,7 @@ import { writeFileSync } from "fs"
 import { humanizeAmount } from "./transaction-sender"
 import conf from "./config"
 import { ensureFilesDir, formatRegistry } from "./utils/output-helpers"
-
-const PRETTY_CHAIN_NAME: { [chainId: string]: string } = {
-  "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "Solana",
-  "1": "Ethereum Mainnet",
-  "56": "Binance Smart Chain",
-  "100": "Gnosis Chain",
-  "137": "Polygon",
-  "42161": "Arbitrum",
-  "10": "Optimism",
-  "324": "zkSync",
-  "43114": "Avalanche",
-  "42220": "Celo",
-  "8453": "Base",
-  "250": "Fantom",
-  "534352": "Scroll",
-  "59144": "Linea",
-  "4326": "MegaETH Mainnet",
-}
+import { chainDisplayName } from "./utils/chains"
 
 const rewardsHeader = [
   { id: "submitter", title: "Submitter" },
@@ -70,7 +53,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
 
     const humanAmount = humanizeAmount(reward.amount)
 
-    const prettierChainName = PRETTY_CHAIN_NAME[reward.contractInfo.chain]
+    const prettierChainName = chainDisplayName(reward.contractInfo.chain)
 
     return {
       submitter,
@@ -118,8 +101,7 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
     id: reward.id,
     registry: reward.contractInfo.registry,
     chain: reward.contractInfo.chain,
-    chainName:
-      PRETTY_CHAIN_NAME[reward.contractInfo.chain] || reward.contractInfo.chain,
+    chainName: chainDisplayName(reward.contractInfo.chain),
     tagAddress: reward.contractInfo.tagAddress,
     amount: reward.amount.toString(),
   }))
