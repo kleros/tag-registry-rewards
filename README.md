@@ -35,6 +35,7 @@ Fill `.env` values:
 - `REWARD_REDISTRIBUTE_CAPPED_DOMAINS` (`true` or `false`)
 - `SOLANA_TX_DIVIDER` (number `>= 1`; applied in `generate` before formula evaluation)
 - `SOLANA_TX_LOOKBACK_DAYS` (positive number for N-day lookback window, or `0`/empty for all-time)
+- `EVM_TX_LOOKBACK_DAYS` (same, for EVM chains; all-time scans of ethereum/base/arbitrum exceed the Dune free tier's execution cap and abort the run)
 - wallet settings are required only for `send`
 - Optional Dune stability tuning:
   - `DUNE_HTTP_MAX_RETRIES`

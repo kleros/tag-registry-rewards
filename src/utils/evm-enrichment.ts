@@ -1,4 +1,5 @@
 import { executeDuneSql, getDuneApiKey } from "./dune-client"
+import conf from "../config"
 
 const EVM_DUNE_SCHEMA_BY_CHAIN_ID: { [chainId: string]: string } = {
   "1": "ethereum",
@@ -13,6 +14,20 @@ const EVM_DUNE_SCHEMA_BY_CHAIN_ID: { [chainId: string]: string } = {
   "42220": "celo",
   "43114": "avalanche_c",
   "59144": "linea",
+}
+
+// An unbounded scan of ethereum/base/arbitrum transactions blows past the free
+// tier's execution cap. Filtering on block_time lets Dune prune partitions.
+const getEvmTxLookbackDays = (): number | null => {
+  const raw = conf.EVM_TX_LOOKBACK_DAYS
+  if (!raw || raw.trim() === "" || raw.trim() === "0") return null // null = all-time
+  const days = Number(raw)
+  if (!Number.isFinite(days) || days < 1) {
+    throw new Error(
+      `Invalid EVM_TX_LOOKBACK_DAYS="${raw}". Expected a positive number or empty for all-time.`
+    )
+  }
+  return days
 }
 
 const isValidEvmAddress = (address: string): boolean =>
@@ -55,35 +70,59 @@ export const enrichAllEvmAddresses = async (
 
   const duneApiKey = getDuneApiKey()
 
-  const unionParts: string[] = []
-  let totalAddresses = 0
+  const lookbackDays = getEvmTxLookbackDays()
+  const timeFilter = lookbackDays
+    ? `  AND block_time >= now() - INTERVAL '${lookbackDays}' day\n`
+    : ""
+  if (lookbackDays) {
+    console.log(`[evm] Using lookback window of ${lookbackDays} days`)
+  } else {
+    console.log(
+      `[evm] Using all-time tx counts (no EVM_TX_LOOKBACK_DAYS set) — high-traffic chains often exceed the free tier's execution limit`
+    )
+  }
+
+  // One execution per chain. A single UNION ALL over every chain blows past the
+  // free tier's 2 minute execution cap, and so does an unbounded scan of a
+  // high-traffic chain — see EVM_TX_LOOKBACK_DAYS.
+  let chainIndex = 0
   for (const { chainId, schema, addresses } of chainEntries) {
-    totalAddresses += addresses.length
+    chainIndex += 1
     const inList = addresses
       .map((a) => `from_hex(replace('${a}', '0x', ''))`)
       .join(", ")
 
-    unionParts.push(
-      `SELECT lower('0x' || to_hex("to")) AS address, COUNT(*) AS tx_count, ${chainId} AS chain\n` +
-      `  FROM ${schema}.transactions\n` +
-      `  WHERE success = TRUE AND "to" IN (${inList})\n` +
-      `  GROUP BY 1`
+    const sql =
+      `SELECT lower('0x' || to_hex("to")) AS address, COUNT(*) AS tx_count\n` +
+      `FROM ${schema}.transactions\n` +
+      `WHERE success = TRUE AND "to" IN (${inList})\n` +
+      `${timeFilter}` +
+      `GROUP BY 1`
+
+    console.log(
+      `[evm] chain ${chainIndex}/${chainEntries.length} ${schema} (chainId=${chainId}), ${addresses.length} addresses`
     )
-  }
 
-  console.log(
-    `[evm] Dune UNION ALL query: ${chainEntries.length} chains, ${totalAddresses} addresses`
-  )
+    // A failed lookup used to fall back to txCount=0, which silently reprices
+    // every submission on this chain as an unused contract. Rewards are money:
+    // abort the run instead of paying out on fabricated zeros.
+    let rows: any[]
+    try {
+      rows = await executeDuneSql(duneApiKey, sql, `evm-${schema}`)
+    } catch (err) {
+      throw new Error(
+        `[evm] chain ${schema} (chainId=${chainId}) tx count lookup failed for ${addresses.length} addresses: ${
+          (err as Error).message
+        }`
+      )
+    }
 
-  const sql = `WITH unioned AS (\n${unionParts.join("\n  UNION ALL\n")}\n)\nSELECT address, tx_count, CAST(chain AS varchar) AS chain\nFROM unioned`
-  const rows = await executeDuneSql(duneApiKey, sql, "evm")
-
-  for (const row of rows) {
-    const address = String(row.address || "").toLowerCase()
-    const chainId = String(row.chain || "")
-    if (!chainId || !output[chainId] || !isValidEvmAddress(address)) continue
-    output[chainId][address] = {
-      txCount: Number(row.tx_count || 0),
+    for (const row of rows) {
+      const address = String(row.address || "").toLowerCase()
+      if (!isValidEvmAddress(address)) continue
+      output[chainId][address] = {
+        txCount: Number(row.tx_count || 0),
+      }
     }
   }
 

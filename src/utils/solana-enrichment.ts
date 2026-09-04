@@ -2,7 +2,19 @@ import { Tag } from "../types"
 import { executeDuneSql, getDuneApiKey } from "./dune-client"
 import conf from "../config"
 
-const SOLANA_TX_CHUNK_SIZE = 25
+const DEFAULT_SOLANA_TX_CHUNK_SIZE = 100
+
+// Each execution pays a near-constant full-table scan, so the address count
+// barely moves the cost. Fewer, larger chunks beat many small ones.
+const getSolanaTxChunkSize = (): number => {
+  const raw = conf.SOLANA_TX_CHUNK_SIZE
+  if (!raw || raw.trim() === "") return DEFAULT_SOLANA_TX_CHUNK_SIZE
+  const size = Number(raw)
+  if (!Number.isInteger(size) || size < 1) {
+    throw new Error(`Invalid SOLANA_TX_CHUNK_SIZE="${raw}". Expected a positive integer.`)
+  }
+  return size
+}
 const SOLANA_HOLDERS_CHUNK_SIZE = 50
 const SOLANA_DUNE_CONCURRENCY = 1
 
@@ -64,10 +76,11 @@ const getBatchTotalTxns = async (
   }
 
   const result: { [address: string]: number } = {}
-  const chunks = splitChunks(addresses, SOLANA_TX_CHUNK_SIZE)
+  const chunkSize = getSolanaTxChunkSize()
+  const chunks = splitChunks(addresses, chunkSize)
 
   console.log(
-    `[solana-tx] ${chunks.length} chunks of up to ${SOLANA_TX_CHUNK_SIZE} addresses, concurrency=${SOLANA_DUNE_CONCURRENCY}`
+    `[solana-tx] ${chunks.length} chunks of up to ${chunkSize} addresses, concurrency=${SOLANA_DUNE_CONCURRENCY}`
   )
 
   const tasks = chunks.map((chunk, idx) => async () => {
@@ -83,7 +96,17 @@ WHERE address IN (${inList})
   ${timeFilter}
 GROUP BY address
 `
-    return executeDuneSql(apiKey, sql, `solana-tx-${idx + 1}`)
+    // Swallowing a failed chunk here would reprice its addresses as unused, so
+    // the run aborts instead of paying out on fabricated zeros.
+    try {
+      return await executeDuneSql(apiKey, sql, `solana-tx-${idx + 1}`)
+    } catch (err) {
+      throw new Error(
+        `[solana-tx] chunk ${idx + 1}/${chunks.length} failed for ${chunk.length} addresses: ${
+          (err as Error).message
+        }`
+      )
+    }
   })
 
   const allRows = await runWithConcurrency(tasks, SOLANA_DUNE_CONCURRENCY)
@@ -115,7 +138,17 @@ FROM solana_utils.token_accounts
 WHERE token_mint_address IN (${inList})
 GROUP BY token_mint_address
 `
-    return executeDuneSql(apiKey, sql, `solana-holders-${idx + 1}`)
+    // Unknown holder counts default to 0, which drops the mint from rewards
+    // entirely — never do that on the strength of a failed query.
+    try {
+      return await executeDuneSql(apiKey, sql, `solana-holders-${idx + 1}`)
+    } catch (err) {
+      throw new Error(
+        `[solana-holders] chunk ${idx + 1}/${chunks.length} failed for ${chunk.length} mints: ${
+          (err as Error).message
+        }`
+      )
+    }
   })
 
   const allRows = await runWithConcurrency(tasks, SOLANA_DUNE_CONCURRENCY)

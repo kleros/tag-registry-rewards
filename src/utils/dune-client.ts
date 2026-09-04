@@ -120,15 +120,49 @@ const duneRequest = (
 ): Promise<any> =>
   withDuneMutex(() => duneRequestRaw(apiKey, method, path, logPrefix, payload))
 
+// Dune reports why an execution failed in the status body; without this the
+// caller only ever sees "QUERY_STATE_FAILED" and cannot tell a query timeout
+// from a bad table name.
+const describeDuneError = (status: any): string => {
+  const error = status && status.error
+  if (!error) return ""
+  const message =
+    typeof error === "string" ? error : error.message || JSON.stringify(error)
+  if (!message) return ""
+  const type = typeof error === "object" && error.type ? ` (${error.type})` : ""
+  return `: ${message}${type}`
+}
+
+const isInvalidPerformanceTier = (error: unknown): boolean =>
+  String((error as Error)?.message || "").includes("Invalid performance tier")
+
+// Paid tiers ("medium"/"large") are rejected on plans without credits; fall back
+// to the tier every plan can run.
+const FALLBACK_DUNE_PERFORMANCE = "free"
+
 export const executeDuneSql = async (
   apiKey: string,
   sql: string,
   logPrefix: string
 ): Promise<any[]> => {
-  const execute = await duneRequest(apiKey, "POST", "/sql/execute", logPrefix, {
-    sql,
-    performance: dunePerformance,
-  })
+  let execute: any
+  try {
+    execute = await duneRequest(apiKey, "POST", "/sql/execute", logPrefix, {
+      sql,
+      performance: dunePerformance,
+    })
+  } catch (err) {
+    if (!isInvalidPerformanceTier(err) || dunePerformance === FALLBACK_DUNE_PERFORMANCE) {
+      throw err
+    }
+    console.warn(
+      `[${logPrefix}] Dune rejected performance tier "${dunePerformance}", retrying with "${FALLBACK_DUNE_PERFORMANCE}"`
+    )
+    execute = await duneRequest(apiKey, "POST", "/sql/execute", logPrefix, {
+      sql,
+      performance: FALLBACK_DUNE_PERFORMANCE,
+    })
+  }
   const executionId = execute.execution_id
   if (!executionId) {
     throw new Error(`No execution_id returned by Dune: ${JSON.stringify(execute)}`)
@@ -158,7 +192,9 @@ export const executeDuneSql = async (
       state === "QUERY_STATE_CANCELLED" ||
       state === "QUERY_STATE_EXPIRED"
     ) {
-      throw new Error(`Dune execution ${executionId} failed with state ${state}`)
+      throw new Error(
+        `Dune execution ${executionId} failed with state ${state}${describeDuneError(status)}`
+      )
     }
   }
 

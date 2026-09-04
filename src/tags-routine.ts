@@ -18,7 +18,7 @@ const enrichTags = async (
   let droppedBySolanaHoldersCount = 0
   console.log(`Starting enrichment for ${tags.length} tags...`)
 
-  // --- EVM: single UNION ALL query across all chains ---
+  // --- EVM: one Dune query per chain ---
   const evmAddressesByChain: { [chainId: string]: string[] } = {}
   for (const tag of tags) {
     const chainCfg = findChainConfig(tag.chain)
@@ -29,25 +29,22 @@ const enrichTags = async (
     evmAddressesByChain[tag.chain].push(tag.tagAddress)
   }
 
-  try {
-    const evmResults = await enrichAllEvmAddresses(evmAddressesByChain)
-    for (const chainId of Object.keys(evmResults)) {
-      evmBatchCacheByChain[chainId] = evmResults[chainId]
-    }
-  } catch (err) {
-    console.warn(
-      `[enrich] EVM batch lookup failed, using txCount=0 for all chains`,
-      err
-    )
+  // Enrichment drives the payout split, so a lookup failure must stop the run
+  // rather than quietly reprice every affected submission as zero-traffic.
+  const evmResults = await enrichAllEvmAddresses(evmAddressesByChain)
+  for (const chainId of Object.keys(evmResults)) {
+    evmBatchCacheByChain[chainId] = evmResults[chainId]
   }
 
-  // --- Solana: batch all tags into 2 Dune queries ---
+  // --- Solana: batched Dune queries ---
   const solanaTags = tags.filter((tag) => {
     const chainCfg = findChainConfig(tag.chain)
     return chainCfg && chainCfg.namespaceId === "solana"
   })
-  const solanaCache =
-    solanaTags.length > 0 ? await enrichSolanaTagsBatch(solanaTags) : {}
+  let solanaCache: Awaited<ReturnType<typeof enrichSolanaTagsBatch>> = {}
+  if (solanaTags.length > 0) {
+    solanaCache = await enrichSolanaTagsBatch(solanaTags)
+  }
 
   // --- Assemble enriched tags ---
   for (let index = 0; index < tags.length; index++) {
