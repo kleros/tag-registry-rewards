@@ -155,7 +155,7 @@ export const chains: ChainConfig[] = [
     namespaceId: 'eip155',
     name: 'Arc Mainnet',
     label: 'Arc',
-    explorer: 'explorer.arc.io',
+    explorer: 'arc.etherscan.io',
     rpc: 'https://rpc.mainnet.arc.io'
   }
 ]
