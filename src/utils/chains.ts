@@ -149,5 +149,13 @@ export const chains: ChainConfig[] = [
     label: 'Robinhood',
     explorer: 'robinhoodchain.blockscout.com',
     rpc: 'https://rpc.mainnet.chain.robinhood.com'
+  },
+  {
+    id: '5042',
+    namespaceId: 'eip155',
+    name: 'Arc Mainnet',
+    label: 'Arc',
+    explorer: 'explorer.arc.io',
+    rpc: 'https://rpc.mainnet.arc.io'
   }
 ]
