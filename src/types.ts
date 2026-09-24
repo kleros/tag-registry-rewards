@@ -86,6 +86,7 @@ export type FilterCheckReason =
   | "not a contract (getCode == 0x)"
   | "eip-1167 minimal proxy"
   | "erc-721 contract"
+  | "prediction market outcome token"
 
 export interface FilterCheckRow {
   id: string
@@ -95,6 +96,8 @@ export interface FilterCheckRow {
   tagAddress: string
   latestRequestResolutionTime: number
   reason: FilterCheckReason
+  // Extra evidence for the exclusion (e.g. the prediction market the token belongs to).
+  detail?: string
 }
 
 export interface FilterCheckReport {

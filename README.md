@@ -99,6 +99,7 @@ What it does:
 - filters out tokens that also appear in the Address Tags registry
 - applies exclusion filters:
   - chain not configured for rewards
+  - Tokens: skip prediction-market outcome tokens (see "Prediction-market outcome tokens" below)
   - Address Tags: skip EOA (`getCode == 0x`)
   - Address Tags: skip EIP-1167 proxy when implementation has code
   - Address Tags: skip ERC-721 (`supportsInterface(0x80ac58cd)`)
@@ -131,6 +132,7 @@ What it does:
 - runs only exclusion checks (no Dune tx-count, no Solana holders)
 - reports exclusions from:
   - chain not configured for rewards
+  - Tokens: prediction-market outcome tokens (the `Detail` column names the market)
   - Address Tags: not a contract (`getCode == 0x`)
   - Address Tags: EIP-1167 proxy
   - Address Tags: ERC-721 contract
@@ -272,6 +274,57 @@ Notes on publishing:
 - If `document` fails after writing the local snapshot (e.g. the upload
   errors), the index is NOT updated — the local snapshot and index disagree
   until you re-run `document` for that period, which is safe and idempotent.
+
+## Prediction-market outcome tokens (not rewarded)
+
+Since the October 2026 period, outcome / position tokens of prediction markets
+(Seer, Overtime/Thales, Trueo, ...) submitted to the **Tokens** registry are not
+rewarded: they are cheap to mint by the hundred (every market spawns one token
+per outcome) and were being farmed. `fetch` and `filter-check` drop them with
+the reason `prediction market outcome token`, before Dune enrichment, so the
+tokens pool is split only among real submissions.
+
+Detection is **purely on-chain** (`src/utils/prediction-market-detection.ts`);
+the Website / Name fields are submitter-controlled and are never consulted.
+Every EVM token of the period is checked, batched per chain through Multicall3:
+
+- **Generic probe** — the token is a Gnosis `Wrapped1155` ERC-20 wrapper around
+  an ERC-1155 ConditionalTokens position (`multiToken()` returns a contract that
+  is ERC-1155 and answers `getOutcomeSlotCount`). This catches every protocol
+  built on the Gnosis Conditional Tokens Framework (Seer categorical, scalar,
+  futarchy and Circles markets, Omen positions, ...) on every chain, without
+  knowing the protocol.
+- **Protocol probes** — exact matches that also name the market in the log /
+  `Detail` column: Seer market factories (`allMarkets()` → `wrappedOutcome(i)`
+  on Gnosis, Ethereum, Base, Optimism), Overtime/Thales position tokens
+  (`market()` + manager `isKnownMarket` on Optimism, Arbitrum, Base, Polygon)
+  and Trueo YES/NO tokens (Base). The addresses live in
+  `PREDICTION_MARKET_REGISTRIES` in that file — add a line there to cover a
+  new factory, or a new probe function for a protocol with a different shape.
+
+Reliability rules:
+
+- An RPC failure **aborts the run** after retries (rotating through the chain's
+  configured rpc and a few public fallbacks, `FALLBACK_RPCS`): rewards are
+  pool-based, so silently keeping an undetected token would underpay everyone
+  else. Re-run. Rate limits (HTTP 429) and timeouts rotate to the next rpc;
+  only a genuine EVM revert is treated as "not an outcome token".
+- The filter is **not gated on the period**: like `exclusions.json`, re-running
+  `fetch` for an older month drops its prediction-market tokens too, so a
+  regenerated snapshot can differ from what was paid. Set
+  `PREDICTION_MARKET_FILTER_SINCE=YYYY-MM-DD` in `.env` to only apply it to
+  periods starting on/after that date.
+- Chains without Multicall3 fall back to one `eth_call` per probe (slower).
+- `PM_DETECT_DEBUG=1` logs the timing of every Multicall3 batch.
+- Solana tokens are not probed (no prediction-market SPL tokens have appeared
+  in the registry; the 5000-holder threshold already drops them in practice).
+- Removals are unaffected: removing a prediction-market token still earns the
+  usual removal reward. Use `exclusions.json` if a specific removal should not.
+
+Validated on Aug–Sep 2026 (250/250 Seer tokens detected, 0 false positives on
+the other 277 tokens, 28 s) and on Jun 2025–Jul 2026 (2,084 tokens, 0 false
+positives, 81 s). Chains with Seer factories cost ~10–25 s each (the markets
+are enumerated on every run); the rest take well under a second.
 
 ## Exclusions: fixing rewards after they were generated
 
