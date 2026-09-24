@@ -92,7 +92,7 @@ export const chains: ChainConfig[] = [
     name: 'Ethereum Mainnet',
     label: 'ETH',
     explorer: 'etherscan.io',
-    rpc: 'https://eth.llamarpc.com'
+    rpc: 'https://ethereum-rpc.publicnode.com'
   },
   {
     id: '137',

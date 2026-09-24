@@ -16,7 +16,7 @@ const EVM_DUNE_SCHEMA_BY_CHAIN_ID: { [chainId: string]: string } = {
   "59144": "linea",
 }
 
-const isValidEvmAddress = (address: string): boolean =>
+export const isValidEvmAddress = (address: string): boolean =>
   /^0x[a-fA-F0-9]{40}$/.test(String(address || ""))
 
 export interface EvmEnrichment {

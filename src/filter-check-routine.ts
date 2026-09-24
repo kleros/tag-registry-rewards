@@ -8,9 +8,9 @@ export const filterCheckRoutine = async (period: Period): Promise<FilterCheckRep
   const tags = await fetchTags(period)
   console.log("Filter-check fetched tags:", tags.length)
 
-  const { excluded } = await applyTagFilters(tags)
+  const { excluded } = await applyTagFilters(tags, { period })
 
-  const excludedRows: FilterCheckRow[] = excluded.map(({ tag, reason }) => ({
+  const excludedRows: FilterCheckRow[] = excluded.map(({ tag, reason, detail }) => ({
     id: tag.id,
     submitter: tag.submitter,
     registry: tag.registry,
@@ -18,6 +18,7 @@ export const filterCheckRoutine = async (period: Period): Promise<FilterCheckRep
     tagAddress: tag.tagAddress,
     latestRequestResolutionTime: tag.latestRequestResolutionTime,
     reason,
+    detail,
   }))
 
   const runId = String(new Date().getTime())
