@@ -101,9 +101,13 @@ export const tagsRoutine = async (period: Period): Promise<FetchManifest> => {
   const tags = await fetchTags(period)
   console.log("Fetched tags:", tags.length)
 
-  const { passed: filteredTags, excluded } = await applyTagFilters(tags)
-  for (const { tag, reason } of excluded) {
-    console.log(`[filter] Excluded (${reason}):`, tag.tagAddress, `| chain: ${tag.chain}`)
+  const { passed: filteredTags, excluded } = await applyTagFilters(tags, { period })
+  for (const { tag, reason, detail } of excluded) {
+    console.log(
+      `[filter] Excluded (${reason}):`,
+      tag.tagAddress,
+      `| chain: ${tag.chain}` + (detail ? ` | ${detail}` : "")
+    )
   }
   console.log("Tags after fetch filtering:", filteredTags.length)
 

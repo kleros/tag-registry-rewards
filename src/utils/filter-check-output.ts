@@ -3,13 +3,18 @@ import conf from "../config"
 import { FilterCheckReason, FilterCheckRow } from "../types"
 import { ensureFilesDir, formatRegistry } from "./output-helpers"
 
-const REASON_ORDER: FilterCheckReason[] = [
-  "chain not configured for rewards",
-  "already tagged on explorer",
-  "not a contract (getCode == 0x)",
-  "eip-1167 minimal proxy",
-  "erc-721 contract",
-]
+// Every FilterCheckReason must appear here (the compiler enforces it), in the
+// order the summary rows are written.
+const REASON_SUMMARY_ORDER: { [reason in FilterCheckReason]: true } = {
+  "chain not configured for rewards": true,
+  "already tagged on explorer": true,
+  "token on address tags": true,
+  "prediction market outcome token": true,
+  "not a contract (getCode == 0x)": true,
+  "eip-1167 minimal proxy": true,
+  "erc-721 contract": true,
+}
+const REASON_ORDER = Object.keys(REASON_SUMMARY_ORDER) as FilterCheckReason[]
 
 type CsvRow = {
   rowType: "detail" | "summary"
@@ -21,6 +26,7 @@ type CsvRow = {
   chain: string
   tagAddress: string
   latestRequestResolutionTimeIso: string
+  detail: string
 }
 
 export const writeFilterCheckOutput = async (
@@ -50,6 +56,7 @@ export const writeFilterCheckOutput = async (
     latestRequestResolutionTimeIso: new Date(
       row.latestRequestResolutionTime * 1000
     ).toISOString(),
+    detail: row.detail ?? "",
   }))
 
   const summaryRows: CsvRow[] = [
@@ -63,6 +70,7 @@ export const writeFilterCheckOutput = async (
       chain: "",
       tagAddress: "",
       latestRequestResolutionTimeIso: "",
+      detail: "",
     },
     ...summaryByReason.map((item) => ({
       rowType: "summary" as const,
@@ -74,6 +82,7 @@ export const writeFilterCheckOutput = async (
       chain: "",
       tagAddress: "",
       latestRequestResolutionTimeIso: "",
+      detail: "",
     })),
   ]
 
@@ -89,6 +98,7 @@ export const writeFilterCheckOutput = async (
       { id: "chain", title: "Chain ID" },
       { id: "tagAddress", title: "Address tagged" },
       { id: "latestRequestResolutionTimeIso", title: "Registered at" },
+      { id: "detail", title: "Detail" },
     ],
   })
 
