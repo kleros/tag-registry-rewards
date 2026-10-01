@@ -157,5 +157,13 @@ export const chains: ChainConfig[] = [
     label: 'Arc',
     explorer: 'arc.etherscan.io',
     rpc: 'https://rpc.mainnet.arc.io'
+  },
+  {
+    id: '999',
+    namespaceId: 'eip155',
+    name: 'HyperEVM',
+    label: 'Hyperliquid',
+    explorer: 'hyperevmscan.io',
+    rpc: 'https://rpc.hyperliquid.xyz/evm'
   }
 ]

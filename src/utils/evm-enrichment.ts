@@ -6,6 +6,7 @@ const EVM_DUNE_SCHEMA_BY_CHAIN_ID: { [chainId: string]: string } = {
   "100": "gnosis",
   "137": "polygon",
   "324": "zksync",
+  "999": "hyperevm",
   "4326": "megaeth",
   "4663": "robinhood",
   "5042": "arc",
