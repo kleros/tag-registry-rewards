@@ -8,10 +8,13 @@ import { hideBin } from "yargs/helpers"
 import buildCsv from "./csv"
 import { existsSync, readFileSync } from "fs"
 import { resolve } from "path"
+import { inspect } from "util"
 import { tagsRoutine } from "./tags-routine"
 import { filterCheckRoutine } from "./filter-check-routine"
 import { removalsRoutine } from "./removals-routine"
 import { documentRoutine } from "./document-routine"
+import { verifyTxCounts } from "./verify-tx-counts"
+import { redactSecrets } from "./utils/solana-rpc"
 import {
   applyTagExclusions,
   ExclusionList,
@@ -51,11 +54,13 @@ const argv: any = yargs(hideBin(process.argv))
     Run the full compute + publish (everything except send):
       $0 --mode all --period YYYY-MM
     Send rewards:
-      $0 --mode send --rewards \${filename}.json`
+      $0 --mode send --rewards \${filename}.json
+    Check the tx-count providers (HyperSync, Solana RPC) against known values:
+      $0 --mode verify-counts`
   )
   .option("m", {
     description:
-      "The mode of the execution. Steps: 'fetch', 'filter-check', 'removals', 'generate', 'document', 'all', and 'send'",
+      "The mode of the execution. Steps: 'fetch', 'filter-check', 'removals', 'generate', 'document', 'all', 'send', and 'verify-counts'",
     alias: "mode",
   })
   .option("s", {
@@ -187,7 +192,7 @@ const main = async () => {
   const mode = argv.mode as string | undefined
   if (mode === undefined) {
     throw new Error(
-      "You must choose a mode, 'fetch' | 'filter-check' | 'removals' | 'generate' | 'document' | 'all' | 'send'"
+      "You must choose a mode, 'fetch' | 'filter-check' | 'removals' | 'generate' | 'document' | 'all' | 'send' | 'verify-counts'"
     )
   }
   if (mode === "fetch") {
@@ -302,6 +307,10 @@ const main = async () => {
       reward.amount = BigNumber.from(reward.amount)
     })
     await sendAllRewards(rewards)
+  } else if (mode === "verify-counts") {
+    // check the tx-count providers against known values before a real fetch.
+    const ok = await verifyTxCounts()
+    if (!ok) process.exitCode = 1
   } else {
     throw new Error(`Unrecognized mode ${mode}`)
   }
@@ -309,7 +318,12 @@ const main = async () => {
 
 // Explicit catch so failures exit non-zero on every Node version (an unhandled
 // rejection only crashes on Node >= 15) — cron/CI wrappers rely on the code.
+// Network errors embed request URLs, and those can carry API keys (Solana RPC
+// URLs, the subgraph URL): the error is printed redacted.
 main().catch((err) => {
-  console.error(err)
+  const keyedUrls = String(process.env.SOLANA_RPC_URLS || "")
+    .split(",")
+    .concat(String(conf.XDAI_GTCR_SUBGRAPH_URL || ""))
+  console.error(redactSecrets(inspect(err), keyedUrls))
   process.exit(1)
 })

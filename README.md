@@ -3,8 +3,8 @@
 Unified reward pipeline combining:
 
 - tag fetching from `tag-registry-rewards`
-- EVM enrichment logic via Dune SQL
-- Solana enrichment logic from `solana_only`
+- transaction counts from Envio HyperSync (EVM) and Solana JSON-RPC, both free
+  (Dune is still available as an option, see [Transaction counts](#transaction-counts))
 
 The `generate` and `send` steps stay compatible with the old reward flow.
 
@@ -26,7 +26,9 @@ npx tsc --noEmit
 
 Fill `.env` values:
 
-- `DUNE_API_KEY` (required for Solana and EVM enrichment)
+- `ENVIO_API_TOKEN` (EVM tx counts; free token at https://envio.dev/app/api-tokens)
+- `SOLANA_RPC_URLS` (optional; comma-separated Solana RPC URLs, defaults to the
+  public endpoint; add free Helius and Alchemy URLs to finish a month overnight)
 - `REWARD_FORMULA_ADDRESS_TAGS` (expression formula for Address Tags registry)
 - `REWARD_FORMULA_TOKENS` (expression formula for Tokens registry)
 - `REWARD_FORMULA_DOMAINS` (expression formula for Domains registry)
@@ -34,12 +36,10 @@ Fill `.env` values:
 - `REWARD_REDISTRIBUTE_CAPPED_TOKENS` (`true` or `false`)
 - `REWARD_REDISTRIBUTE_CAPPED_DOMAINS` (`true` or `false`)
 - `SOLANA_TX_DIVIDER` (number `>= 1`; applied in `generate` before formula evaluation)
-- `SOLANA_TX_LOOKBACK_DAYS` (positive number for N-day lookback window, or `0`/empty for all-time)
+- `SOLANA_TX_LOOKBACK_DAYS` (`0`/empty for all-time; a positive N-day window is only supported by the Dune provider)
 - wallet settings are required only for `send`
-- Optional Dune stability tuning:
-  - `DUNE_HTTP_MAX_RETRIES`
-  - `DUNE_HTTP_RETRY_BASE_MS`
-  - `DUNE_STATUS_LOG_EVERY_POLLS`
+- all tx-count settings, including the optional Dune ones, are listed commented
+  out in `.env.example`
 
 Formula syntax:
 
@@ -62,6 +62,105 @@ Formula syntax:
   - effective `txCount` for Solana entries is `floor(txCount / SOLANA_TX_DIVIDER)` before any formula math
   - non-Solana entries are not changed
 
+## Transaction counts
+
+`fetch` weights rewards by each contract's **all-time count of successful
+transactions sent to it**, counted up to the run. The counts are free:
+
+| | EVM (14 chains) | Solana |
+|---|---|---|
+| Provider (default) | Envio HyperSync, `EVM_TX_PROVIDER=hypersync` | JSON-RPC, `SOLANA_TX_PROVIDER=rpc` |
+| What is counted | top-level txs with `to` = address and `status = 1` (pre-Byzantium Ethereum, which has no status: `gasUsed < gas` or the receipt has logs, see below); on HyperEVM, user-signed txs only (see below) | signatures from `getSignaturesForAddress` with `err == null` |
+| Key | `ENVIO_API_TOKEN` (free, required) | none; `SOLANA_RPC_URLS` to add free Helius/Alchemy URLs |
+| Holders (Tokens) | — | distinct owners of open token accounts, any balance (Jupiter's count when it already shows ≥ 5,000); an entry that is not a token mint gets 0 |
+
+Ethereum receipts before Byzantium (block 4,370,000, October 2017) have no
+status. A failed transaction then burnt all its gas and kept no logs, so one
+counts as successful if it left gas unused or emitted a log. A success that used
+exactly its gas limit and emitted nothing cannot be told apart from a failure
+without traces (a paid HyperSync add-on) and is not counted. Dune does not
+document how it marked these transactions, so whether the old query counted
+them is unknown; no past payout included a contract that old.
+
+These match the Dune queries used until September 2026 (`EVM_TX_PROVIDER=dune`
+and `SOLANA_TX_PROVIDER=dune` still work with a paid Dune plan), with two
+exceptions: HyperEVM system transactions are left out (below), and very large
+Solana addresses outside the Tokens registry are estimated. Neither API can
+return a count, so every matching transaction or signature is streamed and
+counted. That takes time:
+
+- **EVM:** about 0.5–1 billion matching transactions in September 2026. The
+  free tier allows about 30 requests/min per token, so speed depends on how
+  many rows one request returns. `verify-counts` measures it and prints the
+  estimate. Requests are paced at `HYPERSYNC_REQUESTS_PER_MINUTE` (default 25).
+- **Solana:** about 1 billion signatures for September 2026's 54 token mints,
+  1,000 per call. Keyless (public RPC, ~0.7 calls/s) that is ~2 weeks; with free
+  [Helius](https://www.helius.dev) and [Alchemy](https://www.alchemy.com) keys
+  together in `SOLANA_RPC_URLS`, ~13–16 h. One key alone runs out of its monthly
+  free allowance. Addresses outside the Tokens registry above
+  `SOLANA_ESTIMATE_ABOVE` signatures (default 50M, e.g. Jupiter's program) are
+  estimated instead and flagged as `estimated` in the manifest; a token mint
+  estimated this way is logged, since estimates of mints can be far off.
+
+Both run in parallel. Long histories are split across parallel requests
+automatically. A Solana count ends only on an empty page, asked of a second URL
+when there is one, and every page is checked against its cursor: the providers
+run different archives, and a short page can come back while older history
+exists. A split starts below a transaction that need not involve the address;
+an empty page there is trusted only from a URL that can find that transaction
+(`getSignatureStatuses`), because older nodes answer `[]` for a cursor they do
+not know instead of an error. Holder scans (`getProgramAccounts`) go to the public RPC first, the one
+endpoint verified for them, and to the other URLs only if it refuses, so keep
+`https://api.mainnet-beta.solana.com` in `SOLANA_RPC_URLS`. A URL that rejects
+its key (HTTP 401/402/403) stops the run at start.
+
+**HyperEVM (999) counts user-signed transactions only.** HyperCore credits
+arrive on HyperEVM as system transactions (gas price 0, sent from `0x2222…2222`
+for HYPE or from `0x20…` addresses for linked spot tokens) that the block's
+transaction root does not cover, and HyperSync, like the official RPC, does not
+return them. This mainly affects contracts linked to HyperCore: in September
+2026 such credits were 77% of the successful transactions sent to Circle's
+CoreDepositWallet and 72% of those sent to UPUMP. Explorers such as
+hyperevmscan.io include them, so their totals are higher. The manifest repeats
+this note for chain 999. Whether HyperCore credits should count is a program
+decision.
+
+**Cache and resume.** Counts are stored per address with the block or signature
+they cover, in `~/.cache/tag-registry-rewards/tx-counts` (`TX_COUNT_CACHE_DIR`),
+outside `files/`. An interrupted fetch resumes where it stopped, still counting
+up to the new run's tip, and later months only scan what is new for addresses
+seen before. `TX_COUNT_CACHE=off` recounts everything from scratch. The fetch
+manifest records the provider,
+cutoff block per chain, cache path and, for Solana, each address's method
+(`exact`/`estimated`) and holder source.
+
+**Check before paying.** Run this after setting the keys; it compares against
+values counted independently and measures speed:
+
+```bash
+yarn start --mode verify-counts
+```
+
+- PNK on Ethereum through block 26,095,339 must give 63,783 successful
+  (76,187 including failed)
+- HyperSync must have every chain's history from block 0
+- every Solana URL must serve history back to 2021, find a 2021 transaction by
+  signature (`getSignatureStatuses` with `searchTransactionHistory`), and count
+  CIGR up to 2026-10-01 exactly (45,869 successful / 51,840 signatures) on its own
+- every Solana URL should refuse an unknown `before` cursor (an empty answer is
+  reported as INFO, since fetch then looks the cursor up; a page fails), and with
+  several URLs all of them must return the same 1,000-signature USDC window in
+  the same order
+- HTC on Solana up to the March 2026 run must give 125,037 successful / 172,105
+  signatures
+- HyperSync must return no HyperEVM system transactions in a 300-block sample
+  where SQD lists 75
+- The DAO before Byzantium must give 160,073 successful if HyperSync carries a
+  status for those receipts, or exactly 160,065 with the gas-or-logs rule if it
+  does not (8 successes used their whole gas limit and emitted no log)
+- it also prints a rows-per-request throughput sample, with the projected EVM
+  run time
+
 ## Quick start (last month)
 
 When `--start` and `--end` are omitted, `fetch` and `filter-check` automatically calculate the previous calendar month. So to generate rewards for the most recent period:
@@ -82,7 +181,7 @@ yarn start --mode send --rewards <transactions-file>.json
 Run all commands from this folder:
 
 ```bash
-yarn start --mode <fetch|filter-check|removals|generate|document|all|send> [args]
+yarn start --mode <fetch|filter-check|removals|generate|document|all|send|verify-counts> [args]
 ```
 
 ### 1) Fetch
@@ -96,17 +195,19 @@ yarn start --mode fetch [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 What it does:
 
 - fetches from Address Tags, Tokens, Domains registries
-- filters out tokens that also appear in the Address Tags registry
+- drops Domains entries whose chain + address is registered in the Tokens registry
 - applies exclusion filters:
   - chain not configured for rewards
   - Address Tags: skip EOA (`getCode == 0x`)
   - Address Tags: skip EIP-1167 proxy when implementation has code
   - Address Tags: skip ERC-721 (`supportsInterface(0x80ac58cd)`)
   - Solana Address Tags skip bytecode checks
-- enriches EVM and Solana rows:
+- enriches EVM and Solana rows (see [Transaction counts](#transaction-counts)):
   - `txn count`
   - Solana holders (tokens only)
 - filters out Solana token rows with holders `< 5000`
+- stops with an error, writing nothing, if any count is missing: counts drive
+  the payout split, so they never default to 0. Rerun to resume.
 
 Files written under `files/`:
 
@@ -128,7 +229,7 @@ yarn start --mode filter-check [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 
 What it does:
 
-- runs only exclusion checks (no Dune tx-count, no Solana holders)
+- runs only exclusion checks (no tx counts, no Solana holders)
 - reports exclusions from:
   - chain not configured for rewards
   - Address Tags: not a contract (`getCode == 0x`)
@@ -155,7 +256,7 @@ What it does:
 - rewards the **remover** (the requester of the winning removal) with a flat, capped, per-registry amount:
   - `min(REMOVAL_REWARD_POOL_<registry> / removals_in_period, REMOVAL_MAX_PER_REMOVAL_<registry>)`
   - one-pass cap, no recursive redistribution (unlike submissions)
-  - no Dune enrichment and no tx-weighting (removals are not weighted by tx count)
+  - no tx-count enrichment and no tx-weighting (removals are not weighted by tx count)
 - deduplicates per registry + tagged address + chain (keeps the latest removal)
 - also **rewards ATQ** activity for the ATQ registry (`XDAI_REGISTRY_ATQ`), with registrations and removals computed **independently** (each kind has its own pool and cap):
   - registrations: `min(REWARD_POOL_ATQ_SUBMISSIONS / registrations_in_period, MAX_PER_ATQ_SUBMISSION)` — official policy: 60,000 PNK pool, capped at 3,000 PNK per submission
@@ -339,7 +440,7 @@ This rewrites the rewards json, the transactions json/csv, and
 share flows to the remaining submitters.
 
 **3. Only if a *removal* or *ATQ* reward was wrong:** re-run removals (subgraph
-only, ~1 min, no Dune):
+only, ~1 min, no tx counts):
 
 ```bash
 yarn start --mode removals --start YYYY-MM-01 --end YYYY-MM+1-01

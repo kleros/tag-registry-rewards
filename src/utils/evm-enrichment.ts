@@ -1,4 +1,8 @@
 import { executeDuneSql, getDuneApiKey } from "./dune-client"
+import { countEvmTxsWithHypersync, HypersyncChainReport, HYPERSYNC_DEFINITION } from "./hypersync-enrichment"
+
+// EVM tx counts per chain and address. Provider: EVM_TX_PROVIDER=hypersync
+// (default, free Envio token) or dune (paid plan since Sept 2026).
 
 const EVM_DUNE_SCHEMA_BY_CHAIN_ID: { [chainId: string]: string } = {
   "1": "ethereum",
@@ -17,6 +21,8 @@ const EVM_DUNE_SCHEMA_BY_CHAIN_ID: { [chainId: string]: string } = {
   "59144": "linea",
 }
 
+const DUNE_DEFINITION = 'Dune <chain>.transactions: success = TRUE and "to" = address, all-time'
+
 const isValidEvmAddress = (address: string): boolean =>
   /^0x[a-fA-F0-9]{40}$/.test(String(address || ""))
 
@@ -24,7 +30,25 @@ export interface EvmEnrichment {
   txCount: number
 }
 
-export const enrichAllEvmAddresses = async (
+export interface EvmProvenance {
+  provider: "hypersync" | "dune"
+  definition: string
+  chains?: HypersyncChainReport[]
+  cacheDir?: string
+}
+
+export interface EvmEnrichmentResult {
+  byChain: { [chainId: string]: { [addressLower: string]: EvmEnrichment } }
+  provenance: EvmProvenance
+}
+
+export const getEvmTxProvider = (): "hypersync" | "dune" => {
+  const raw = String(process.env.EVM_TX_PROVIDER || "hypersync").trim().toLowerCase()
+  if (raw === "hypersync" || raw === "dune") return raw
+  throw new Error(`Invalid EVM_TX_PROVIDER="${raw}": expected "hypersync" or "dune"`)
+}
+
+const enrichEvmAddressesWithDune = async (
   addressesByChain: { [chainId: string]: string[] }
 ): Promise<{ [chainId: string]: { [addressLower: string]: EvmEnrichment } }> => {
   const output: { [chainId: string]: { [addressLower: string]: EvmEnrichment } } = {}
@@ -33,19 +57,13 @@ export const enrichAllEvmAddresses = async (
   for (const chainId of Object.keys(addressesByChain)) {
     const schema = EVM_DUNE_SCHEMA_BY_CHAIN_ID[String(chainId)]
     if (!schema) {
-      console.warn(`[evm] No Dune schema mapping for chainId=${chainId}, using 0 txCount`)
-      output[chainId] = {}
-      continue
+      throw new Error(`[evm] No Dune schema mapping for chainId=${chainId}`)
     }
-    const normalized = Array.from(
-      new Set(
-        addressesByChain[chainId]
-          .map((a) => String(a || "").toLowerCase())
-          .filter(isValidEvmAddress)
-      )
-    )
+    const all = Array.from(new Set(addressesByChain[chainId].map((a) => String(a || "").trim().toLowerCase())))
+    const normalized = all.filter(isValidEvmAddress)
     output[chainId] = {}
-    for (const addr of normalized) {
+    // Invalid addresses keep the historical txCount 0, explicitly.
+    for (const addr of all) {
       output[chainId][addr] = { txCount: 0 }
     }
     if (normalized.length > 0) {
@@ -90,4 +108,30 @@ export const enrichAllEvmAddresses = async (
   }
 
   return output
+}
+
+// Every requested address (lowercased) gets an explicit entry; any failure
+// throws instead of defaulting to 0, because the counts drive the payout split.
+export const enrichAllEvmAddresses = async (
+  addressesByChain: { [chainId: string]: string[] }
+): Promise<EvmEnrichmentResult> => {
+  const provider = getEvmTxProvider()
+  if (provider === "dune") {
+    return {
+      byChain: await enrichEvmAddressesWithDune(addressesByChain),
+      provenance: { provider, definition: DUNE_DEFINITION },
+    }
+  }
+  const result = await countEvmTxsWithHypersync(addressesByChain)
+  const byChain: EvmEnrichmentResult["byChain"] = {}
+  for (const chainId of Object.keys(result.counts)) {
+    byChain[chainId] = {}
+    for (const address of Object.keys(result.counts[chainId])) {
+      byChain[chainId][address] = { txCount: result.counts[chainId][address] }
+    }
+  }
+  return {
+    byChain,
+    provenance: { provider, definition: HYPERSYNC_DEFINITION, chains: result.chains, cacheDir: result.cacheDir },
+  }
 }
