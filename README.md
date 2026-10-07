@@ -28,7 +28,7 @@ Fill `.env` values:
 
 - `ENVIO_API_TOKEN` (EVM tx counts; free token at https://envio.dev/app/api-tokens)
 - `SOLANA_RPC_URLS` (optional; comma-separated Solana RPC URLs, defaults to the
-  public endpoint; add free Helius and Alchemy URLs to finish a month overnight)
+  public endpoint; add free Helius and Alchemy URLs, see [Transaction counts](#transaction-counts))
 - `REWARD_FORMULA_ADDRESS_TAGS` (expression formula for Address Tags registry)
 - `REWARD_FORMULA_TOKENS` (expression formula for Tokens registry)
 - `REWARD_FORMULA_DOMAINS` (expression formula for Domains registry)
@@ -70,7 +70,7 @@ transactions sent to it**, counted up to the run. The counts are free:
 | | EVM (14 chains) | Solana |
 |---|---|---|
 | Provider (default) | Envio HyperSync, `EVM_TX_PROVIDER=hypersync` | JSON-RPC, `SOLANA_TX_PROVIDER=rpc` |
-| What is counted | top-level txs with `to` = address and `status = 1` (pre-Byzantium Ethereum, which has no status: `gasUsed < gas` or the receipt has logs, see below); on HyperEVM, user-signed txs only (see below) | signatures from `getSignaturesForAddress` with `err == null` |
+| What is counted | top-level txs with `to` = address and `status = 1` (pre-Byzantium Ethereum, which has no status: `gasUsed < gas` or the receipt has logs, see below); on HyperEVM, user-signed txs only (see below) | signatures from `getSignaturesForAddress` with `err == null`; histories above 1.5M signatures estimated by sampling (below) |
 | Key | `ENVIO_API_TOKEN` (free, required) | none; `SOLANA_RPC_URLS` to add free Helius/Alchemy URLs |
 | Holders (Tokens) | — | distinct owners of open token accounts, any balance (Jupiter's count when it already shows ≥ 5,000); an entry that is not a token mint gets 0 |
 
@@ -89,18 +89,55 @@ Solana addresses outside the Tokens registry are estimated. Neither API can
 return a count, so every matching transaction or signature is streamed and
 counted. That takes time:
 
-- **EVM:** about 0.5–1 billion matching transactions in September 2026. The
-  free tier allows about 30 requests/min per token, so speed depends on how
-  many rows one request returns. `verify-counts` measures it and prints the
-  estimate. Requests are paced at `HYPERSYNC_REQUESTS_PER_MINUTE` (default 25).
-- **Solana:** about 1 billion signatures for September 2026's 54 token mints,
-  1,000 per call. Keyless (public RPC, ~0.7 calls/s) that is ~2 weeks; with free
-  [Helius](https://www.helius.dev) and [Alchemy](https://www.alchemy.com) keys
-  together in `SOLANA_RPC_URLS`, ~13–16 h. One key alone runs out of its monthly
-  free allowance. Addresses outside the Tokens registry above
-  `SOLANA_ESTIMATE_ABOVE` signatures (default 50M, e.g. Jupiter's program) are
-  estimated instead and flagged as `estimated` in the manifest; a token mint
-  estimated this way is logged, since estimates of mints can be far off.
+- **EVM:** about 0.7 billion matching transactions in September 2026. A free
+  token allows 15 requests per minute (its rate-limit headers), shared by all
+  chains, whatever the page size, so each request asks for up to
+  `HYPERSYNC_MAX_ROWS_PER_REQUEST` rows (default 500,000; without it the server
+  stops at ~5,500). `verify-counts` measures rows per request and prints the
+  estimate. Requests are paced at `HYPERSYNC_REQUESTS_PER_MINUTE` (default 14).
+- **Solana:** about 740 million signatures for September 2026's 53 counted
+  token mints, 1,000 per call. Measured on 2026-10-06/07, Helius Free sustains
+  ~5–6 `getSignaturesForAddress` calls/s, an Alchemy key ~0.5 (free) or ~7
+  (the paid plan tried) before its compute-units-per-second limit, and the
+  public RPC ~0.8. Listing all of it would take a day and a half, hence the
+  sampling below. No free source returns a count: SQD's keyless portal does
+  filter Solana transactions by account (`mentionsAccount`) but covers only
+  ~500 recent slots per request and throttles, and the other keyless RPCs tried
+  either keep no history or need a key. In `SOLANA_COUNT_MODE=exact`, addresses
+  outside the Tokens registry above `SOLANA_ESTIMATE_ABOVE` signatures (default
+  50M, e.g. Jupiter's program) are estimated with an older, less reliable probe
+  estimator and flagged as `estimated` in the manifest.
+
+**Run time and Solana sampling.** Neither lane can ask for a count, so the
+work grows with the number of transactions. EVM costs one HyperSync request per
+~435,000 transactions; Solana costs one call per 1,000 signatures. Counted from
+scratch, September 2026 needed ~690M EVM transactions (1 h 47 min on the free
+HyperSync tier) and ~740M Solana signatures, which take ~34 h to list on the
+free keys (~32 h with a paid Alchemy key that allows ~7 calls/s).
+
+So by default (`SOLANA_COUNT_MODE=auto`) Solana lists a history exactly only
+when it is small (below `SOLANA_EXACT_BELOW`, 1.5M signatures) and estimates
+larger ones by stratified sampling: a first pass maps the density of the
+history, it is cut into strata of equal mapped mass, and one window per stratum,
+placed uniformly at random, is counted exactly and scaled up. The estimate is
+unbiased; replayed on complete histories and checked against exact counts of 16
+September mints, its typical error was ~10% per mint (worst ±25%) for ~1.5–2k
+calls instead of up to ~120k. Most mints that large are capped at 500 PNK, so
+the payout effect is small: two September runs moved the total by +570 and +732
+PNK against the Dune payout (Tokens only) and no recipient by more than 1%.
+Sampled counts are flagged `sampled` in the manifest. `SOLANA_COUNT_MODE=exact`
+lists everything instead (a day or more for a busy month).
+
+A cold September in auto mode took 2 h 29 min (Solana ~85k calls at ~10
+calls/s on Helius Free + a paid Alchemy key + the public RPC; EVM 1 h 47 min in
+parallel). Counts are cached, so addresses seen before only top up. To go
+faster, raise the Solana calls per second (e.g. the Alchemy plan's compute
+units per second) or the HyperSync tier.
+
+`--max-minutes N` bounds a run: both lanes stop before their next request with
+progress saved, `fetch` and `all` write nothing (exit code 2) and the next run
+continues. `yarn start --mode prefetch` counts the running month's tags so far
+into the cache, so a month-end run after a prefetch only tops up.
 
 Both run in parallel. Long histories are split across parallel requests
 automatically. A Solana count ends only on an empty page, asked of a second URL
@@ -141,8 +178,8 @@ values counted independently and measures speed:
 yarn start --mode verify-counts
 ```
 
-- PNK on Ethereum through block 26,095,339 must give 63,783 successful
-  (76,187 including failed)
+- PNK on Ethereum through block 26,095,339 must give 63,785 successful
+  (76,189 including failed)
 - HyperSync must have every chain's history from block 0
 - every Solana URL must serve history back to 2021, find a 2021 transaction by
   signature (`getSignatureStatuses` with `searchTransactionHistory`), and count
@@ -166,7 +203,7 @@ yarn start --mode verify-counts
 When `--start` and `--end` are omitted, `fetch` and `filter-check` automatically calculate the previous calendar month. So to generate rewards for the most recent period:
 
 ```bash
-# Step 1: fetch tags + enrich (auto-calculates last month)
+# Step 1: fetch tags + enrich (auto-calculates last month; ~2–2.5 h from scratch)
 yarn start --mode fetch
 
 # Step 2: generate reward allocations from the latest fetch
@@ -181,7 +218,7 @@ yarn start --mode send --rewards <transactions-file>.json
 Run all commands from this folder:
 
 ```bash
-yarn start --mode <fetch|filter-check|removals|generate|document|all|send|verify-counts> [args]
+yarn start --mode <fetch|prefetch|filter-check|removals|generate|document|all|send|verify-counts> [args]
 ```
 
 ### 1) Fetch
@@ -218,6 +255,20 @@ Files written under `files/`:
 - `<runId>_generate_gas.json` (tx counts file, compatibility)
 - `<runId>_fetch_manifest.json`
 - `latest_fetch_manifest.json`
+
+### 1b) Prefetch
+
+```bash
+yarn start --mode prefetch [--max-minutes N] [--period YYYY-MM | --start YYYY-MM-DD --end YYYY-MM-DD]
+```
+
+Counts the transactions of every tag registered so far in the running month
+(by default) into the tx-count cache, exactly as `fetch` would, and writes no
+files. The month-end `fetch` then only tops the cached counts up. Each run
+resumes where the last one stopped; at `--max-minutes` both lanes stop before
+their next request with everything counted so far saved, and the run exits 0.
+It needs the cache and the free providers (not `TX_COUNT_CACHE=off` or the Dune
+providers).
 
 ### 2) Filter-check
 

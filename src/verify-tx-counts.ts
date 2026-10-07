@@ -28,11 +28,15 @@ interface CheckResult {
   detail: string
 }
 
-// PNK on Ethereum through block 26,095,339 (Routescan txlist, every page).
+// PNK on Ethereum through block 26,095,339. Routescan's txlist (every page)
+// has 63,783 / 76,187, but it counts the creation tx (to = null on-chain, so
+// neither Dune nor HyperSync matches it) and misses three successful transfers
+// in block 18,239,284 (0x10bef5df…, 0xb576f08e…, 0xc457dc42…), each confirmed
+// on an Ethereum node (receipt status 1): 63,783 - 1 + 3 and 76,187 - 1 + 3.
 const PNK = "0x93ed3fbe21207ec2e8f2d3c3de6e058cb73bc04d"
 const PNK_TO_BLOCK_EXCLUSIVE = 26095340
-const PNK_SUCCESSFUL = 63783
-const PNK_ALL = 76187
+const PNK_SUCCESSFUL = 63785
+const PNK_ALL = 76189
 // The DAO, active before Byzantium (block 4,370,000), when receipts had no
 // status. Routescan txlist (every page, creation tx excluded), 2026-10-02:
 // 160,073 of 172,544 transactions succeeded by execution traces. Without a
@@ -166,7 +170,7 @@ export const verifyTxCounts = async (): Promise<boolean> => {
       const chain = res.chains[0]
       const perRequest = chain.requests > 0 ? chain.rows / chain.requests : 0
       const rawPerMinute = String(process.env.HYPERSYNC_REQUESTS_PER_MINUTE || "").trim()
-      const perMinute = rawPerMinute === "" ? 25 : Number(rawPerMinute)
+      const perMinute = rawPerMinute === "" ? 14 : Number(rawPerMinute)
       const rowsPerSecond = chain.elapsedMs > 0 ? chain.rows / (chain.elapsedMs / 1000) : 0
       let projection = "no rows measured, no projection"
       if (perMinute > 0 && perRequest > 0) {

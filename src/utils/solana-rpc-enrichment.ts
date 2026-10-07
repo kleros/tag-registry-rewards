@@ -1,7 +1,7 @@
 import { Tag } from "../types"
 import { findChainConfig } from "./chains"
 import { httpFetch } from "./http"
-import { chunk, envInt, errorMessage as message, forEachConcurrent, sleep } from "./runtime-helpers"
+import { checkDeadline, chunk, envInt, errorMessage as message, forEachConcurrent, sleep } from "./runtime-helpers"
 import { SolanaEnrichment, SOLANA_HOLDER_THRESHOLD } from "./solana-common"
 import { createSolanaRpcPool, SolanaRpcError, SolanaRpcPool } from "./solana-rpc"
 import { runSplittableWork, SplittableUnit } from "./split-scheduler"
@@ -80,6 +80,8 @@ interface SignatureJob {
   topSeen: boolean // the top segment has returned a non-empty page
   lowSlotHint?: number
   maxBlockTime?: number // verification only: ignore signatures after this unix time
+  pageCap?: number // auto mode: stop listing past this many pages and sample instead
+  abandoned?: boolean // stopped at pageCap; its partial counts are discarded
   createdAt: string
   segments: SignatureSegment[]
 }
@@ -89,7 +91,7 @@ interface SignatureEntry {
   failed: number
   newestSig?: string
   newestSlot?: number
-  method: "exact" | "estimated"
+  method: "exact" | "estimated" | "sampled"
   updatedAt: string
 }
 
@@ -109,7 +111,7 @@ export interface HolderResult {
 export interface SolanaRpcAddressReport {
   address: string
   registries: string[]
-  method: "exact" | "estimated" | "skipped-holders" | "invalid"
+  method: "exact" | "estimated" | "sampled" | "skipped-holders" | "invalid"
   successful: number
   failed: number
   holders?: number
@@ -613,7 +615,16 @@ export const runSignatureJobs = async (
   let signatures = 0
 
   const step = async (unit: SignatureUnit): Promise<void> => {
+    checkDeadline()
     const { address, job, segment } = unit
+    // A history that turned out larger than its sizing said is abandoned here
+    // and sampled instead (auto mode).
+    if (job.pageCap !== undefined && (job.abandoned || job.segments.reduce((n, s) => n + s.pages, 0) >= job.pageCap)) {
+      job.abandoned = true
+      for (const s of job.segments) s.done = true
+      save()
+      return
+    }
     let page: SignatureInfo[]
     let endpoint: number | undefined
     try {
@@ -717,7 +728,7 @@ export const runSignatureJobs = async (
     const elapsed = Math.max(1, (Date.now() - started) / 1000)
     const endpoints = rpc
       .stats()
-      .map((s) => `${s.label} ${s.calls} calls/${s.rateLimited} 429s/${s.errors} errors${s.disabled ? ` (disabled: ${s.disabled})` : ""}`)
+      .map((s) => `${s.label} ${s.calls} calls/${s.rateLimited} 429s/${s.errors} errors @${s.rps}/s${s.disabled ? ` (disabled: ${s.disabled})` : ""}`)
       .join("; ")
     console.log(
       `[solana] ${pages} pages (${(pages / elapsed).toFixed(2)}/s), ${signatures} signatures counted, ` +
@@ -853,6 +864,305 @@ export const estimateSignatures = async (
 }
 
 // ---------------------------------------------------------------------------
+// Sampled counts (SOLANA_COUNT_MODE=auto, the default)
+//
+// Listing every signature costs one call per 1,000, and free and small paid
+// keys sustain ~5–10 calls/s together, so a month counted from scratch
+// (September 2026: ~740M signatures) takes about a day and a half. Ranges
+// whose size can exceed SOLANA_EXACT_BELOW signatures are estimated instead by
+// stratified sampling: a first pass maps the density of the range (one page
+// below each of SOLANA_SAMPLE_POINTS evenly spaced slots), the range is cut
+// into SOLANA_SAMPLE_STRATA strata of equal mapped mass, and in each stratum
+// one window sized to hold ~SOLANA_SAMPLE_WINDOW signatures, placed uniformly
+// at random and wrapping inside its stratum (so every slot has the same
+// chance), is counted exactly. A stratum contributes length / window × count,
+// which is unbiased whatever the map's quality; the map only spends the
+// windows where the signatures are. Replayed on three complete September 2026
+// histories (2.5M–9.6M signatures) the defaults gave a 7–17% typical error per
+// mint and no bias, for ~1,000–1,500 calls instead of 2,500–9,600 (live runs
+// used ~1,500–2,500 per sampled mint).
+
+export const getSolanaCountMode = (): "exact" | "auto" => {
+  const raw = String(process.env.SOLANA_COUNT_MODE || "auto").trim().toLowerCase()
+  if (raw === "exact" || raw === "auto") return raw
+  throw new Error(`Invalid SOLANA_COUNT_MODE="${raw}": expected "auto" or "exact"`)
+}
+
+const sampleSettings = () => ({
+  exactBelow: envInt("SOLANA_EXACT_BELOW", 1500000),
+  points: envInt("SOLANA_SAMPLE_POINTS", 200) || 200,
+  strata: envInt("SOLANA_SAMPLE_STRATA", 150) || 150,
+  window: envInt("SOLANA_SAMPLE_WINDOW", 5000) || 5000,
+})
+
+// Deterministic (mulberry32 seeded by a string hash), so a rerun over the same
+// range draws the same windows and gives the same estimate.
+const seededRandom = (seed: string): (() => number) => {
+  let h = 2166136261
+  for (let i = 0; i < seed.length; i++) h = Math.imul(h ^ seed.charCodeAt(i), 16777619)
+  let a = h >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+interface RangeCount {
+  total: number
+  ok: number
+  calls: number
+}
+
+// The address's signatures with lo <= slot < hi, counted exactly: pages down
+// from a block at `hi` (or from the newest signature when `hi` is past the
+// tip). A short page claims the start of the history and is confirmed once
+// on another URL, as in the exact count.
+const countSlotRange = async (
+  rpc: SolanaRpcPool,
+  address: string,
+  lo: number,
+  hi: number,
+  tipSlot: number
+): Promise<RangeCount> => {
+  let calls = 0
+  let cursor: SignatureCursor = {}
+  let anchored = false
+  if (hi <= tipSlot) {
+    const anchor = await findAnchor(rpc, hi, hi + 400)
+    calls++
+    if (!anchor) throw new Error(`[solana] no block found in the 50 slots from ${hi}`)
+    cursor = { before: anchor.signature, beforeSlot: anchor.slot }
+    anchored = true
+  }
+  let total = 0
+  let ok = 0
+  let confirming = false
+  let avoid: number[] = []
+  for (;;) {
+    checkDeadline()
+    const res = anchored
+      ? await getSignaturesBelowAnchor(rpc, address, cursor, avoid)
+      : await getSignatures(rpc, address, cursor, avoid)
+    calls++
+    const page = res.page
+    let below = false
+    for (const sig of page) {
+      if (sig.slot >= hi) continue
+      if (sig.slot < lo) {
+        below = true
+        break
+      }
+      total++
+      if (sig.err === null) ok++
+    }
+    if (below) break
+    if (page.length < PAGE_SIZE) {
+      if (confirming || res.endpoint === undefined || rpc.labels().length < 2) break
+      confirming = true
+      avoid = [res.endpoint]
+    } else {
+      confirming = false
+      avoid = []
+    }
+    if (page.length > 0) {
+      const last = page[page.length - 1]
+      cursor = { before: last.signature, beforeSlot: last.slot }
+      anchored = false // the cursor is now one of the address's own signatures
+    }
+  }
+  return { total, ok, calls }
+}
+
+// Signatures per slot just below `x`, within [lo, x): one page.
+const densityBelow = async (
+  rpc: SolanaRpcPool,
+  address: string,
+  lo: number,
+  x: number,
+  tipSlot: number
+): Promise<{ density: number; calls: number }> => {
+  let calls = 0
+  let cursor: SignatureCursor = {}
+  let anchored = false
+  if (x <= tipSlot) {
+    const anchor = await findAnchor(rpc, x, x + 400)
+    calls++
+    if (!anchor) return { density: 0, calls }
+    cursor = { before: anchor.signature, beforeSlot: anchor.slot }
+    anchored = true
+  }
+  // a burst between x and the anchor's block can fill whole pages: skip them
+  for (let i = 0; i < 4; i++) {
+    checkDeadline()
+    const res = anchored ? await getSignaturesBelowAnchor(rpc, address, cursor) : await getSignatures(rpc, address, cursor)
+    calls++
+    const inRange = res.page.filter((s) => s.slot < x && s.slot >= lo)
+    const crossed = res.page.some((s) => s.slot < lo)
+    if (inRange.length > 0 || crossed || res.page.length < PAGE_SIZE) {
+      if (res.page.length < PAGE_SIZE || crossed) return { density: inRange.length / Math.max(1, x - lo), calls }
+      const oldest = inRange[inRange.length - 1].slot
+      return { density: inRange.length / Math.max(1, x - oldest + 1), calls }
+    }
+    const last = res.page[res.page.length - 1]
+    cursor = { before: last.signature, beforeSlot: last.slot }
+    anchored = false
+  }
+  return { density: 0, calls }
+}
+
+// Lowest slot the address has a signature at (approximately: within ~0.1% of
+// its lifetime), searched back from the tip; `hint` (e.g. Jupiter's creation
+// date as a slot) narrows the search.
+export const findHistoryStart = async (
+  rpc: SolanaRpcPool,
+  address: string,
+  tipSlot: number,
+  hint?: number
+): Promise<{ start: number; calls: number }> => {
+  let calls = 0
+  // probe(x): "none" = no history below x, "short" = all of it in one page, "more" = more than a page
+  const probe = async (x: number): Promise<{ state: "none" | "short" | "more"; oldest?: number }> => {
+    const anchor = await findAnchor(rpc, x, x + 400)
+    calls++
+    if (!anchor) return { state: "more" }
+    const { page } = await getSignaturesBelowAnchor(rpc, address, { before: anchor.signature, beforeSlot: anchor.slot })
+    calls++
+    if (page.length === 0) return { state: "none" }
+    if (page.length < PAGE_SIZE) return { state: "short", oldest: page[page.length - 1].slot }
+    return { state: "more" }
+  }
+  let hi = tipSlot // history exists below hi
+  let lo = 0 // no history below lo
+  const candidates: number[] = []
+  if (hint !== undefined && hint > 0 && hint < tipSlot) candidates.push(Math.max(1, Math.floor(hint - (tipSlot - hint) * 0.2)))
+  for (let j = 0; ; j++) {
+    const t = tipSlot - 4096 * Math.pow(4, j)
+    if (t <= 1) break
+    candidates.push(t)
+  }
+  for (const t of candidates) {
+    if (t >= hi) continue
+    const r = await probe(t)
+    if (r.state === "short") return { start: r.oldest as number, calls }
+    if (r.state === "none") {
+      lo = t
+      break
+    }
+    hi = t
+  }
+  // binary search the boundary between "none" and "more"
+  while (hi - lo > Math.max(2000, (tipSlot - hi) / 1000)) {
+    const mid = Math.floor((lo + hi) / 2)
+    const r = await probe(mid)
+    if (r.state === "short") return { start: r.oldest as number, calls }
+    if (r.state === "none") lo = mid
+    else hi = mid
+  }
+  return { start: lo, calls }
+}
+
+export interface DensityMap {
+  lo: number
+  hi: number
+  cell: number
+  density: number[] // signatures per slot below the middle of each cell
+  size: number // rough size of the range (it decides listing vs sampling, not the count)
+  calls: number
+}
+
+// First pass of the sampler: the density below SOLANA_SAMPLE_POINTS evenly
+// spaced slots of [lo, hi).
+export const mapRange = async (
+  rpc: SolanaRpcPool,
+  address: string,
+  lo: number,
+  hi: number,
+  tipSlot: number
+): Promise<DensityMap> => {
+  const span = hi - lo
+  const P = Math.max(2, Math.min(sampleSettings().points, span))
+  const cell = span / P
+  let calls = 0
+  const density: number[] = new Array(P).fill(0)
+  await forEachConcurrent(
+    Array.from({ length: P }, (_, i) => i),
+    8,
+    async (i) => {
+      const x = Math.min(hi, Math.floor(lo + (i + 0.5) * cell) + 1)
+      const r = await densityBelow(rpc, address, lo, x, tipSlot)
+      calls += r.calls
+      density[i] = r.density
+    }
+  )
+  return { lo, hi, cell, density, size: density.reduce((sum, d) => sum + d * cell, 0), calls }
+}
+
+// Unbiased stratified estimate of the signatures in [lo, hi) (see above),
+// reusing the density map when the caller already has it.
+export const sampleSignatureRange = async (
+  rpc: SolanaRpcPool,
+  address: string,
+  lo: number,
+  hi: number,
+  tipSlot: number,
+  given?: DensityMap
+): Promise<RangeCount & { windows: number }> => {
+  const settings = sampleSettings()
+  const map = given && given.lo === lo && given.hi === hi ? given : await mapRange(rpc, address, lo, hi, tipSlot)
+  const { density, cell } = map
+  const P = density.length
+  let calls = map.calls
+  const maxDensity = Math.max(...density)
+  const floor = maxDensity > 0 ? maxDensity * 1e-4 : 1e-9
+  const mass = density.map((d) => Math.max(d, floor) * cell)
+  const cumulative = [0]
+  for (const m of mass) cumulative.push(cumulative[cumulative.length - 1] + m)
+  const totalMass = cumulative[P]
+  const bounds = [lo]
+  for (let k = 1; k < settings.strata; k++) {
+    const target = (totalMass * k) / settings.strata
+    let i = 0
+    while (i < P - 1 && cumulative[i + 1] < target) i++
+    const b = Math.floor(lo + (i + (target - cumulative[i]) / (mass[i] || 1)) * cell)
+    if (b > bounds[bounds.length - 1] && b < hi) bounds.push(b)
+  }
+  bounds.push(hi)
+  const random = seededRandom(`${address}:${lo}:${hi}`)
+  const windows: { a0: number; a1: number; w: number; ranges: [number, number][] }[] = []
+  for (let k = 0; k + 1 < bounds.length; k++) {
+    const a0 = bounds[k]
+    const a1 = bounds[k + 1]
+    const length = a1 - a0
+    const d = Math.max(density[Math.min(P - 1, Math.floor(((a0 + a1) / 2 - lo) / cell))], floor)
+    const w = Math.max(1, Math.min(length, Math.round(settings.window / d)))
+    const x = a0 + Math.floor(random() * length)
+    const end = x + w
+    const ranges: [number, number][] = end <= a1 ? [[x, end]] : [[x, a1], [a0, a0 + (end - a1)]]
+    windows.push({ a0, a1, w, ranges })
+  }
+  let total = 0
+  let ok = 0
+  await forEachConcurrent(windows, 8, async (win) => {
+    let t = 0
+    let o = 0
+    for (const [a, b] of win.ranges) {
+      if (b <= a) continue
+      const r = await countSlotRange(rpc, address, a, b, tipSlot)
+      calls += r.calls
+      t += r.total
+      o += r.ok
+    }
+    const scale = (win.a1 - win.a0) / win.w
+    total += t * scale
+    ok += o * scale
+  })
+  return { total: Math.round(total), ok: Math.round(ok), calls, windows: windows.length }
+}
+
+// ---------------------------------------------------------------------------
 
 const slotHint = (createdAt: string | undefined, tipSlot: number): number | undefined => {
   if (!createdAt) return undefined
@@ -921,78 +1231,197 @@ export const enrichSolanaTagsWithRpc = async (
   let pages = 0
   try {
     const tipSlot = await rpc.call<number>("getSlot", [{ commitment: "finalized" }])
-    const resumed = toCount.filter((address) => state.jobs[address] && topUpResumedJob(state.jobs[address]))
-    if (resumed.length > 0) {
-      console.log(`[solana] Resuming ${resumed.length} interrupted count(s), each topped up to the current tip`)
-      save()
-    }
-    // Addresses outside the Tokens registry (mostly programs) can have
-    // billions of signatures: size them first and keep an estimate for the
-    // ones too big to page.
-    const toSize = toCount.filter((address) => {
-      const entry = state.entries[address]
-      return !state.jobs[address] && !registriesOf(address).has("tokens") && (!entry || entry.method === "estimated")
-    })
-    if (toSize.length > 0) console.log(`[solana] Sizing ${toSize.length} address(es) outside the Tokens registry before counting`)
-    const estimated: string[] = []
-    await forEachConcurrent(toSize, 4, async (address) => {
-      const estimate = await estimateSignatures(rpc, address, probes, estimateAbove)
-      const total = estimate.successful + estimate.failed
-      // An exact answer here rests on one unconfirmed page, and histories below
-      // the threshold are cheap: both are paged exactly below.
-      if (estimate.small || estimate.exact || total <= estimateAbove) return
-      console.warn(
-        `[solana] ${address}: ~${total} signatures, above SOLANA_ESTIMATE_ABOVE=${estimateAbove}; ` +
-          `using an estimate (${estimate.calls} calls) instead of paging every signature`
-      )
-      state.entries[address] = {
-        successful: estimate.successful,
-        failed: estimate.failed,
-        newestSig: estimate.newestSig,
-        newestSlot: estimate.newestSlot,
-        method: "estimated",
-        updatedAt: new Date().toISOString(),
+    // A listing abandoned at its page cap holds partial counts: never reuse it.
+    for (const address of Object.keys(state.jobs)) if (state.jobs[address].abandoned) delete state.jobs[address]
+    const mode = getSolanaCountMode()
+    type SampleTask = { address: string; lo: number; hi: number; base?: SignatureEntry; newest: SignatureInfo; map?: DensityMap }
+    const toSample: SampleTask[] = []
+    const plans: { [address: string]: Omit<SampleTask, "address"> } = {} // listed ranges, sampled if abandoned
+    const sampledBase = new Set<string>() // exact top-ups added to a sampled count
+    if (mode === "auto") {
+      const { exactBelow } = sampleSettings()
+      const now = new Date().toISOString()
+      // An interrupted exact count becomes an entry when it only lacked its
+      // top-up; otherwise it is dropped (re-sampling is cheaper than finishing).
+      for (const address of toCount) {
+        const job = state.jobs[address]
+        if (!job) continue
+        if (job.segments.every((segment) => segment.done)) state.entries[address] = finishJob(address, job)
+        delete state.jobs[address]
       }
-      counted.add(address)
-      estimated.push(address)
-      save()
-    })
-    if (estimated.length > 0) {
-      // The sampler is unreliable on mints (-85% to +98% measured): say so when
-      // a mint listed outside the Tokens registry gets an estimate.
-      const owners = await getOwnerPrograms(rpc, estimated)
-      for (const address of estimated) {
-        if (TOKEN_PROGRAMS.indexOf(owners[address] || "") >= 0) {
-          console.warn(
-            `[solana] ${address} is a token mint listed in ${Array.from(registriesOf(address)).join(", ")}; ` +
-              "its count is an estimate, which can be far off for mints"
-          )
+      let listed = 0
+      await forEachConcurrent(toCount, 8, async (address) => {
+        const entry = state.entries[address]
+        const base =
+          entry && (entry.method === "exact" || entry.method === "sampled") && entry.newestSig && entry.newestSlot !== undefined
+            ? entry
+            : undefined
+        const { page: top } = await getSignatures(rpc, address, {})
+        const newest = top[0]
+        if (!newest || (base && newest.slot <= (base.newestSlot as number))) {
+          if (!base && !newest) state.entries[address] = { successful: 0, failed: 0, method: "exact", updatedAt: now }
+          counted.add(address)
+          return
+        }
+        const hint = holders[address] ? slotHint(holders[address].createdAt, tipSlot) : undefined
+        // A short newest page is the whole history: no need to search for its start.
+        const whole = top.length < PAGE_SIZE
+        const lo = base
+          ? (base.newestSlot as number) + 1
+          : whole
+          ? 0
+          : (await findHistoryStart(rpc, address, tipSlot, hint)).start
+        const hi = newest.slot + 1
+        // The newest page already reaches below the range: count it from that page.
+        if (whole || top.some((sig) => sig.slot < lo)) {
+          const inRange = top.filter((sig) => sig.slot >= lo)
+          const ok = inRange.filter((sig) => sig.err === null).length
+          state.entries[address] = {
+            successful: (base ? base.successful : 0) + ok,
+            failed: (base ? base.failed : 0) + inRange.length - ok,
+            newestSig: newest.signature,
+            newestSlot: newest.slot,
+            method: base ? base.method : "exact",
+            updatedAt: now,
+          }
+          counted.add(address)
+          save()
+          return
+        }
+        // The sampler's own first pass sizes the range; a sampled range reuses it.
+        const map = await mapRange(rpc, address, lo, hi, tipSlot)
+        if (map.size <= exactBelow) {
+          if (base && base.method === "sampled") sampledBase.add(address)
+          const job = newJob(base ? { ...base, method: "exact" } : undefined, hint)
+          job.pageCap = Math.ceil((1.25 * exactBelow) / PAGE_SIZE)
+          state.jobs[address] = job
+          plans[address] = { lo, hi, base, newest, map }
+          listed++
+        } else {
+          toSample.push({ address, lo, hi, base, newest, map })
+        }
+        save()
+      })
+      console.log(
+        `[solana] SOLANA_COUNT_MODE=auto: ${listed} range(s) listed exactly, ${toSample.length} sampled ` +
+          `(mapped above SOLANA_EXACT_BELOW=${exactBelow} signatures)`
+      )
+    } else {
+      const resumed = toCount.filter((address) => state.jobs[address] && topUpResumedJob(state.jobs[address]))
+      if (resumed.length > 0) {
+        console.log(`[solana] Resuming ${resumed.length} interrupted count(s), each topped up to the current tip`)
+        save()
+      }
+      // Addresses outside the Tokens registry (mostly programs) can have
+      // billions of signatures: size them first and keep an estimate for the
+      // ones too big to page.
+      const toSize = toCount.filter((address) => {
+        const entry = state.entries[address]
+        return !state.jobs[address] && !registriesOf(address).has("tokens") && (!entry || entry.method === "estimated")
+      })
+      if (toSize.length > 0) console.log(`[solana] Sizing ${toSize.length} address(es) outside the Tokens registry before counting`)
+      const estimated: string[] = []
+      await forEachConcurrent(toSize, 4, async (address) => {
+        const estimate = await estimateSignatures(rpc, address, probes, estimateAbove)
+        const total = estimate.successful + estimate.failed
+        // An exact answer here rests on one unconfirmed page, and histories below
+        // the threshold are cheap: both are paged exactly below.
+        if (estimate.small || estimate.exact || total <= estimateAbove) return
+        console.warn(
+          `[solana] ${address}: ~${total} signatures, above SOLANA_ESTIMATE_ABOVE=${estimateAbove}; ` +
+            `using an estimate (${estimate.calls} calls) instead of paging every signature`
+        )
+        state.entries[address] = {
+          successful: estimate.successful,
+          failed: estimate.failed,
+          newestSig: estimate.newestSig,
+          newestSlot: estimate.newestSlot,
+          method: "estimated",
+          updatedAt: new Date().toISOString(),
+        }
+        counted.add(address)
+        estimated.push(address)
+        save()
+      })
+      if (estimated.length > 0) {
+        // The sampler is unreliable on mints (-85% to +98% measured): say so when
+        // a mint listed outside the Tokens registry gets an estimate.
+        const owners = await getOwnerPrograms(rpc, estimated)
+        for (const address of estimated) {
+          if (TOKEN_PROGRAMS.indexOf(owners[address] || "") >= 0) {
+            console.warn(
+              `[solana] ${address} is a token mint listed in ${Array.from(registriesOf(address)).join(", ")}; ` +
+                "its count is an estimate, which can be far off for mints"
+            )
+          }
         }
       }
-    }
-    for (const address of toCount) {
-      if (state.jobs[address] || counted.has(address)) continue // resuming, or already settled above
-      const entry = state.entries[address]
-      const hint = holders[address] ? slotHint(holders[address].createdAt, tipSlot) : undefined
-      state.jobs[address] = newJob(entry && entry.method === "exact" ? entry : undefined, hint)
-      save()
+      let fromScratch = 0
+      for (const address of toCount) {
+        if (state.jobs[address] || counted.has(address)) continue // resuming, or already settled above
+        const entry = state.entries[address]
+        const hint = holders[address] ? slotHint(holders[address].createdAt, tipSlot) : undefined
+        const cached = entry && entry.method === "exact" ? entry : undefined
+        if (!cached) fromScratch++
+        state.jobs[address] = newJob(cached, hint)
+        save()
+      }
+      if (fromScratch > 0) {
+        // ~6 calls/s on free keys: a busy month counted from scratch takes a day
+        // or more (September 2026: ~740M signatures, ~32 h).
+        console.log(
+          `[solana] ${fromScratch} address(es) have no cached count and are paged from their first signature. ` +
+            "Large histories take hours on free tiers; `--mode prefetch` during the month avoids that at month-end."
+        )
+      }
     }
 
     const jobs: { [address: string]: SignatureJob } = {}
     for (const address of toCount) if (state.jobs[address]) jobs[address] = state.jobs[address]
     const jobCount = Object.keys(jobs).length
-    if (jobCount > 0) {
-      console.log(`[solana] Counting signatures for ${jobCount} address(es) (${rpc.capacity()} parallel requests max)`)
-      pages = await runSignatureJobs(rpc, jobs, save)
-      for (const address of Object.keys(jobs)) {
-        state.entries[address] = finishJob(address, jobs[address])
-        delete state.jobs[address]
-        counted.add(address)
+    if (jobCount > 0) console.log(`[solana] Counting signatures for ${jobCount} address(es) (${rpc.capacity()} parallel requests max)`)
+    const sampleTask = async (task: SampleTask) => {
+      const r = await sampleSignatureRange(rpc, task.address, task.lo, task.hi, tipSlot, task.map)
+      state.entries[task.address] = {
+        successful: (task.base ? task.base.successful : 0) + r.ok,
+        failed: (task.base ? task.base.failed : 0) + r.total - r.ok,
+        newestSig: task.newest.signature,
+        newestSlot: task.newest.slot,
+        method: "sampled",
+        updatedAt: new Date().toISOString(),
       }
+      counted.add(task.address)
       save()
+      console.log(
+        `[solana] ${task.address}: ~${r.total} signatures sampled in slots ${task.lo}..${task.hi - 1} ` +
+          `(${r.windows} windows, ${r.calls} calls)`
+      )
     }
+    const [pageCount] = await Promise.all([
+      jobCount > 0 ? runSignatureJobs(rpc, jobs, save) : Promise.resolve(0),
+      // enough samplers in flight to keep every URL busy until the last one ends
+      forEachConcurrent(toSample, 8, sampleTask),
+    ])
+    pages = pageCount
+    const abandoned = Object.keys(jobs).filter((address) => jobs[address].abandoned)
+    if (abandoned.length > 0) {
+      console.log(`[solana] ${abandoned.length} listing(s) passed their page cap (larger than sized): sampling them instead`)
+      for (const address of abandoned) delete state.jobs[address]
+      await forEachConcurrent(abandoned, 8, (address) => sampleTask({ address, ...plans[address] }))
+    }
+    for (const address of Object.keys(jobs)) {
+      if (jobs[address].abandoned) continue
+      const finished = finishJob(address, jobs[address])
+      state.entries[address] = sampledBase.has(address) ? { ...finished, method: "sampled" } : finished
+      delete state.jobs[address]
+      counted.add(address)
+    }
+    save()
   } finally {
     writer.flush()
+    console.log(
+      "[solana] RPC calls: " + rpc.stats().map((e) => `${e.label} ${e.calls} (${e.rateLimited} 429s, ${e.errors} errors)`).join("; ")
+    )
   }
 
   const byKey: { [cacheKey: string]: SolanaEnrichment } = {}

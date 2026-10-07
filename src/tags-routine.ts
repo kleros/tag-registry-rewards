@@ -7,6 +7,7 @@ import { SOLANA_HOLDER_THRESHOLD } from "./utils/solana-common"
 import { acquireTxCountCacheLock, txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
 import { writeFetchOutputs } from "./utils/fetch-output"
 import { applyTagFilters } from "./utils/tag-filters"
+import { BudgetExceededError, isBudgetExceeded } from "./utils/runtime-helpers"
 
 // Settings that would only fail once a lookup starts, checked up front so a
 // typo does not surface hours later.
@@ -33,9 +34,16 @@ const preflight = (hasEvm: boolean, hasSolana: boolean): void => {
 // A failure is logged as soon as it happens, so the operator can stop early.
 const runBoth = async <A, B>(a: () => Promise<A>, b: () => Promise<B>): Promise<[A, B]> => {
   const errors: string[] = []
+  let budgetReached = false
   let resultA: A | undefined
   let resultB: B | undefined
   const fail = (label: string, err: unknown) => {
+    // --max-minutes ran out: not a failure, the lane stopped at a checkpoint.
+    if (isBudgetExceeded(err)) {
+      budgetReached = true
+      console.log(`[enrich] ${label}: time budget reached, progress saved`)
+      return
+    }
     const text = `${label}: ${(err as Error)?.message || err}`
     errors.push(text)
     console.error(
@@ -60,6 +68,7 @@ const runBoth = async <A, B>(a: () => Promise<A>, b: () => Promise<B>): Promise<
     const resume = txCountCacheEnabled()
       ? ` Progress is saved in ${txCountCacheDir()}; rerun the same command to resume.`
       : ""
+    if (errors.length === 0 && budgetReached) throw new BudgetExceededError()
     throw new Error(`[enrich] Transaction counts failed, no output was written.${resume}\n  ${errors.join("\n  ")}`)
   }
   return [resultA, resultB]
@@ -186,4 +195,34 @@ export const tagsRoutine = async (period: Period): Promise<FetchManifest> => {
 
   console.log("Fetch completed:", manifest)
   return manifest
+}
+
+// Counts the tx of the tags registered so far in `period` into the cache and
+// writes no payout files. Optional: a cold month-end fetch takes ~2.5 h
+// (September 2026, Solana sampled above SOLANA_EXACT_BELOW), but counts are
+// cached and only ever topped up, so a prefetch earlier in the month shortens
+// it, and with SOLANA_COUNT_MODE=exact (~32 h of Solana paging for September)
+// it is what makes exact counts practical. Each run resumes where the last one
+// stopped.
+export const prefetchRoutine = async (period: Period): Promise<{ complete: boolean }> => {
+  if (!txCountCacheEnabled()) {
+    throw new Error("[prefetch] needs the tx-count cache (TX_COUNT_CACHE is off)")
+  }
+  if (getEvmTxProvider() === "dune" || getSolanaTxProvider() === "dune") {
+    throw new Error("[prefetch] the Dune providers keep no cache; prefetch only works with hypersync and rpc")
+  }
+  console.log("Prefetch period:", period)
+  preflight(true, true)
+  const tags = await fetchTags(period)
+  const { passed } = await applyTagFilters(tags)
+  console.log(`Prefetching tx counts for ${passed.length} tag(s) registered so far`)
+  try {
+    const { enrichedTags } = await enrichTags(passed)
+    console.log(`Prefetch complete: ${enrichedTags.length} tag(s) counted up to now; the month-end fetch only tops up.`)
+    return { complete: true }
+  } catch (err) {
+    if (!isBudgetExceeded(err)) throw err
+    console.log(`Prefetch paused at the time budget. Progress is saved in ${txCountCacheDir()}; run prefetch again to continue.`)
+    return { complete: false }
+  }
 }

@@ -25,7 +25,10 @@ interface Endpoint {
   url: string
   label: string
   isPublic: boolean
-  intervalMs: number
+  intervalMs: number // current spacing between calls; adapts to 429s
+  minIntervalMs: number // configured spacing, the fastest allowed
+  lastBackoffAt: number
+  lastAdjustAt: number // last backoff or recovery step
   maxInFlight: number
   methodIntervalMs: { [method: string]: number }
   nextAt: number
@@ -61,6 +64,7 @@ export interface EndpointStats {
   rateLimited: number
   errors: number
   disabled: string | null
+  rps: number // current pacing
 }
 
 // JSON-RPC errors worth retrying: long-term storage hiccups (-32019), node
@@ -69,6 +73,19 @@ export interface EndpointStats {
 // empty slot and move on.
 const RETRYABLE_RPC_CODES = [-32019, -32005, -32014, -32603]
 const MAX_ATTEMPTS = 8
+
+// A 429 slows that URL down by half again; answers without one bring it back
+// toward its configured rate. A provider whose real limit is below its
+// defaults then settles just under it instead of being hit at full rate and
+// parked for 10 s after every burst (Alchemy Free sends no Retry-After). It
+// does not raise a provider's ceiling: on 2026-10-06, getSignaturesForAddress
+// sustained ~0.5 calls/s on Alchemy Free and ~5-6 on Helius Free either way.
+const BACKOFF_FACTOR = 1.5
+const RECOVER_FACTOR = 0.9
+// Recovery is per time, not per answer: a URL slowed to 0.1 call/s would
+// otherwise need hours of answers to get back up.
+const RECOVER_EVERY_MS = 10000
+const MAX_INTERVAL_MS = 10000
 
 const PUBLIC_RPC_HOST = /(^|\.)api\.mainnet(-beta)?\.solana\.com$/
 
@@ -173,6 +190,9 @@ export class SolanaRpcPool {
         label: maskRpcUrl(url),
         isPublic: PUBLIC_RPC_HOST.test(hostOf(url)),
         intervalMs: 1000 / effectiveRps,
+        minIntervalMs: 1000 / effectiveRps,
+        lastBackoffAt: 0,
+        lastAdjustAt: 0,
         maxInFlight: inFlight && inFlight > 0 ? inFlight : defaults.inFlight,
         methodIntervalMs,
         nextAt: 0,
@@ -215,6 +235,7 @@ export class SolanaRpcPool {
       rateLimited: ep.rateLimited,
       errors: ep.errors,
       disabled: ep.disabled,
+      rps: Math.round(10000 / ep.intervalMs) / 10,
     }))
   }
 
@@ -264,7 +285,6 @@ export class SolanaRpcPool {
         })
         ep.calls++
         if (res.status === 429) {
-          // The server counts rejected calls too: back off for the full window.
           await res.text().catch(() => "")
           this.pause(ep, Number(res.headers.get("retry-after")))
           if (++rateLimitedWaits > 300) throw fail(`[solana-rpc] ${method}: rate limited too many times`, 429, 429)
@@ -310,6 +330,7 @@ export class SolanaRpcPool {
             }
           } else {
             ep.consecutiveFailures = 0
+            this.recover(ep)
             if (options.onAnswer) options.onAnswer(index)
             return body.result as T
           }
@@ -339,8 +360,27 @@ export class SolanaRpcPool {
 
   private pause(ep: Endpoint, retryAfterSecs: number): void {
     ep.rateLimited++
-    const waitMs = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0 ? retryAfterSecs * 1000 : 10000
-    ep.pausedUntil = Math.max(ep.pausedUntil, Date.now() + waitMs + Math.floor(Math.random() * 1000))
+    const now = Date.now()
+    // Calls already in flight answer 429 together: slow down once per burst.
+    if (now - ep.lastBackoffAt > 1000) {
+      ep.intervalMs = Math.min(MAX_INTERVAL_MS, ep.intervalMs * BACKOFF_FACTOR)
+      ep.lastBackoffAt = now
+    }
+    ep.lastAdjustAt = now
+    // The public RPC limits per 10 s window and counts rejected calls too, so
+    // it sits out the window; keyed providers limit per second.
+    const fallbackMs = ep.isPublic ? 10000 : 1000
+    const waitMs = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0 ? retryAfterSecs * 1000 : fallbackMs
+    ep.pausedUntil = Math.max(ep.pausedUntil, now + waitMs + Math.floor(Math.random() * 500))
+  }
+
+  // After RECOVER_EVERY_MS without a 429, edge back toward the configured rate.
+  private recover(ep: Endpoint): void {
+    if (ep.intervalMs <= ep.minIntervalMs) return
+    const now = Date.now()
+    if (now - ep.lastAdjustAt < RECOVER_EVERY_MS) return
+    ep.lastAdjustAt = now
+    ep.intervalMs = Math.max(ep.minIntervalMs, ep.intervalMs * RECOVER_FACTOR)
   }
 
   private backoff(attempt: number): number {

@@ -9,12 +9,14 @@ import buildCsv from "./csv"
 import { existsSync, readFileSync } from "fs"
 import { resolve } from "path"
 import { inspect } from "util"
-import { tagsRoutine } from "./tags-routine"
+import { prefetchRoutine, tagsRoutine } from "./tags-routine"
 import { filterCheckRoutine } from "./filter-check-routine"
 import { removalsRoutine } from "./removals-routine"
 import { documentRoutine } from "./document-routine"
 import { verifyTxCounts } from "./verify-tx-counts"
 import { redactSecrets } from "./utils/solana-rpc"
+import { isBudgetExceeded, setDeadline } from "./utils/runtime-helpers"
+import { txCountCacheDir } from "./utils/tx-count-cache"
 import {
   applyTagExclusions,
   ExclusionList,
@@ -56,12 +58,19 @@ const argv: any = yargs(hideBin(process.argv))
     Send rewards:
       $0 --mode send --rewards \${filename}.json
     Check the tx-count providers (HyperSync, Solana RPC) against known values:
-      $0 --mode verify-counts`
+      $0 --mode verify-counts
+    Optional: count this month's tags so far into the cache (no payout files),
+    so the month-end fetch only tops up; resumable:
+      $0 --mode prefetch [--max-minutes N]`
   )
   .option("m", {
     description:
-      "The mode of the execution. Steps: 'fetch', 'filter-check', 'removals', 'generate', 'document', 'all', 'send', and 'verify-counts'",
+      "The mode of the execution. Steps: 'fetch', 'filter-check', 'removals', 'generate', 'document', 'all', 'send', 'verify-counts', and 'prefetch'",
     alias: "mode",
+  })
+  .option("max-minutes", {
+    description:
+      "fetch/prefetch/all: stop counting transactions after this many minutes, with progress saved; rerun to continue",
   })
   .option("s", {
     description: "The day the period starts",
@@ -147,6 +156,29 @@ const resolvePeriod = (): { start: Date; end: Date; label: string } => {
   return { start, end, label: toPeriodLabel(start) }
 }
 
+// Prefetch counts the month that is still running: without --period/--start/
+// --end it takes the current UTC month, every tag registered in it so far.
+const resolvePrefetchPeriod = (): { start: Date; end: Date; label: string } => {
+  if (argv.period || argv.start || argv.end) return resolvePeriod()
+  const now = new Date()
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
+  return { start, end, label: toPeriodLabel(start) }
+}
+
+// --max-minutes: both tx-count lanes stop before their next request once it
+// has passed, with everything counted so far saved in the cache.
+const applyTimeBudget = (): void => {
+  const raw = argv["max-minutes"]
+  if (raw === undefined) return
+  const minutes = Number(raw)
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    throw new Error(`Invalid --max-minutes "${raw}": expected a positive number`)
+  }
+  setDeadline(Date.now() + minutes * 60000)
+  console.log(`Time budget: transaction counting stops after ${minutes} minute(s), progress saved`)
+}
+
 // Build submission rewards from the given tags/gas files, or the latest fetch
 // manifest when omitted. Shared by `generate` and `all`. When `all` passes its
 // shared exclusion list, hits accumulate across steps and the unmatched-entry
@@ -192,7 +224,7 @@ const main = async () => {
   const mode = argv.mode as string | undefined
   if (mode === undefined) {
     throw new Error(
-      "You must choose a mode, 'fetch' | 'filter-check' | 'removals' | 'generate' | 'document' | 'all' | 'send' | 'verify-counts'"
+      "You must choose a mode, 'fetch' | 'filter-check' | 'removals' | 'generate' | 'document' | 'all' | 'send' | 'verify-counts' | 'prefetch'"
     )
   }
   if (mode === "fetch") {
@@ -204,7 +236,19 @@ const main = async () => {
     console.log(`Fetch started at: ${fetchStart.toISOString()}`)
     console.log(`Run directory: ${process.cwd()}`)
     console.log(`Output directory: ${resolve(process.cwd(), conf.FILES_DIR)}`)
-    const manifest = await tagsRoutine({ start, end })
+    applyTimeBudget()
+    let manifest: FetchManifest
+    try {
+      manifest = await tagsRoutine({ start, end })
+    } catch (err) {
+      if (!isBudgetExceeded(err)) throw err
+      console.log(
+        `Fetch stopped at --max-minutes with counts incomplete; no output was written. ` +
+          `Progress is saved in ${txCountCacheDir()}: rerun the same command to continue.`
+      )
+      process.exitCode = 2
+      return
+    }
     console.log(`Fetch CSV output: ${manifest.fullCsvFile}`)
     console.log(`Generate tags file: ${manifest.generateTagsFile}`)
     console.log(`Generate gas file: ${manifest.generateGasFile}`)
@@ -265,7 +309,18 @@ const main = async () => {
     const exclusions = loadExclusions()
 
     console.log("\n=== [all] 1/4 fetch (submissions) ===")
-    await tagsRoutine({ start, end })
+    applyTimeBudget()
+    try {
+      await tagsRoutine({ start, end })
+    } catch (err) {
+      if (!isBudgetExceeded(err)) throw err
+      console.log(
+        `[all] Stopped at --max-minutes with counts incomplete; nothing was generated. ` +
+          `Progress is saved in ${txCountCacheDir()}: rerun to continue.`
+      )
+      process.exitCode = 2
+      return
+    }
 
     console.log("\n=== [all] 2/4 generate (submissions) ===")
     await runGenerate(undefined, undefined, exclusions)
@@ -311,6 +366,15 @@ const main = async () => {
     // check the tx-count providers against known values before a real fetch.
     const ok = await verifyTxCounts()
     if (!ok) process.exitCode = 1
+  } else if (mode === "prefetch") {
+    // count the running month's tags into the cache so the month-end fetch
+    // only tops up; writes no payout files. A stop at --max-minutes is normal.
+    const { start, end, label } = resolvePrefetchPeriod()
+    console.log(`Prefetch period: ${label} (${start.toISOString()} → ${end.toISOString()})`)
+    applyTimeBudget()
+    const started = Date.now()
+    const { complete } = await prefetchRoutine({ start, end })
+    console.log(`Prefetch ${complete ? "finished" : "paused"} after ${Math.round((Date.now() - started) / 60000)} min`)
   } else {
     throw new Error(`Unrecognized mode ${mode}`)
   }

@@ -4,6 +4,28 @@ export const sleep = (ms: number): Promise<void> => new Promise((resolve) => set
 
 export const errorMessage = (err: unknown): string => String((err as Error)?.message || err)
 
+// Optional wall-clock budget for the tx-count lanes (--max-minutes). Both
+// lanes check it before each request, so they stop with every finished page
+// checkpointed in the cache and the next run resumes from there.
+let deadlineMs = 0
+
+export const setDeadline = (atMs: number): void => {
+  deadlineMs = atMs
+}
+
+export class BudgetExceededError extends Error {
+  constructor() {
+    super("time budget reached")
+    this.name = "BudgetExceededError"
+  }
+}
+
+export const isBudgetExceeded = (err: unknown): boolean => err instanceof BudgetExceededError
+
+export const checkDeadline = (): void => {
+  if (deadlineMs && Date.now() >= deadlineMs) throw new BudgetExceededError()
+}
+
 // Optional non-negative integer setting; throws on anything else so a typo is
 // not silently replaced by the default.
 export const envInt = (name: string, fallback: number): number => {

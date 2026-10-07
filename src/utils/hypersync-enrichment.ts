@@ -1,6 +1,6 @@
 import type { HypersyncClient, Query, RateLimitInfo } from "@envio-dev/hypersync-client"
 import { httpFetch } from "./http"
-import { chunk, envInt, errorMessage as message, sleep } from "./runtime-helpers"
+import { checkDeadline, chunk, envInt, errorMessage as message, sleep } from "./runtime-helpers"
 import { runSplittableWork, SplittableUnit } from "./split-scheduler"
 import { readCacheFile, ThrottledWriter, txCountCacheDir, txCountCacheEnabled } from "./tx-count-cache"
 
@@ -206,11 +206,12 @@ class HypersyncScanner {
     return { nextBlock: res.nextBlock, transactions: res.data.transactions }
   }
 
-  // The rate budget is per token and shared by every chain. The free tier is
-  // "fair use" (about 30 requests/min observed), so requests are spaced out
+  // The rate budget is per token and shared by every chain. A free token's
+  // headers said 15 requests per 60 s window on 2026-10-06 (x-ratelimit-limit
+  // 15000, cost 1000 each, whatever the page size), so requests are spaced out
   // instead of bursting into 429s. HYPERSYNC_REQUESTS_PER_MINUTE=0 disables it.
   private async pace(): Promise<void> {
-    const perMinute = envInt("HYPERSYNC_REQUESTS_PER_MINUTE", 25)
+    const perMinute = envInt("HYPERSYNC_REQUESTS_PER_MINUTE", 14)
     if (!perMinute) return
     const now = Date.now()
     const at = Math.max(now, this.nextRequestAt)
@@ -265,6 +266,15 @@ class HypersyncScanner {
   }
 }
 
+// Without maxNumTransactions the server ends a response at ~5,500 rows. The
+// free tier limits requests, not rows, so a large page is far faster: a 24 h
+// window of Base USDC (367,601 rows) came back in one 1.3 s request instead of
+// 69. HYPERSYNC_MAX_ROWS_PER_REQUEST=0 leaves the server default.
+const pageSize = (): { maxNumTransactions?: number } => {
+  const rows = envInt("HYPERSYNC_MAX_ROWS_PER_REQUEST", 500000)
+  return rows > 0 ? { maxNumTransactions: rows } : {}
+}
+
 const mainQuery = (addresses: string[], fromBlock: number, toBlock: number, successOnly: boolean): Query =>
   ({
     fromBlock,
@@ -272,6 +282,7 @@ const mainQuery = (addresses: string[], fromBlock: number, toBlock: number, succ
     transactions: [successOnly ? { to: addresses, status: 1 } : { to: addresses }],
     fieldSelection: { transaction: ["To"] },
     joinMode: JOIN_NOTHING,
+    ...pageSize(),
   } as Query)
 
 const preByzantiumQuery = (addresses: string[], fromBlock: number, toBlock: number): Query =>
@@ -281,6 +292,7 @@ const preByzantiumQuery = (addresses: string[], fromBlock: number, toBlock: numb
     transactions: [{ to: addresses }],
     fieldSelection: { transaction: ["To", "Status", "Gas", "GasUsed", "LogsBloom"] },
     joinMode: JOIN_NOTHING,
+    ...pageSize(),
   } as Query)
 
 class ScanUnit implements SplittableUnit {
@@ -438,6 +450,7 @@ const runJobs = async (
   if (units.length === 0) return
 
   const step = async (unit: ScanUnit): Promise<void> => {
+    checkDeadline()
     const { plan, group, segment } = unit
     const from = segment.next
     const query =
