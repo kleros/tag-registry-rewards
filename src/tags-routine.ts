@@ -10,7 +10,7 @@ import {
 } from "./utils/solana-enrichment"
 import { getDuneApiKey } from "./utils/dune-client"
 import { SOLANA_HOLDER_THRESHOLD } from "./utils/solana-common"
-import { requireEnvioApiToken } from "./utils/hypersync-enrichment"
+import { loadHypersync, requireEnvioApiToken } from "./utils/hypersync-enrichment"
 import { assertSolanaRpcSettings } from "./utils/solana-rpc-enrichment"
 import { acquireTxCountCacheLock, txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
 import { writeFetchOutputs } from "./utils/fetch-output"
@@ -21,8 +21,12 @@ import { BudgetExceededError, isBudgetExceeded, startTimeBudget } from "./utils/
 // typo does not surface hours later.
 const preflight = (hasEvm: boolean, hasSolana: boolean): void => {
   if (hasEvm) {
-    if (getEvmTxProvider() === "hypersync") requireEnvioApiToken()
-    else getDuneApiKey()
+    if (getEvmTxProvider() === "hypersync") {
+      requireEnvioApiToken()
+      loadHypersync()
+    } else {
+      getDuneApiKey()
+    }
   }
   if (hasSolana) {
     if (getSolanaTxProvider() === "rpc") assertSolanaRpcSettings()

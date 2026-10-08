@@ -106,11 +106,37 @@ interface SignatureEntry {
   updatedAt: string
 }
 
+// One window of a stratified sample: [a0, a1) is its stratum, `ranges` the
+// slots counted (w of them, wrapping inside the stratum).
+interface SampleWindow {
+  a0: number
+  a1: number
+  w: number
+  ranges: [number, number][]
+  total?: number // exact counts, once the window is done
+  ok?: number
+}
+
+// A sampled count still running (auto mode), saved so that an interrupted run
+// resumes it instead of mapping and counting the range again: its range, the
+// count it adds to, the density map and the windows, with those already
+// counted. Counts of finalized slot ranges never change, so they stay valid.
+interface SampleJob {
+  lo: number
+  hi: number
+  base?: SignatureEntry
+  newest: { signature: string; slot: number }
+  map?: DensityMap
+  windows?: SampleWindow[]
+  createdAt: string
+}
+
 interface SolanaCache {
   version: number
   definition: string
   entries: { [address: string]: SignatureEntry }
   jobs: { [address: string]: SignatureJob }
+  samples: { [address: string]: SampleJob }
 }
 
 export interface HolderResult {
@@ -1230,25 +1256,13 @@ export const mapRange = async (
   return { lo, hi, cell, density, size, calls }
 }
 
-// Unbiased stratified estimate of the signatures in [lo, hi) (see above),
-// reusing the density map when the caller already has it.
-export const sampleSignatureRange = async (
-  rpc: SolanaRpcPool,
-  address: string,
-  lo: number,
-  hi: number,
-  tipSlot: number,
-  given?: DensityMap
-): Promise<RangeCount & { windows: number }> => {
+// The windows of a stratified sample of [lo, hi) (see above), one per stratum
+// of equal mapped mass. Drawn from a PRNG seeded by the range, so the same
+// range and map always give the same windows.
+const drawWindows = (address: string, lo: number, hi: number, map: DensityMap): SampleWindow[] => {
   const settings = sampleSettings()
-  // A quick map of the same range is completed, keeping its points.
-  const map =
-    given && given.lo === lo && given.hi === hi && isComplete(given)
-      ? given
-      : await mapRange(rpc, address, lo, hi, tipSlot, 1, given)
   const { density, cell } = map
   const P = density.length
-  let calls = map.calls
   const maxDensity = Math.max(...density)
   const floor = maxDensity > 0 ? maxDensity * 1e-4 : 1e-9
   const mass = density.map((d) => Math.max(d, floor) * cell)
@@ -1265,7 +1279,7 @@ export const sampleSignatureRange = async (
   }
   bounds.push(hi)
   const random = seededRandom(`${address}:${lo}:${hi}`)
-  const windows: { a0: number; a1: number; w: number; ranges: [number, number][] }[] = []
+  const windows: SampleWindow[] = []
   for (let k = 0; k + 1 < bounds.length; k++) {
     const a0 = bounds[k]
     const a1 = bounds[k + 1]
@@ -1277,23 +1291,45 @@ export const sampleSignatureRange = async (
     const ranges: [number, number][] = end <= a1 ? [[x, end]] : [[x, a1], [a0, a0 + (end - a1)]]
     windows.push({ a0, a1, w, ranges })
   }
+  return windows
+}
+
+// Counts the windows not counted yet (`onWindow` hears of each one as it
+// ends, to save it), then scales every window up to its stratum.
+const countWindows = async (
+  rpc: SolanaRpcPool,
+  address: string,
+  windows: SampleWindow[],
+  tipSlot: number,
+  onWindow?: () => void
+): Promise<RangeCount> => {
+  let calls = 0
+  await forEachConcurrent(
+    windows.filter((win) => win.total === undefined),
+    8,
+    async (win) => {
+      let t = 0
+      let o = 0
+      for (const [a, b] of win.ranges) {
+        if (b <= a) continue
+        const r = await countSlotRange(rpc, address, a, b, tipSlot)
+        calls += r.calls
+        t += r.total
+        o += r.ok
+      }
+      win.total = t
+      win.ok = o
+      if (onWindow) onWindow()
+    }
+  )
   let total = 0
   let ok = 0
-  await forEachConcurrent(windows, 8, async (win) => {
-    let t = 0
-    let o = 0
-    for (const [a, b] of win.ranges) {
-      if (b <= a) continue
-      const r = await countSlotRange(rpc, address, a, b, tipSlot)
-      calls += r.calls
-      t += r.total
-      o += r.ok
-    }
+  for (const win of windows) {
     const scale = (win.a1 - win.a0) / win.w
-    total += t * scale
-    ok += o * scale
-  })
-  return { total: Math.round(total), ok: Math.round(ok), calls, windows: windows.length }
+    total += (win.total as number) * scale
+    ok += (win.ok as number) * scale
+  }
+  return { total: Math.round(total), ok: Math.round(ok), calls }
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,10 +1337,7 @@ export const sampleSignatureRange = async (
 // The range of a listing resumed from an earlier run (no plan from this one),
 // to sample it when it passes its page cap: from its first slot to the newest
 // signature it has seen, on top of the count it started from.
-const resumedSampleTask = (
-  address: string,
-  job: SignatureJob
-): { address: string; lo: number; hi: number; base?: SignatureEntry; newest: SignatureInfo } => {
+const resumedSampleJob = (address: string, job: SignatureJob): SampleJob => {
   const { signature: newestSig, slot: newestSlot } = jobNewest(job)
   if (job.rangeLo === undefined || !newestSig || newestSlot === undefined) {
     throw new Error(`[solana] internal error: ${address} resumed a listing without its range`)
@@ -1319,8 +1352,21 @@ const resumedSampleTask = (
         updatedAt: job.createdAt,
       }
     : undefined
-  return { address, lo: job.rangeLo, hi: newestSlot + 1, base, newest: { signature: newestSig, slot: newestSlot, err: null } }
+  return {
+    lo: job.rangeLo,
+    hi: newestSlot + 1,
+    base,
+    newest: { signature: newestSig, slot: newestSlot },
+    createdAt: new Date().toISOString(),
+  }
 }
+
+// Whether a saved sample still adds to the address's cached count (another
+// run may have counted the address since).
+const sameBase = (entry: SignatureEntry | undefined, base: SignatureEntry | undefined): boolean =>
+  base
+    ? !!entry && entry.newestSig === base.newestSig && entry.successful === base.successful && entry.failed === base.failed
+    : !entry || !entry.newestSig
 
 const slotHint = (createdAt: string | undefined, tipSlot: number): number | undefined => {
   if (!createdAt) return undefined
@@ -1384,11 +1430,16 @@ export const enrichSolanaTagsWithRpc = async (
     return !(regs.size === 1 && regs.has("tokens") && holders[a].holders < SOLANA_HOLDER_THRESHOLD)
   })
 
-  let state: SolanaCache = { version: CACHE_VERSION, definition: SOLANA_RPC_DEFINITION, entries: {}, jobs: {} }
+  let state: SolanaCache = { version: CACHE_VERSION, definition: SOLANA_RPC_DEFINITION, entries: {}, jobs: {}, samples: {} }
   if (persist) {
     const loaded = readCacheFile<SolanaCache>(CACHE_FILE)
     if (loaded && loaded.version === CACHE_VERSION && loaded.definition === SOLANA_RPC_DEFINITION) {
-      state = { ...loaded, entries: loaded.entries || {}, jobs: loaded.jobs || {} }
+      state = { ...loaded, entries: loaded.entries || {}, jobs: loaded.jobs || {}, samples: loaded.samples || {} }
+      // JSON stores a map's unmeasured points (NaN) as null.
+      for (const address of Object.keys(state.samples)) {
+        const map = state.samples[address].map
+        if (map) map.density = map.density.map((d) => (typeof d === "number" ? d : NaN))
+      }
     } else if (loaded) {
       console.warn("[solana] ignoring a cache written with another format or definition")
     }
@@ -1401,6 +1452,41 @@ export const enrichSolanaTagsWithRpc = async (
   const { estimateAbove, probes } = estimateSettings()
   const counted = new Set<string>()
   let pages = 0
+
+  // Runs a saved sample to its end, saving as it goes: the map (when missing
+  // or incomplete), the windows (drawn once), then each window as it is
+  // counted. The result becomes the address's entry.
+  const runSample = async (address: string, tip: number): Promise<void> => {
+    const sample = state.samples[address]
+    if (!sample.map || sample.map.lo !== sample.lo || sample.map.hi !== sample.hi || !isComplete(sample.map)) {
+      sample.map = await mapRange(rpc, address, sample.lo, sample.hi, tip, 1, sample.map)
+      delete sample.windows
+      save()
+    }
+    if (!sample.windows) {
+      sample.windows = drawWindows(address, sample.lo, sample.hi, sample.map)
+      save()
+    }
+    const r = await countWindows(rpc, address, sample.windows, tip, save)
+    const { base } = sample
+    state.entries[address] = {
+      successful: (base ? base.successful : 0) + r.ok,
+      failed: (base ? base.failed : 0) + r.total - r.ok,
+      newestSig: sample.newest.signature,
+      newestSlot: sample.newest.slot,
+      method: "sampled",
+      updatedAt: new Date().toISOString(),
+    }
+    delete state.samples[address]
+    delete state.jobs[address] // an abandoned listing ends with its sample
+    counted.add(address)
+    save()
+    console.log(
+      `[solana] ${address}: ~${r.total} signatures sampled in slots ${sample.lo}..${sample.hi - 1} ` +
+        `(${sample.windows.length} windows, ${sample.map.calls + r.calls} calls)`
+    )
+  }
+
   try {
     const tipSlot = await rpc.call<number>("getSlot", [{ commitment: "finalized" }])
     const mode = getSolanaCountMode()
@@ -1414,6 +1500,19 @@ export const enrichSolanaTagsWithRpc = async (
         job.sampledBase = true
       }
     }
+    // A sample an interrupted run left resumes in auto mode while it still adds
+    // to the cached count (the listing it may have replaced is gone); exact
+    // mode lists the address instead.
+    const resumedSamples: string[] = []
+    for (const address of Object.keys(state.samples)) {
+      if (toCount.indexOf(address) < 0) continue
+      if (mode === "auto" && sameBase(state.entries[address], state.samples[address].base)) {
+        delete state.jobs[address]
+        resumedSamples.push(address)
+      } else {
+        delete state.samples[address]
+      }
+    }
     // A listing abandoned at its page cap holds partial counts, never reused.
     // Auto mode samples its range up to the tip right away (listing it again
     // would only hit the cap again); exact mode drops it.
@@ -1423,12 +1522,17 @@ export const enrichSolanaTagsWithRpc = async (
       if (mode === "auto" && state.jobs[address].rangeLo !== undefined && toCount.indexOf(address) >= 0) carried.add(address)
       else delete state.jobs[address]
     }
-    type SampleTask = { address: string; lo: number; hi: number; base?: SignatureEntry; newest: SignatureInfo; map?: DensityMap }
-    const toSample: SampleTask[] = []
-    const plans: { [address: string]: Omit<SampleTask, "address"> } = {} // listed ranges, sampled if abandoned
+    const toSample: string[] = [] // addresses with a sample planned by this run
+    const plans: { [address: string]: SampleJob } = {} // listed ranges, sampled if abandoned
     if (mode === "auto") {
       const { exactBelow, points } = sampleSettings()
       const now = new Date().toISOString()
+      // Finished first: the count they end with is then topped up to the tip
+      // below, like any cached count.
+      if (resumedSamples.length > 0) {
+        console.log(`[solana] Resuming ${resumedSamples.length} interrupted sample(s), then topping them up to the current tip`)
+        await forEachConcurrent(resumedSamples, 8, (address) => runSample(address, tipSlot))
+      }
       // An interrupted listing of this mode resumes, topped up to the tip. Other
       // interrupted counts (exact mode's, which can be huge) become an entry
       // when they only lacked their top-up, and are dropped otherwise:
@@ -1494,8 +1598,18 @@ export const enrichSolanaTagsWithRpc = async (
           save()
           return
         }
+        const sampleJob = (map?: DensityMap): SampleJob => ({
+          lo,
+          hi,
+          base: base ? { ...base } : undefined,
+          newest: { signature: newest.signature, slot: newest.slot },
+          ...(map ? { map } : {}),
+          createdAt: now,
+        })
         if (carried.has(address)) {
-          toSample.push({ address, lo, hi, base, newest })
+          state.samples[address] = sampleJob()
+          delete state.jobs[address] // the sample replaces the abandoned listing
+          toSample.push(address)
           save()
           return
         }
@@ -1513,10 +1627,11 @@ export const enrichSolanaTagsWithRpc = async (
           job.rangeLo = lo
           if (base && base.method === "sampled") job.sampledBase = true
           state.jobs[address] = job
-          plans[address] = { lo, hi, base, newest, map }
+          plans[address] = sampleJob(map)
           listed++
         } else {
-          toSample.push({ address, lo, hi, base, newest, map })
+          state.samples[address] = sampleJob(map)
+          toSample.push(address)
         }
         save()
       })
@@ -1608,31 +1723,13 @@ export const enrichSolanaTagsWithRpc = async (
     // read it again before sampling instead of paging down from the live tip.
     const finalizedSlot = () => rpc.call<number>("getSlot", [{ commitment: "finalized" }])
     let sampleTip = toSample.length > 0 ? await finalizedSlot() : tipSlot
-    const sampleTask = async (task: SampleTask) => {
-      const r = await sampleSignatureRange(rpc, task.address, task.lo, task.hi, sampleTip, task.map)
-      state.entries[task.address] = {
-        successful: (task.base ? task.base.successful : 0) + r.ok,
-        failed: (task.base ? task.base.failed : 0) + r.total - r.ok,
-        newestSig: task.newest.signature,
-        newestSlot: task.newest.slot,
-        method: "sampled",
-        updatedAt: new Date().toISOString(),
-      }
-      delete state.jobs[task.address] // an abandoned listing ends with its sample
-      counted.add(task.address)
-      save()
-      console.log(
-        `[solana] ${task.address}: ~${r.total} signatures sampled in slots ${task.lo}..${task.hi - 1} ` +
-          `(${r.windows} windows, ${r.calls} calls)`
-      )
-    }
     // When one side fails the other still ends (with its progress saved)
     // before the error leaves this function and the cache is flushed.
     const [pageCount] = await settleAll(
       [
         jobCount > 0 ? runSignatureJobs(rpc, jobs, save) : Promise.resolve(0),
         // enough samplers in flight to keep every URL busy until the last one ends
-        forEachConcurrent(toSample, 8, sampleTask).then(() => 0),
+        forEachConcurrent(toSample, 8, (address) => runSample(address, sampleTip)).then(() => 0),
       ],
       (err) => {
         if (!isBudgetExceeded(err)) {
@@ -1647,10 +1744,13 @@ export const enrichSolanaTagsWithRpc = async (
     const abandoned = Object.keys(jobs).filter((address) => jobs[address].abandoned)
     if (abandoned.length > 0) {
       console.log(`[solana] ${abandoned.length} listing(s) passed their page cap (larger than sized): sampling them instead`)
+      for (const address of abandoned) {
+        state.samples[address] = plans[address] || resumedSampleJob(address, jobs[address])
+        delete state.jobs[address]
+      }
+      save()
       sampleTip = await finalizedSlot()
-      await forEachConcurrent(abandoned, 8, (address) =>
-        sampleTask(plans[address] ? { address, ...plans[address] } : resumedSampleTask(address, jobs[address]))
-      )
+      await forEachConcurrent(abandoned, 8, (address) => runSample(address, sampleTip))
     }
     for (const address of Object.keys(jobs)) {
       if (jobs[address].abandoned) continue

@@ -16,7 +16,9 @@ import { documentRoutine } from "./document-routine"
 import { verifyTxCounts } from "./verify-tx-counts"
 import { redactSecrets } from "./utils/solana-rpc"
 import { isBudgetExceeded, setTimeBudget } from "./utils/runtime-helpers"
-import { txCountCacheDir } from "./utils/tx-count-cache"
+import { txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
+import { getEvmTxProvider } from "./utils/evm-enrichment"
+import { getSolanaTxProvider } from "./utils/solana-enrichment"
 import {
   applyTagExclusions,
   ExclusionList,
@@ -168,13 +170,21 @@ const resolvePrefetchPeriod = (): { start: Date; end: Date; label: string } => {
 
 // --max-minutes: both tx-count lanes stop before their next request once it
 // has passed since counting started, with everything counted so far saved in
-// the cache. Fetching and filtering the tags before it is not counted.
+// the cache. Fetching and filtering the tags before it is not counted. Without
+// the cache, or with a Dune lane (no cache), a stop would keep nothing and
+// every rerun would start over, so it is refused.
 const applyTimeBudget = (): void => {
   const raw = argv["max-minutes"]
   if (raw === undefined) return
   const minutes = Number(raw)
   if (!Number.isFinite(minutes) || minutes <= 0) {
     throw new Error(`Invalid --max-minutes "${raw}": expected a positive number`)
+  }
+  if (!txCountCacheEnabled()) {
+    throw new Error("--max-minutes needs the tx-count cache to resume (TX_COUNT_CACHE is off)")
+  }
+  if (getEvmTxProvider() === "dune" || getSolanaTxProvider() === "dune") {
+    throw new Error("--max-minutes only works with the hypersync and rpc providers; the Dune providers keep no cache")
   }
   setTimeBudget(minutes)
   console.log(`Time budget: transaction counting stops ${minutes} minute(s) after it starts, progress saved`)

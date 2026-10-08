@@ -174,15 +174,17 @@ export const hypersyncUrl = (chainId: string): string =>
 
 let hypersyncModule: HypersyncModule | null = null
 // Loaded on first use: it is a native module (prebuilt for macOS and Linux)
-// and only this provider needs it.
-const loadHypersync = (): HypersyncModule => {
+// and only this provider needs it. Also loaded before the run starts
+// (tags-routine preflight), so a platform without it fails right away.
+export const loadHypersync = (): HypersyncModule => {
   if (hypersyncModule) return hypersyncModule
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     hypersyncModule = require("@envio-dev/hypersync-client") as HypersyncModule
   } catch (err) {
     throw new Error(
-      `[hypersync] Could not load @envio-dev/hypersync-client (prebuilt for macOS and Linux only): ${message(err)}`
+      "[hypersync] Could not load @envio-dev/hypersync-client, which is prebuilt for macOS and Linux only " +
+        `(on Windows, run under WSL, or set EVM_TX_PROVIDER=dune): ${message(err)}`
     )
   }
   hypersyncModule.setLogLevel(process.env.HYPERSYNC_LOG_LEVEL || "warn")
@@ -494,11 +496,16 @@ const runJobs = async (
         `[hypersync] chain ${plan.chainId}: nextBlock ${res.nextBlock} is past the requested end ${segment.to}`
       )
     }
+    // Every row is checked before any is counted: a step that throws halfway
+    // would leave part of the page in the counts, a later checkpoint would
+    // save it, and the rerun would count that page again.
     for (const tx of res.transactions) {
-      const to = String(tx.to || "").toLowerCase()
-      if (!unit.addressSet.has(to)) {
+      if (!unit.addressSet.has(String(tx.to || "").toLowerCase())) {
         throw new Error(`[hypersync] chain ${plan.chainId}: unexpected tx.to "${tx.to}" in the response`)
       }
+    }
+    for (const tx of res.transactions) {
+      const to = String(tx.to || "").toLowerCase()
       if (group.kind === "main") {
         segment.counts[to] = (segment.counts[to] || 0) + 1
       } else if (tx.status !== 0 && tx.status !== 1) {

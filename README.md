@@ -24,6 +24,10 @@ npm install
 npx tsc --noEmit
 ```
 
+The EVM tx counts use `@envio-dev/hypersync-client`, a native module built for
+macOS and Linux only: on Windows, run `fetch`, `all` and `prefetch` under WSL
+(or use `EVM_TX_PROVIDER=dune`).
+
 Fill `.env` values:
 
 - `ENVIO_API_TOKEN` (EVM tx counts; free token at https://envio.dev/app/api-tokens)
@@ -140,7 +144,8 @@ units per second) or the HyperSync tier.
 `--max-minutes N` bounds the counting: both lanes stop before their next
 request once N minutes have passed since counting started (fetching and
 filtering the tags before it is not included), with progress saved; `fetch` and
-`all` write nothing (exit code 2) and the next run continues. `yarn start --mode prefetch` counts the running month's tags so far
+`all` write nothing (exit code 2) and the next run continues. Like prefetch, it
+needs the cache and the free providers. `yarn start --mode prefetch` counts the running month's tags so far
 into the cache, so a month-end run after a prefetch only tops up.
 
 Both run in parallel. Long histories are split across parallel requests
@@ -183,11 +188,12 @@ Token pool, so the change belongs in the next monthly post.
 **Cache and resume.** Counts are stored per address with the block or signature
 they cover, in `~/.cache/tag-registry-rewards/tx-counts` (`TX_COUNT_CACHE_DIR`),
 outside `files/`. An interrupted fetch resumes where it stopped, still counting
-up to the new run's tip (an address that was being sampled is sampled again), and later months only scan what is new for addresses
+up to the new run's tip (a sampled address keeps its map and the windows it
+had counted), and later months only scan what is new for addresses
 seen before. `TX_COUNT_CACHE=off` recounts everything from scratch. The fetch
 manifest records the provider,
 cutoff block per chain, cache path and, for Solana, each address's method
-(`exact`/`estimated`) and holder source.
+(`exact`/`sampled`/`estimated`) and holder source.
 
 **Check before paying.** Run this after setting the keys; it compares against
 values counted independently and measures speed:
@@ -283,8 +289,8 @@ yarn start --mode prefetch [--max-minutes N] [--period YYYY-MM | --start YYYY-MM
 Counts the transactions of every tag registered so far in the running month
 (by default) into the tx-count cache, exactly as `fetch` would, and writes no
 files. The month-end `fetch` then only tops the cached counts up. Each run
-resumes where the last one stopped (an address that was being sampled is
-sampled again); at `--max-minutes` both lanes stop before
+resumes where the last one stopped (a sampled address keeps its map and the
+windows it had counted); at `--max-minutes` both lanes stop before
 their next request with everything counted so far saved, and the run exits 0.
 It needs the cache and the free providers (not `TX_COUNT_CACHE=off` or the Dune
 providers).
