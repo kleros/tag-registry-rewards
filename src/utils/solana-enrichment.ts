@@ -1,6 +1,18 @@
 import { Tag } from "../types"
 import { executeDuneSql, getDuneApiKey } from "./dune-client"
 import conf from "../config"
+import { SolanaEnrichment } from "./solana-common"
+import {
+  enrichSolanaTagsWithRpc,
+  SolanaRpcAddressReport,
+  SOLANA_HOLDERS_DEFINITION,
+  SOLANA_RPC_DEFINITION,
+} from "./solana-rpc-enrichment"
+
+// Solana tx counts and Tokens-registry holder counts. Provider:
+// SOLANA_TX_PROVIDER=rpc (default, plain JSON-RPC + Jupiter) or dune.
+
+export type { SolanaEnrichment } from "./solana-common"
 
 const SOLANA_TX_CHUNK_SIZE = 25
 const SOLANA_HOLDERS_CHUNK_SIZE = 50
@@ -14,6 +26,12 @@ const getSolanaTxLookbackDays = (): number | null => {
     throw new Error(`Invalid SOLANA_TX_LOOKBACK_DAYS="${raw}". Expected a positive number or empty for all-time.`)
   }
   return days
+}
+
+// Checked before the run starts (tags-routine preflight).
+export const assertSolanaDuneSettings = (): void => {
+  getDuneApiKey()
+  getSolanaTxLookbackDays()
 }
 
 const splitChunks = <T>(items: T[], size: number): T[][] => {
@@ -129,12 +147,7 @@ GROUP BY token_mint_address
   return result
 }
 
-export interface SolanaEnrichment {
-  txCount: number
-  totalHolders: number | null
-}
-
-export const enrichSolanaTagsBatch = async (
+const enrichSolanaTagsWithDune = async (
   tags: Tag[]
 ): Promise<{ [cacheKey: string]: SolanaEnrichment }> => {
   const duneApiKey = getDuneApiKey()
@@ -182,4 +195,56 @@ export const enrichSolanaTagsBatch = async (
   }
 
   return result
+}
+
+const DUNE_DEFINITION =
+  "Dune solana.account_activity: approx_distinct(tx_id) with tx_success = true; holders: COUNT(DISTINCT token_balance_owner) from solana_utils.token_accounts"
+
+export interface SolanaProvenance {
+  provider: "rpc" | "dune"
+  definition: string
+  holdersDefinition?: string
+  endpoints?: string[]
+  pages?: number
+  addresses?: SolanaRpcAddressReport[]
+  cacheDir?: string
+}
+
+export interface SolanaEnrichmentResult {
+  byKey: { [cacheKey: string]: SolanaEnrichment }
+  provenance: SolanaProvenance
+}
+
+export const getSolanaTxProvider = (): "rpc" | "dune" => {
+  const raw = String(process.env.SOLANA_TX_PROVIDER || "rpc").trim().toLowerCase()
+  if (raw === "rpc" || raw === "dune") return raw
+  throw new Error(`Invalid SOLANA_TX_PROVIDER="${raw}": expected "rpc" or "dune"`)
+}
+
+// One entry per tag, keyed `${chain}:${registry}:${tagAddress}`; failures throw.
+export const enrichSolanaTagsBatch = async (tags: Tag[]): Promise<SolanaEnrichmentResult> => {
+  const provider = getSolanaTxProvider()
+  if (provider === "dune") {
+    return {
+      byKey: tags.length > 0 ? await enrichSolanaTagsWithDune(tags) : {},
+      provenance: { provider, definition: DUNE_DEFINITION },
+    }
+  }
+  const provenance: SolanaProvenance = {
+    provider,
+    definition: SOLANA_RPC_DEFINITION,
+    holdersDefinition: SOLANA_HOLDERS_DEFINITION,
+  }
+  if (tags.length === 0) return { byKey: {}, provenance }
+  const result = await enrichSolanaTagsWithRpc(tags)
+  return {
+    byKey: result.byKey,
+    provenance: {
+      ...provenance,
+      endpoints: result.endpoints,
+      pages: result.pages,
+      addresses: result.addresses,
+      cacheDir: result.cacheDir,
+    },
+  }
 }
