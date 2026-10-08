@@ -15,7 +15,7 @@ import { removalsRoutine } from "./removals-routine"
 import { documentRoutine } from "./document-routine"
 import { verifyTxCounts } from "./verify-tx-counts"
 import { redactSecrets } from "./utils/solana-rpc"
-import { isBudgetExceeded, setDeadline } from "./utils/runtime-helpers"
+import { isBudgetExceeded, setTimeBudget } from "./utils/runtime-helpers"
 import { txCountCacheDir } from "./utils/tx-count-cache"
 import {
   applyTagExclusions,
@@ -70,7 +70,7 @@ const argv: any = yargs(hideBin(process.argv))
   })
   .option("max-minutes", {
     description:
-      "fetch/prefetch/all: stop counting transactions after this many minutes, with progress saved; rerun to continue",
+      "fetch/prefetch/all: stop counting transactions this many minutes after counting starts, with progress saved; rerun to continue",
   })
   .option("s", {
     description: "The day the period starts",
@@ -167,7 +167,8 @@ const resolvePrefetchPeriod = (): { start: Date; end: Date; label: string } => {
 }
 
 // --max-minutes: both tx-count lanes stop before their next request once it
-// has passed, with everything counted so far saved in the cache.
+// has passed since counting started, with everything counted so far saved in
+// the cache. Fetching and filtering the tags before it is not counted.
 const applyTimeBudget = (): void => {
   const raw = argv["max-minutes"]
   if (raw === undefined) return
@@ -175,8 +176,8 @@ const applyTimeBudget = (): void => {
   if (!Number.isFinite(minutes) || minutes <= 0) {
     throw new Error(`Invalid --max-minutes "${raw}": expected a positive number`)
   }
-  setDeadline(Date.now() + minutes * 60000)
-  console.log(`Time budget: transaction counting stops after ${minutes} minute(s), progress saved`)
+  setTimeBudget(minutes)
+  console.log(`Time budget: transaction counting stops ${minutes} minute(s) after it starts, progress saved`)
 }
 
 // Build submission rewards from the given tags/gas files, or the latest fetch

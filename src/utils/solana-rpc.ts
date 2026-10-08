@@ -37,6 +37,7 @@ interface Endpoint {
   inFlight: number
   disabled: string | null
   disabledStatus?: number
+  refused: { [method: string]: number } // HTTP status of a refusal that only concerns this method
   consecutiveFailures: number
   calls: number
   rateLimited: number
@@ -200,6 +201,7 @@ export class SolanaRpcPool {
         pausedUntil: 0,
         inFlight: 0,
         disabled: null,
+        refused: {},
         consecutiveFailures: 0,
         calls: 0,
         rateLimited: 0,
@@ -290,11 +292,22 @@ export class SolanaRpcPool {
           if (++rateLimitedWaits > 300) throw fail(`[solana-rpc] ${method}: rate limited too many times`, 429, 429)
           continue
         }
-        if (res.status === 401 || res.status === 402 || res.status === 403) {
+        if (res.status === 401 || res.status === 402) {
           const text = (await res.text().catch(() => "")).slice(0, 200)
           ep.disabled = `HTTP ${res.status}`
           ep.disabledStatus = res.status
           console.warn(redactSecrets(`[solana-rpc] Disabling ${ep.label}: HTTP ${res.status} ${text}`, this.urls))
+          continue
+        }
+        if (res.status === 403 || res.status === 410) {
+          const text = (await res.text().catch(() => "")).slice(0, 200)
+          // The public RPC refuses some getProgramAccounts filters and not
+          // others: a holder scan (pinned to one URL) moves on to the next URL
+          // without the refusal keeping that URL from the next scan.
+          if (method === "getProgramAccounts" && options.only !== undefined) {
+            throw fail(`[solana-rpc] ${method}: HTTP ${res.status} ${text}`, undefined, res.status)
+          }
+          this.refuse(ep, method, res.status, text)
           continue
         }
         if (res.status === 413) {
@@ -358,6 +371,25 @@ export class SolanaRpcPool {
     }
   }
 
+  // 403 and 410 can concern one method only: Helius answers 403 for what the
+  // plan does not include, Triton 410 for disabled calls. They can also concern the key (Alchemy
+  // answers 403 once its monthly capacity is used up). The URL stops serving
+  // that method, and stops altogether once a second method is refused.
+  private refuse(ep: Endpoint, method: string, status: number, text: string): void {
+    if (ep.disabled || ep.refused[method]) return // a concurrent call already handled it
+    ep.refused[method] = status
+    const methods = Object.keys(ep.refused)
+    if (methods.length >= 2) {
+      ep.disabled = `HTTP ${status} on ${methods.join(", ")}`
+      ep.disabledStatus = status
+      console.warn(redactSecrets(`[solana-rpc] Disabling ${ep.label}: HTTP ${status} on ${methods.join(" and ")} ${text}`, this.urls))
+    } else {
+      console.warn(
+        redactSecrets(`[solana-rpc] ${ep.label} refuses ${method} (HTTP ${status} ${text}); other URLs serve it`, this.urls)
+      )
+    }
+  }
+
   private pause(ep: Endpoint, retryAfterSecs: number): void {
     ep.rateLimited++
     const now = Date.now()
@@ -394,24 +426,27 @@ export class SolanaRpcPool {
       if (options.only !== undefined) {
         const pinned = this.endpoints[options.only]
         if (!pinned) throw new SolanaRpcError(`[solana-rpc] no RPC URL #${options.only}`)
-        if (pinned.disabled) {
+        if (pinned.disabled || pinned.refused[method]) {
           throw new SolanaRpcError(
-            `[solana-rpc] ${pinned.label} is disabled (${pinned.disabled})`,
+            pinned.disabled
+              ? `[solana-rpc] ${pinned.label} is disabled (${pinned.disabled})`
+              : `[solana-rpc] ${pinned.label} refuses ${method} (HTTP ${pinned.refused[method]})`,
             undefined,
-            pinned.disabledStatus,
+            pinned.disabled ? pinned.disabledStatus : pinned.refused[method],
             undefined,
             options.only
           )
         }
       }
-      // `avoid` only applies while some other URL is still enabled.
-      const skipAvoided = this.endpoints.some((ep, i) => !ep.disabled && avoid.indexOf(i) < 0)
+      const serves = (ep: Endpoint) => !ep.disabled && !ep.refused[method]
+      // `avoid` only applies while some other URL still serves the method.
+      const skipAvoided = this.endpoints.some((ep, i) => serves(ep) && avoid.indexOf(i) < 0)
       let best: Endpoint | null = null
       let bestAt = Infinity
       let enabled = 0
       for (let i = 0; i < this.endpoints.length; i++) {
         const ep = this.endpoints[i]
-        if (ep.disabled) continue
+        if (!serves(ep)) continue
         enabled++
         if (options.only !== undefined && i !== options.only) continue
         if (skipAvoided && avoid.indexOf(i) >= 0) continue
@@ -423,8 +458,9 @@ export class SolanaRpcPool {
         }
       }
       if (enabled === 0) {
+        const why = (e: Endpoint) => e.disabled || `refuses ${method} (HTTP ${e.refused[method]})`
         throw new SolanaRpcError(
-          `[solana-rpc] every RPC URL is disabled (${this.endpoints.map((e) => `${e.label}: ${e.disabled}`).join(", ")})`
+          `[solana-rpc] no RPC URL serves ${method} (${this.endpoints.map((e) => `${e.label}: ${why(e)}`).join(", ")})`
         )
       }
       if (!best) {
@@ -444,16 +480,59 @@ export class SolanaRpcPool {
   }
 }
 
-export const createSolanaRpcPool = (fallbackUrl: string): SolanaRpcPool => {
-  const urls = csv(process.env.SOLANA_RPC_URLS).filter(Boolean)
-  if (urls.length === 0) urls.push(fallbackUrl)
-  const rps = csv(process.env.SOLANA_RPC_MAX_RPS)
-  const inFlight = csv(process.env.SOLANA_RPC_MAX_INFLIGHT)
-  return new SolanaRpcPool(
-    urls.map((url, i) => ({
-      url,
-      rps: rps[i] ? Number(rps[i]) : undefined,
-      inFlight: inFlight[i] ? Number(inFlight[i]) : undefined,
-    }))
-  )
+// A comma-separated setting without its trailing empty entries.
+const list = (raw?: string): string[] => {
+  const items = csv(raw)
+  while (items.length > 0 && !items[items.length - 1]) items.pop()
+  return items
 }
+
+// The URLs of SOLANA_RPC_URLS (`fallbackUrl` when there are none).
+export const solanaRpcUrls = (fallbackUrl?: string): string[] => {
+  const urls = list(process.env.SOLANA_RPC_URLS).filter(Boolean)
+  return urls.length === 0 && fallbackUrl ? [fallbackUrl] : urls
+}
+
+// SOLANA_RPC_URLS (or `fallbackUrl`) with their SOLANA_RPC_MAX_RPS /
+// SOLANA_RPC_MAX_INFLIGHT overrides, matched by position (an empty value or 0
+// keeps the provider's default). A typo throws instead of silently falling back
+// to the default, and so do an empty entry between URLs and more values than
+// URLs while overrides are set: either leaves no way to tell which URL each
+// value was meant for.
+export const solanaRpcConfigs = (fallbackUrl?: string): { url: string; rps?: number; inFlight?: number }[] => {
+  let urls = list(process.env.SOLANA_RPC_URLS)
+  if (urls.length === 0 && fallbackUrl) urls = [fallbackUrl]
+  const rps = list(process.env.SOLANA_RPC_MAX_RPS)
+  const inFlight = list(process.env.SOLANA_RPC_MAX_INFLIGHT)
+  if (rps.length > 0 || inFlight.length > 0) {
+    if (urls.some((url) => !url)) {
+      throw new Error(
+        "[solana-rpc] SOLANA_RPC_URLS has an empty entry, so SOLANA_RPC_MAX_RPS / SOLANA_RPC_MAX_INFLIGHT " +
+          "cannot be matched to the URLs: remove the extra comma"
+      )
+    }
+    if (rps.length > urls.length || inFlight.length > urls.length) {
+      throw new Error(
+        `[solana-rpc] SOLANA_RPC_MAX_RPS / SOLANA_RPC_MAX_INFLIGHT list more values than the ${urls.length} RPC URL(s): ` +
+          "keep one value per URL, in the order of SOLANA_RPC_URLS"
+      )
+    }
+  }
+  const value = (name: string, raw: string | undefined, integer: boolean): number | undefined => {
+    if (!raw) return undefined
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n < 0 || (integer && !Number.isInteger(n))) {
+      throw new Error(`[solana-rpc] Invalid ${name} entry "${raw}": expected a ${integer ? "whole " : ""}number >= 0`)
+    }
+    return n > 0 ? n : undefined
+  }
+  return urls
+    .map((url, i) => ({
+      url,
+      rps: value("SOLANA_RPC_MAX_RPS", rps[i], false),
+      inFlight: value("SOLANA_RPC_MAX_INFLIGHT", inFlight[i], true),
+    }))
+    .filter((config) => config.url)
+}
+
+export const createSolanaRpcPool = (fallbackUrl: string): SolanaRpcPool => new SolanaRpcPool(solanaRpcConfigs(fallbackUrl))

@@ -118,7 +118,8 @@ free keys (~32 h with a paid Alchemy key that allows ~7 calls/s).
 So by default (`SOLANA_COUNT_MODE=auto`) Solana lists a history exactly only
 when it is small (below `SOLANA_EXACT_BELOW`, 1.5M signatures) and estimates
 larger ones by stratified sampling: a first pass maps the density of the
-history, it is cut into strata of equal mapped mass, and one window per stratum,
+history (a quick 20-point pass first, so a range far below the threshold is
+listed without the full map), it is cut into strata of equal mapped mass, and one window per stratum,
 placed uniformly at random, is counted exactly and scaled up. The estimate is
 unbiased; replayed on complete histories and checked against exact counts of 16
 September mints, its typical error was ~10% per mint (worst ±25%) for ~1.5–2k
@@ -134,14 +135,16 @@ parallel). Counts are cached, so addresses seen before only top up. To go
 faster, raise the Solana calls per second (e.g. the Alchemy plan's compute
 units per second) or the HyperSync tier.
 
-`--max-minutes N` bounds a run: both lanes stop before their next request with
-progress saved, `fetch` and `all` write nothing (exit code 2) and the next run
-continues. `yarn start --mode prefetch` counts the running month's tags so far
+`--max-minutes N` bounds the counting: both lanes stop before their next
+request once N minutes have passed since counting started (fetching and
+filtering the tags before it is not included), with progress saved; `fetch` and
+`all` write nothing (exit code 2) and the next run continues. `yarn start --mode prefetch` counts the running month's tags so far
 into the cache, so a month-end run after a prefetch only tops up.
 
 Both run in parallel. Long histories are split across parallel requests
 automatically. A Solana count ends only on an empty page, asked of a second URL
-when there is one, and every page is checked against its cursor: the providers
+when there is one (so do the newest page and the search for where a history
+starts before sampling), and every page is checked against its cursor: the providers
 run different archives, and a short page can come back while older history
 exists. A split starts below a transaction that need not involve the address;
 an empty page there is trusted only from a URL that can find that transaction
@@ -149,7 +152,9 @@ an empty page there is trusted only from a URL that can find that transaction
 not know instead of an error. Holder scans (`getProgramAccounts`) go to the public RPC first, the one
 endpoint verified for them, and to the other URLs only if it refuses, so keep
 `https://api.mainnet-beta.solana.com` in `SOLANA_RPC_URLS`. A URL that rejects
-its key (HTTP 401/402/403) stops the run at start.
+its key (HTTP 401/402/403) stops the run at start. Later in a run, a 403 or 410
+takes only that method off the URL (plans and the public RPC refuse single
+methods); a second refused method, or a 401/402, disables the URL.
 
 **HyperEVM (999) counts user-signed transactions only.** HyperCore credits
 arrive on HyperEVM as system transactions (gas price 0, sent from `0x2222…2222`
@@ -165,7 +170,7 @@ decision.
 **Cache and resume.** Counts are stored per address with the block or signature
 they cover, in `~/.cache/tag-registry-rewards/tx-counts` (`TX_COUNT_CACHE_DIR`),
 outside `files/`. An interrupted fetch resumes where it stopped, still counting
-up to the new run's tip, and later months only scan what is new for addresses
+up to the new run's tip (an address that was being sampled is sampled again), and later months only scan what is new for addresses
 seen before. `TX_COUNT_CACHE=off` recounts everything from scratch. The fetch
 manifest records the provider,
 cutoff block per chain, cache path and, for Solana, each address's method
@@ -265,7 +270,8 @@ yarn start --mode prefetch [--max-minutes N] [--period YYYY-MM | --start YYYY-MM
 Counts the transactions of every tag registered so far in the running month
 (by default) into the tx-count cache, exactly as `fetch` would, and writes no
 files. The month-end `fetch` then only tops the cached counts up. Each run
-resumes where the last one stopped; at `--max-minutes` both lanes stop before
+resumes where the last one stopped (an address that was being sampled is
+sampled again); at `--max-minutes` both lanes stop before
 their next request with everything counted so far saved, and the run exits 0.
 It needs the cache and the free providers (not `TX_COUNT_CACHE=off` or the Dune
 providers).

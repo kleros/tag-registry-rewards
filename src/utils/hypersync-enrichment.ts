@@ -150,6 +150,21 @@ export interface HypersyncCountOptions {
 
 const isAddress = (address: string): boolean => /^0x[0-9a-f]{40}$/.test(address)
 
+// Also checked before the run starts (tags-routine preflight).
+export const requireEnvioApiToken = (): string => {
+  const apiToken = String(process.env.ENVIO_API_TOKEN || "").trim()
+  if (!apiToken) {
+    throw new Error(
+      "[hypersync] ENVIO_API_TOKEN is not set. Create a free token at https://envio.dev/app/api-tokens " +
+        "and add ENVIO_API_TOKEN=<token> to .env (or set EVM_TX_PROVIDER=dune)."
+    )
+  }
+  return apiToken
+}
+
+// Requests per minute the scanner spaces itself to (0 = no pacing).
+export const hypersyncRequestsPerMinute = (): number => envInt("HYPERSYNC_REQUESTS_PER_MINUTE", 14)
+
 const cacheFileName = (chainId: string): string => `evm-hypersync-${chainId}.json`
 
 export const hypersyncUrl = (chainId: string): string =>
@@ -211,7 +226,7 @@ class HypersyncScanner {
   // 15000, cost 1000 each, whatever the page size), so requests are spaced out
   // instead of bursting into 429s. HYPERSYNC_REQUESTS_PER_MINUTE=0 disables it.
   private async pace(): Promise<void> {
-    const perMinute = envInt("HYPERSYNC_REQUESTS_PER_MINUTE", 14)
+    const perMinute = hypersyncRequestsPerMinute()
     if (!perMinute) return
     const now = Date.now()
     const at = Math.max(now, this.nextRequestAt)
@@ -540,18 +555,11 @@ export const countEvmTxsWithHypersync = async (
     if (persist) writer.write(plan.chainId, cacheFileName(plan.chainId), () => plan.state)
   }
 
-  const apiToken = String(process.env.ENVIO_API_TOKEN || "").trim()
   let scanner: HypersyncScanner | null = null
   let tokenProbed = false
   const getScan = async (plans: ChainPlan[]): Promise<ScanFn> => {
     if (opts.scan) return opts.scan
-    if (!apiToken) {
-      throw new Error(
-        "[hypersync] ENVIO_API_TOKEN is not set. Create a free token at https://envio.dev/app/api-tokens " +
-          "and add ENVIO_API_TOKEN=<token> to .env (or set EVM_TX_PROVIDER=dune)."
-      )
-    }
-    if (!scanner) scanner = new HypersyncScanner(apiToken)
+    if (!scanner) scanner = new HypersyncScanner(requireEnvioApiToken())
     if (!tokenProbed) {
       const plan = plans.find((p) => p.state.job && p.state.job.groups.length > 0)
       if (plan && plan.state.job) {
@@ -699,8 +707,7 @@ export const countTransactionsFrom = async (
   fromBlock: number,
   toBlock: number
 ): Promise<number> => {
-  const apiToken = String(process.env.ENVIO_API_TOKEN || "").trim()
-  if (!apiToken) throw new Error("[hypersync] ENVIO_API_TOKEN is not set")
+  const apiToken = requireEnvioApiToken()
   const hs = loadHypersync()
   const client = new hs.HypersyncClient({ url: hypersyncUrl(chainId), apiToken, maxNumRetries: 3 })
   let rows = 0
@@ -722,8 +729,7 @@ export const countTransactionsFrom = async (
 // Lowest block HyperSync returns for [0, 100) on a chain (verification of
 // history coverage: anything above 0 or 1 means early history is missing).
 export const firstIndexedBlock = async (chainId: string): Promise<number | null> => {
-  const apiToken = String(process.env.ENVIO_API_TOKEN || "").trim()
-  if (!apiToken) throw new Error("[hypersync] ENVIO_API_TOKEN is not set")
+  const apiToken = requireEnvioApiToken()
   const hs = loadHypersync()
   const client = new hs.HypersyncClient({ url: hypersyncUrl(chainId), apiToken, maxNumRetries: 3 })
   const res = await client.get({

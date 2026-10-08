@@ -6,13 +6,16 @@ import {
   countTransactionsFrom,
   firstIndexedBlock,
   getHypersyncHeight,
+  hypersyncRequestsPerMinute,
 } from "./utils/hypersync-enrichment"
 import { errorMessage as message } from "./utils/runtime-helpers"
-import { maskRpcUrl, SolanaRpcError, SolanaRpcPool } from "./utils/solana-rpc"
+import { maskRpcUrl, SolanaRpcError, SolanaRpcPool, solanaRpcUrls } from "./utils/solana-rpc"
 import {
   checkHolders,
+  assertSolanaRpcSettings,
   countSignaturesExact,
   defaultSolanaRpcPool,
+  defaultSolanaRpcUrl,
   findAnchor,
 } from "./utils/solana-rpc-enrichment"
 
@@ -169,8 +172,7 @@ export const verifyTxCounts = async (): Promise<boolean> => {
       )
       const chain = res.chains[0]
       const perRequest = chain.requests > 0 ? chain.rows / chain.requests : 0
-      const rawPerMinute = String(process.env.HYPERSYNC_REQUESTS_PER_MINUTE || "").trim()
-      const perMinute = rawPerMinute === "" ? 14 : Number(rawPerMinute)
+      const perMinute = hypersyncRequestsPerMinute()
       const rowsPerSecond = chain.elapsedMs > 0 ? chain.rows / (chain.elapsedMs / 1000) : 0
       let projection = "no rows measured, no projection"
       if (perMinute > 0 && perRequest > 0) {
@@ -201,12 +203,11 @@ export const verifyTxCounts = async (): Promise<boolean> => {
   }
 
   // --- Solana --------------------------------------------------------------
-  const urls = String(process.env.SOLANA_RPC_URLS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-  const solanaChain = chains.find((c) => c.namespaceId === "solana")
-  if (urls.length === 0) urls.push(solanaChain ? solanaChain.rpc : "https://api.mainnet-beta.solana.com")
+  const urls = solanaRpcUrls(defaultSolanaRpcUrl())
+  await attempt("Solana settings (SOLANA_COUNT_MODE, SOLANA_RPC_MAX_RPS/INFLIGHT, sampling)", async () => {
+    assertSolanaRpcSettings()
+    record("Solana settings (SOLANA_COUNT_MODE, SOLANA_RPC_MAX_RPS/INFLIGHT, sampling)", "PASS", "valid")
+  })
   for (const url of urls) {
     const check = `Solana RPC ${maskRpcUrl(url)}: reachable and serves old history`
     await attempt(check, async () => {
@@ -312,7 +313,13 @@ export const verifyTxCounts = async (): Promise<boolean> => {
     })
   }
 
-  const pool = defaultSolanaRpcPool()
+  // Invalid overrides are recorded above; the checks still run at default rates.
+  let pool: SolanaRpcPool
+  try {
+    pool = defaultSolanaRpcPool()
+  } catch {
+    pool = new SolanaRpcPool(urls.map((url) => ({ url })))
+  }
   await attempt("Solana: HTC signatures up to the March 2026 run", async () => {
     const started = Date.now()
     const res = await countSignaturesExact(pool, HTC, { maxBlockTime: HTC_CUTOFF })

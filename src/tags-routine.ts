@@ -4,29 +4,18 @@ import { findChainConfig } from "./utils/chains"
 import { enrichAllEvmAddresses, EvmEnrichmentResult, getEvmTxProvider } from "./utils/evm-enrichment"
 import { enrichSolanaTagsBatch, getSolanaTxProvider, SolanaEnrichmentResult } from "./utils/solana-enrichment"
 import { SOLANA_HOLDER_THRESHOLD } from "./utils/solana-common"
+import { requireEnvioApiToken } from "./utils/hypersync-enrichment"
+import { assertSolanaRpcSettings } from "./utils/solana-rpc-enrichment"
 import { acquireTxCountCacheLock, txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
 import { writeFetchOutputs } from "./utils/fetch-output"
 import { applyTagFilters } from "./utils/tag-filters"
-import { BudgetExceededError, isBudgetExceeded } from "./utils/runtime-helpers"
+import { BudgetExceededError, isBudgetExceeded, startTimeBudget } from "./utils/runtime-helpers"
 
 // Settings that would only fail once a lookup starts, checked up front so a
 // typo does not surface hours later.
 const preflight = (hasEvm: boolean, hasSolana: boolean): void => {
-  const evmProvider = getEvmTxProvider()
-  const solanaProvider = getSolanaTxProvider()
-  if (hasEvm && evmProvider === "hypersync" && !String(process.env.ENVIO_API_TOKEN || "").trim()) {
-    throw new Error(
-      "[enrich] ENVIO_API_TOKEN is not set. Create a free token at https://envio.dev/app/api-tokens " +
-        "and add ENVIO_API_TOKEN=<token> to .env (or set EVM_TX_PROVIDER=dune)."
-    )
-  }
-  const lookback = String(process.env.SOLANA_TX_LOOKBACK_DAYS || "").trim()
-  if (hasSolana && solanaProvider === "rpc" && lookback && lookback !== "0") {
-    throw new Error(
-      `[enrich] SOLANA_TX_LOOKBACK_DAYS=${lookback} is not supported by the rpc provider, which counts all-time. ` +
-        "Set it to 0, or use SOLANA_TX_PROVIDER=dune."
-    )
-  }
+  if (hasEvm && getEvmTxProvider() === "hypersync") requireEnvioApiToken()
+  if (hasSolana && getSolanaTxProvider() === "rpc") assertSolanaRpcSettings()
 }
 
 // Runs both lookups to the end even if one fails, so the other one's progress
@@ -99,6 +88,7 @@ export const enrichTags = async (
   // instead of silently paying on zeros.
   preflight(Object.keys(evmAddressesByChain).length > 0, solanaTags.length > 0)
   const releaseLock = acquireTxCountCacheLock()
+  startTimeBudget()
   let results: [EvmEnrichmentResult, SolanaEnrichmentResult]
   try {
     results = await runBoth(
