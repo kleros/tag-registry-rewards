@@ -2,7 +2,13 @@ import { fetchTags } from "./tag-fetch"
 import { EnrichedTag, FetchEnrichmentInfo, FetchManifest, Period, Tag } from "./types"
 import { findChainConfig } from "./utils/chains"
 import { enrichAllEvmAddresses, EvmEnrichmentResult, getEvmTxProvider } from "./utils/evm-enrichment"
-import { enrichSolanaTagsBatch, getSolanaTxProvider, SolanaEnrichmentResult } from "./utils/solana-enrichment"
+import {
+  assertSolanaDuneSettings,
+  enrichSolanaTagsBatch,
+  getSolanaTxProvider,
+  SolanaEnrichmentResult,
+} from "./utils/solana-enrichment"
+import { getDuneApiKey } from "./utils/dune-client"
 import { SOLANA_HOLDER_THRESHOLD } from "./utils/solana-common"
 import { requireEnvioApiToken } from "./utils/hypersync-enrichment"
 import { assertSolanaRpcSettings } from "./utils/solana-rpc-enrichment"
@@ -14,8 +20,14 @@ import { BudgetExceededError, isBudgetExceeded, startTimeBudget } from "./utils/
 // Settings that would only fail once a lookup starts, checked up front so a
 // typo does not surface hours later.
 const preflight = (hasEvm: boolean, hasSolana: boolean): void => {
-  if (hasEvm && getEvmTxProvider() === "hypersync") requireEnvioApiToken()
-  if (hasSolana && getSolanaTxProvider() === "rpc") assertSolanaRpcSettings()
+  if (hasEvm) {
+    if (getEvmTxProvider() === "hypersync") requireEnvioApiToken()
+    else getDuneApiKey()
+  }
+  if (hasSolana) {
+    if (getSolanaTxProvider() === "rpc") assertSolanaRpcSettings()
+    else assertSolanaDuneSettings()
+  }
 }
 
 // Runs both lookups to the end even if one fails, so the other one's progress

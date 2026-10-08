@@ -28,6 +28,12 @@ const getSolanaTxLookbackDays = (): number | null => {
   return days
 }
 
+// Checked before the run starts (tags-routine preflight).
+export const assertSolanaDuneSettings = (): void => {
+  getDuneApiKey()
+  getSolanaTxLookbackDays()
+}
+
 const splitChunks = <T>(items: T[], size: number): T[][] => {
   const chunks: T[][] = []
   for (let i = 0; i < items.length; i += size) {

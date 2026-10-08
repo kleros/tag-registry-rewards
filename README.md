@@ -83,7 +83,9 @@ document how it marked these transactions, so whether the old query counted
 them is unknown; no past payout included a contract that old.
 
 These match the Dune queries used until September 2026 (`EVM_TX_PROVIDER=dune`
-and `SOLANA_TX_PROVIDER=dune` still work with a paid Dune plan), with two
+and `SOLANA_TX_PROVIDER=dune` still work with a paid Dune plan and
+`DUNE_API_KEY`; each lane picks its provider on its own, and the Dune lanes keep
+no cache, so `--max-minutes` and `prefetch` do not apply to them), with two
 exceptions: HyperEVM system transactions are left out (below), and very large
 Solana addresses outside the Tokens registry are estimated. Neither API can
 return a count, so every matching transaction or signature is streamed and
