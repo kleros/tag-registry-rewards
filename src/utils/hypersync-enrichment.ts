@@ -25,7 +25,7 @@ export const HYPERSYNC_DEFINITION =
 const CHAIN_NOTES: { [chainId: string]: string } = {
   "999":
     "HyperEVM: user-signed transactions only. HyperCore-to-HyperEVM system transactions " +
-    "(HYPE from 0x2222…2222, linked spot tokens from 0x20… addresses) are not counted; " +
+    "(HYPE from 0x2222…2222, linked spot tokens from 0x20… addresses) are not counted, by design (README, HyperEVM); " +
     "explorers such as hyperevmscan.io include them, so their totals for linked contracts are higher.",
 }
 
@@ -209,29 +209,31 @@ export const getHypersyncHeight = async (chainId: string): Promise<number> => {
   throw new Error(`[hypersync] chain ${chainId}: could not read ${url} (${message(lastError)})`)
 }
 
+// The rate budget is per token and shared by every chain and every request
+// of the process (the scan, the token probe and verify-counts' own queries). A
+// free token's headers said 15 requests per 60 s window on 2026-10-06
+// (x-ratelimit-limit 15000, cost 1000 each, whatever the page size), so
+// requests are spaced out instead of bursting into 429s.
+// HYPERSYNC_REQUESTS_PER_MINUTE=0 disables it.
+let nextRequestAt = 0
+const pace = async (): Promise<void> => {
+  const perMinute = hypersyncRequestsPerMinute()
+  if (!perMinute) return
+  const now = Date.now()
+  const at = Math.max(now, nextRequestAt)
+  nextRequestAt = at + 60000 / perMinute
+  if (at > now) await sleep(at - now)
+}
+
 class HypersyncScanner {
   private clients: { [chainId: string]: HypersyncClient } = {}
-  private nextRequestAt = 0
 
   constructor(private readonly apiToken: string) {}
 
   scan: ScanFn = async (chainId, query) => {
-    await this.pace()
+    await pace()
     const res = await this.client(chainId).get(query)
     return { nextBlock: res.nextBlock, transactions: res.data.transactions }
-  }
-
-  // The rate budget is per token and shared by every chain. A free token's
-  // headers said 15 requests per 60 s window on 2026-10-06 (x-ratelimit-limit
-  // 15000, cost 1000 each, whatever the page size), so requests are spaced out
-  // instead of bursting into 429s. HYPERSYNC_REQUESTS_PER_MINUTE=0 disables it.
-  private async pace(): Promise<void> {
-    const perMinute = hypersyncRequestsPerMinute()
-    if (!perMinute) return
-    const now = Date.now()
-    const at = Math.max(now, this.nextRequestAt)
-    this.nextRequestAt = at + 60000 / perMinute
-    if (at > now) await sleep(at - now)
   }
 
   rateLimit(): RateLimitInfo | null {
@@ -253,6 +255,7 @@ class HypersyncScanner {
       httpReqTimeoutMillis: 60000,
     })
     try {
+      await pace()
       await client.get(mainQuery([address], Math.max(0, block - 1), Math.max(1, block), true))
     } catch (err) {
       const text = message(err)
@@ -712,6 +715,7 @@ export const countTransactionsFrom = async (
   const client = new hs.HypersyncClient({ url: hypersyncUrl(chainId), apiToken, maxNumRetries: 3 })
   let rows = 0
   for (let next = fromBlock; next < toBlock; ) {
+    await pace()
     const res = await client.get({
       fromBlock: next,
       toBlock,
@@ -732,6 +736,7 @@ export const firstIndexedBlock = async (chainId: string): Promise<number | null>
   const apiToken = requireEnvioApiToken()
   const hs = loadHypersync()
   const client = new hs.HypersyncClient({ url: hypersyncUrl(chainId), apiToken, maxNumRetries: 3 })
+  await pace()
   const res = await client.get({
     fromBlock: 0,
     toBlock: 100,

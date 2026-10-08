@@ -166,8 +166,19 @@ return them. This mainly affects contracts linked to HyperCore: in September
 2026 such credits were 77% of the successful transactions sent to Circle's
 CoreDepositWallet and 72% of those sent to UPUMP. Explorers such as
 hyperevmscan.io include them, so their totals are higher. The manifest repeats
-this note for chain 999. Whether HyperCore credits should count is a program
-decision.
+this note for chain 999.
+
+They are left out on purpose (decided 2026-10-08). They are not part of the
+block: its transaction root and gas used cover only user transactions, the
+official RPC serves them only through `eth_getSystemTxsByBlockNumber`, and
+providers that list them give them different hashes. Some are protocol
+bookkeeping rather than user actions (the USDC-linked contract rebalancing with
+its treasury). Dune's own labels advise excluding system senders from measures
+of user activity. And no reliable free source lists them for all of history.
+OP-stack deposits and Arbitrum internal transactions are different: they are in
+the block, and they are counted. September 2026 was paid on Dune's counts,
+which included them; leaving them out moved about 877 PNK within that month's
+Token pool, so the change belongs in the next monthly post.
 
 **Cache and resume.** Counts are stored per address with the block or signature
 they cover, in `~/.cache/tag-registry-rewards/tx-counts` (`TX_COUNT_CACHE_DIR`),
