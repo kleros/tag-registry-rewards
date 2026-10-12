@@ -72,6 +72,48 @@ export interface FetchManifest {
   includedCount: number
   excludedCount?: number
   droppedBySolanaHoldersCount?: number
+  // Where the tx counts came from (absent in manifests from older runs).
+  enrichment?: FetchEnrichmentInfo
+}
+
+export interface FetchEnrichmentInfo {
+  startedAt: string
+  finishedAt: string
+  evm: {
+    provider: string
+    definition: string
+    cacheDir?: string
+    chains?: Array<{
+      chainId: string
+      toBlockExclusive: number
+      archiveHeight: number
+      addresses: number
+      invalidAddresses: string[]
+      scannedAddresses: number
+      rows: number
+      requests: number
+      elapsedMs: number
+      preByzantiumNullStatusRows?: number
+      note?: string
+    }>
+  }
+  solana: {
+    provider: string
+    definition: string
+    holdersDefinition?: string
+    endpoints?: string[]
+    pages?: number
+    cacheDir?: string
+    addresses?: Array<{
+      address: string
+      registries: string[]
+      method: string
+      successful: number
+      failed: number
+      holders?: number
+      holdersSource?: string
+    }>
+  }
 }
 
 export interface GenerateInput {

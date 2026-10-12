@@ -45,6 +45,7 @@
     "typescript": "^3.9.6"
   },
   "dependencies": {
+    "@envio-dev/hypersync-client": "1.4.1",
     "@filebase/client": "^0.0.5",
     "@types/node": "^14.0.23",
     "@types/node-fetch": "^2.5.7",
