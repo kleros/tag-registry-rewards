@@ -190,7 +190,10 @@ they cover, in `~/.cache/tag-registry-rewards/tx-counts` (`TX_COUNT_CACHE_DIR`),
 outside `files/`. An interrupted fetch resumes where it stopped, still counting
 up to the new run's tip (a sampled address keeps its map and the windows it
 had counted), and later months only scan what is new for addresses
-seen before. `TX_COUNT_CACHE=off` recounts everything from scratch. The fetch
+seen before. `TX_COUNT_CACHE=off` recounts everything from scratch. One run
+at a time uses the cache (a second one stops). Ctrl+C or a closed terminal
+releases its `.lock`; a run killed outright (`kill -9`, a crashed machine)
+leaves it behind, and the next run stops and names the file to delete. The fetch
 manifest records the provider,
 cutoff block per chain, cache path and, for Solana, each address's method
 (`exact`/`sampled`/`estimated`) and holder source.

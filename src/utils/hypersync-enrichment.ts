@@ -1,6 +1,6 @@
 import type { HypersyncClient, Query, RateLimitInfo } from "@envio-dev/hypersync-client"
 import { httpFetch } from "./http"
-import { checkDeadline, chunk, envInt, errorMessage as message, sleep } from "./runtime-helpers"
+import { checkDeadline, chunk, envInt, errorMessage as message, isBudgetExceeded, sleep } from "./runtime-helpers"
 import { runSplittableWork, SplittableUnit } from "./split-scheduler"
 import { readCacheFile, ThrottledWriter, txCountCacheDir, txCountCacheEnabled } from "./tx-count-cache"
 
@@ -197,6 +197,7 @@ export const getHypersyncHeight = async (chainId: string): Promise<number> => {
   const url = `${hypersyncUrl(chainId)}/height`
   let lastError: unknown
   for (let attempt = 1; attempt <= 6; attempt++) {
+    checkDeadline() // --max-minutes, retries included
     try {
       const res = await httpFetch(url, { timeout: 30000 })
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
@@ -234,6 +235,7 @@ class HypersyncScanner {
 
   scan: ScanFn = async (chainId, query) => {
     await pace()
+    checkDeadline() // the pacing wait can outlast --max-minutes
     const res = await this.client(chainId).get(query)
     return { nextBlock: res.nextBlock, transactions: res.data.transactions }
   }
@@ -482,6 +484,7 @@ const runJobs = async (
       try {
         res = await scan(plan.chainId, query)
       } catch (err) {
+        if (isBudgetExceeded(err)) throw err
         throw new Error(`[hypersync] chain ${plan.chainId}, blocks ${from}..${segment.to - 1}: ${message(err)}`)
       }
       if (res.nextBlock > from) break

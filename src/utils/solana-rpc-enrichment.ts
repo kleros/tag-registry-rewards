@@ -128,9 +128,11 @@ interface SampleJob {
   newest: { signature: string; slot: number }
   map?: DensityMap
   windows?: SampleWindow[]
-  // Saved while its full map was still being measured: once the map is done,
-  // a range within SOLANA_EXACT_BELOW is listed instead of sampled.
+  // Saved before its range was sized: a rerun finishes the sizing (the quick
+  // map, then the full one once `fullMap` is set) and lists the range instead
+  // when it turns out small enough, as planning would have.
   sizing?: boolean
+  fullMap?: boolean
   createdAt: string
 }
 
@@ -429,6 +431,7 @@ const fetchJupiterTokens = async (
   for (let i = 0; i < parts.length; i++) {
     if (i > 0) await sleep(spacingMs)
     for (let attempt = 1; ; attempt++) {
+      checkDeadline() // --max-minutes, like the RPC calls
       try {
         const res = await httpFetch(`${url}?query=${parts[i].join(",")}`, { headers, timeout: 30000 })
         if (res.status === 429 || res.status >= 500) throw new Error(`HTTP ${res.status}`)
@@ -1475,12 +1478,45 @@ export const enrichSolanaTagsWithRpc = async (
     state.jobs[address] = job
   }
 
-  // Runs a saved sample to its end, saving as it goes: each point of the map
-  // (when missing or incomplete), the windows (drawn once), then each window
-  // as it is counted. The result becomes the address's entry.
+  // Sizes a saved plan's range with the sampler's own first pass, saving each
+  // map point: a quick map first (a range it puts far below
+  // SOLANA_EXACT_BELOW is listed without the full map), then the full map,
+  // which a sampled range reuses. True when the range is to be listed.
+  const sizePlan = async (address: string, plan: SampleJob, tip: number): Promise<boolean> => {
+    const { exactBelow, points } = sampleSettings()
+    const quickStride = Math.floor(points / QUICK_MAP_POINTS)
+    const keep = (map: DensityMap) => {
+      plan.map = map
+      save()
+    }
+    if (!plan.fullMap && quickStride > 1) {
+      plan.map = await mapRange(rpc, address, plan.lo, plan.hi, tip, quickStride, plan.map, keep)
+      if (plan.map.size <= exactBelow / QUICK_LIST_MARGIN) return true
+      plan.fullMap = true
+      save()
+    }
+    plan.map = await mapRange(rpc, address, plan.lo, plan.hi, tip, 1, plan.map, keep)
+    return plan.map.size <= exactBelow
+  }
+
+  // Runs a saved sample to its end, saving as it goes: its sizing or the rest
+  // of its map, the windows (drawn once), then each window as it is counted.
+  // The result becomes the address's entry.
   const runSample = async (address: string, tip: number): Promise<void> => {
     const sample = state.samples[address]
-    if (!sample.map || sample.map.lo !== sample.lo || sample.map.hi !== sample.hi || !isComplete(sample.map)) {
+    if (sample.sizing) {
+      // A plan saved while it was being sized ends the way planning would have.
+      const list = await sizePlan(address, sample, tip)
+      delete sample.sizing
+      delete sample.fullMap
+      save()
+      if (list) {
+        delete state.samples[address]
+        startListing(address, sample)
+        save()
+        return
+      }
+    } else if (!sample.map || sample.map.lo !== sample.lo || sample.map.hi !== sample.hi || !isComplete(sample.map)) {
       sample.map = await mapRange(rpc, address, sample.lo, sample.hi, tip, 1, sample.map, (map) => {
         sample.map = map
         save()
@@ -1488,16 +1524,7 @@ export const enrichSolanaTagsWithRpc = async (
       delete sample.windows
       save()
     }
-    // A plan saved while sizing its range ends the way planning would have.
-    if (sample.sizing) {
-      delete sample.sizing
-      if (sample.map.size <= sampleSettings().exactBelow) {
-        delete state.samples[address]
-        startListing(address, sample)
-        save()
-        return
-      }
-    }
+    if (!sample.map) throw new Error(`[solana] internal error: ${address} has no density map`)
     if (!sample.windows) {
       sample.windows = drawWindows(address, sample.lo, sample.hi, sample.map)
       save()
@@ -1560,7 +1587,7 @@ export const enrichSolanaTagsWithRpc = async (
     const toSample: string[] = [] // addresses with a sample planned by this run
     const plans: { [address: string]: SampleJob } = {} // listed ranges, sampled if abandoned
     if (mode === "auto") {
-      const { exactBelow, points } = sampleSettings()
+      const { exactBelow } = sampleSettings()
       const now = new Date().toISOString()
       // Finished first: the count they end with is then topped up to the tip
       // below, like any cached count.
@@ -1588,7 +1615,6 @@ export const enrichSolanaTagsWithRpc = async (
       }
       if (resumed.size > 0) console.log(`[solana] Resuming ${resumed.size} interrupted listing(s), each topped up to the current tip`)
       if (carried.size > 0) console.log(`[solana] ${carried.size} listing(s) passed their page cap in an earlier run: sampling them`)
-      const quickStride = Math.floor(points / QUICK_MAP_POINTS)
       let listed = 0
       await forEachConcurrent(toCount, 8, async (address) => {
         if (resumed.has(address)) return
@@ -1633,12 +1659,11 @@ export const enrichSolanaTagsWithRpc = async (
           save()
           return
         }
-        const sampleJob = (map?: DensityMap): SampleJob => ({
+        const sampleJob = (): SampleJob => ({
           lo,
           hi,
           base: base ? { ...base } : undefined,
           newest: { signature: newest.signature, slot: newest.slot },
-          ...(map ? { map } : {}),
           createdAt: now,
         })
         if (carried.has(address)) {
@@ -1648,31 +1673,20 @@ export const enrichSolanaTagsWithRpc = async (
           save()
           return
         }
-        // The sampler's own first pass sizes the range, a quick one first: a
-        // range it puts far below SOLANA_EXACT_BELOW is listed without the
-        // full map, and the others complete it (a sampled range reuses it).
-        const quick = quickStride > 1 ? await mapRange(rpc, address, lo, hi, tipSlot, quickStride) : undefined
-        let map: DensityMap
-        if (quick && quick.size <= exactBelow / QUICK_LIST_MARGIN) {
-          map = quick
-        } else {
-          // The full map is saved point by point, so an interrupted run
-          // resumes it (runSample) instead of measuring it again.
-          const plan: SampleJob = { ...sampleJob(quick), sizing: true }
-          state.samples[address] = plan
-          save()
-          map = await mapRange(rpc, address, lo, hi, tipSlot, 1, quick, (partial) => {
-            plan.map = partial
-            save()
-          })
+        // Saved before it is sized, then point by point, so an interrupted run
+        // resumes the sizing (runSample) instead of starting it over.
+        const plan: SampleJob = { ...sampleJob(), sizing: true }
+        state.samples[address] = plan
+        save()
+        const list = await sizePlan(address, plan, tipSlot)
+        delete plan.sizing
+        delete plan.fullMap
+        if (list) {
           delete state.samples[address]
-        }
-        if (map.size <= exactBelow) {
-          startListing(address, sampleJob(map))
-          plans[address] = sampleJob(map)
+          startListing(address, plan)
+          plans[address] = plan
           listed++
         } else {
-          state.samples[address] = sampleJob(map)
           toSample.push(address)
         }
         save()

@@ -57,53 +57,63 @@ const isProcessAlive = (pid: number): boolean => {
 
 // One run at a time: two processes checkpointing into the same files would
 // overwrite each other's progress. Returns the release function.
+//
+// A run never removes another run's lock, not even one left by a run that
+// died: two runs starting together could both judge it stale (or catch a new
+// lock before its pid is written) and both go on. Ctrl+C and termination
+// signals release the lock instead, so only a hard kill leaves one behind,
+// and the next run then stops and names the file to delete.
 export const acquireTxCountCacheLock = (): (() => void) => {
   if (!txCountCacheEnabled()) return () => undefined
   const dir = txCountCacheDir()
   mkdirSync(dir, { recursive: true })
   const lockPath = join(dir, ".lock")
-  // "wx" creates the file only if it does not exist yet, atomically.
-  const tryCreate = (): boolean => {
+  const pidIn = (): number | null => {
     try {
+      return Number(readFileSync(lockPath).toString().trim()) || 0
+    } catch {
+      return null // no lock file
+    }
+  }
+  for (let attempt = 1; ; attempt++) {
+    try {
+      // "wx" creates the file only if it does not exist yet, atomically.
       writeFileSync(lockPath, String(process.pid), { flag: "wx" })
-      return true
+      break
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") return false
-      throw err
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
     }
-  }
-  if (!tryCreate()) {
-    let pid = 0
-    try {
-      pid = Number(readFileSync(lockPath).toString().trim())
-    } catch {
-      // removed in the meantime
-    }
+    const pid = pidIn()
+    if (pid === null && attempt < 3) continue // released in the meantime
     if (pid && pid !== process.pid && isProcessAlive(pid)) {
-      throw new Error(
-        `[tx-count-cache] Another run (pid ${pid}) is using ${dir}. Wait for it to finish, or delete ${lockPath} if that process is gone.`
-      )
+      throw new Error(`[tx-count-cache] Another run (pid ${pid}) is using ${dir}. Wait for it to finish.`)
     }
-    // Stale lock from a run that died: take it over.
-    try {
-      unlinkSync(lockPath)
-    } catch {
-      // already removed
-    }
-    if (!tryCreate()) {
-      throw new Error(`[tx-count-cache] Another run just took ${lockPath}; wait for it to finish.`)
-    }
+    throw new Error(
+      `[tx-count-cache] ${lockPath} is held by ${pid ? `pid ${pid}, which is no longer running` : "no recorded pid"}: ` +
+        `a run was killed before it could release it, or one is starting right now. ` +
+        `If no other run is using ${dir}, delete that file and rerun.`
+    )
   }
+  const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"]
   let released = false
-  return () => {
+  const release = (): void => {
     if (released) return
     released = true
+    for (const signal of signals) process.removeListener(signal, onSignal)
+    if (pidIn() !== process.pid) return // never another run's lock
     try {
       unlinkSync(lockPath)
     } catch {
       // already removed
     }
   }
+  // Release, then let the signal do what it would have done (end the run).
+  function onSignal(signal: NodeJS.Signals): void {
+    release()
+    process.kill(process.pid, signal)
+  }
+  for (const signal of signals) process.once(signal, onSignal)
+  return release
 }
 
 // Coalesces frequent checkpoint writes: at most one write per `minIntervalMs`
