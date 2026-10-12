@@ -1,5 +1,5 @@
 import { httpFetch } from "./http"
-import { sleep } from "./runtime-helpers"
+import { checkDeadline, isBudgetExceeded, sleep } from "./runtime-helpers"
 
 // Solana JSON-RPC over one or more URLs (SOLANA_RPC_URLS, comma-separated).
 // Every URL gets its own pacing and in-flight cap, and each call goes to
@@ -250,6 +250,7 @@ export class SolanaRpcPool {
       try {
         await this.call<number>("getSlot", [{ commitment: "finalized" }], { only: i, maxAttempts: 2 })
       } catch (err) {
+        if (isBudgetExceeded(err)) throw err
         const status = err instanceof SolanaRpcError ? err.httpStatus : undefined
         if (status === 401 || status === 402 || status === 403) {
           rejected.push(`${this.endpoints[i].label} (HTTP ${status})`)
@@ -272,6 +273,8 @@ export class SolanaRpcPool {
     let rateLimitedWaits = 0
     let lastError: Error | null = null
     for (;;) {
+      // --max-minutes: no new attempt once it has passed, retries included.
+      checkDeadline()
       const ep = await this.acquire(method, options)
       const index = this.endpoints.indexOf(ep)
       const fail = (text: string, code?: number, httpStatus?: number, kind?: "too-large" | "timeout") =>
@@ -422,6 +425,7 @@ export class SolanaRpcPool {
   private async acquire(method: string, options: CallOptions): Promise<Endpoint> {
     const avoid = options.avoid || []
     for (;;) {
+      checkDeadline()
       const now = Date.now()
       if (options.only !== undefined) {
         const pinned = this.endpoints[options.only]

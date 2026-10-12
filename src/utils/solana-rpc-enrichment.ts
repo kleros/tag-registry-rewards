@@ -128,6 +128,9 @@ interface SampleJob {
   newest: { signature: string; slot: number }
   map?: DensityMap
   windows?: SampleWindow[]
+  // Saved while its full map was still being measured: once the map is done,
+  // a range within SOLANA_EXACT_BELOW is listed instead of sampled.
+  sizing?: boolean
   createdAt: string
 }
 
@@ -760,6 +763,7 @@ export const runSignatureJobs = async (
       page = res.page
       endpoint = res.endpoint
     } catch (err) {
+      if (isBudgetExceeded(err)) throw err
       if (err instanceof SolanaRpcError && err.code === -32020) {
         throw new Error(
           `[solana] ${address}: no RPC URL can find a stored cursor signature (code -32020, ${CURSOR_ATTEMPTS} tries). ` +
@@ -1050,8 +1054,8 @@ interface RangeCount {
 
 // The address's signatures with lo <= slot < hi, counted exactly: pages down
 // from the first block at or above `hi` (or from the newest signature when
-// `hi` is past the tip). A short page claims the start of the history and is
-// confirmed once on another URL, as in the exact count.
+// `hi` is past the tip). It ends below `lo`, or on an empty page that follows
+// a short one, as in the exact count.
 const countSlotRange = async (
   rpc: SolanaRpcPool,
   address: string,
@@ -1100,14 +1104,13 @@ const countSlotRange = async (
       if (sig.err === null) ok++
     }
     if (below) break
-    if (page.length < PAGE_SIZE) {
-      if (confirming || res.endpoint === undefined || rpc.labels().length < 2) break
-      confirming = true
-      avoid = [res.endpoint]
-    } else {
-      confirming = false
-      avoid = []
-    }
+    // As in the exact count, a short page only claims the start of the
+    // history: the range ends on an empty answer to the next call, asked of
+    // another URL when there is one. A URL can answer short while older
+    // history exists, and a window's count is scaled up to its whole stratum.
+    if (page.length === 0 && confirming) break
+    confirming = page.length < PAGE_SIZE
+    avoid = confirming && res.endpoint !== undefined ? [res.endpoint] : []
     if (page.length > 0) {
       const last = page[page.length - 1]
       cursor = { before: last.signature, beforeSlot: last.slot }
@@ -1226,7 +1229,8 @@ const isComplete = (map: DensityMap): boolean => map.density.every((d) => !isNaN
 // First pass of the sampler: the density below SOLANA_SAMPLE_POINTS evenly
 // spaced slots of [lo, hi). With `stride` > 1 only every stride-th point is
 // measured (a quick sizing); `prior`, a partial map of the same range, keeps
-// its points and only the missing ones are measured.
+// its points and only the missing ones are measured. `onPoint` gets the map
+// so far after each point, to save it.
 export const mapRange = async (
   rpc: SolanaRpcPool,
   address: string,
@@ -1234,7 +1238,8 @@ export const mapRange = async (
   hi: number,
   tipSlot: number,
   stride = 1,
-  prior?: DensityMap
+  prior?: DensityMap,
+  onPoint?: (map: DensityMap) => void
 ): Promise<DensityMap> => {
   const span = hi - lo
   const P = Math.max(2, Math.min(sampleSettings().points, span))
@@ -1242,6 +1247,11 @@ export const mapRange = async (
   const reused = prior && prior.lo === lo && prior.hi === hi && prior.density.length === P ? prior : undefined
   let calls = reused ? reused.calls : 0
   const density: number[] = reused ? reused.density.slice() : new Array(P).fill(NaN)
+  const snapshot = (): DensityMap => {
+    const measured = density.filter((d) => !isNaN(d))
+    const size = measured.length > 0 ? (measured.reduce((sum, d) => sum + d, 0) / measured.length) * span : 0
+    return { lo, hi, cell, density: density.slice(), size, calls }
+  }
   const todo = Array.from({ length: P }, (_, i) => i).filter(
     (i) => isNaN(density[i]) && (stride <= 1 || i % stride === Math.floor(stride / 2))
   )
@@ -1250,10 +1260,9 @@ export const mapRange = async (
     const r = await densityBelow(rpc, address, lo, x, tipSlot)
     calls += r.calls
     density[i] = r.density
+    if (onPoint) onPoint(snapshot())
   })
-  const measured = density.filter((d) => !isNaN(d))
-  const size = measured.length > 0 ? (measured.reduce((sum, d) => sum + d, 0) / measured.length) * span : 0
-  return { lo, hi, cell, density, size, calls }
+  return snapshot()
 }
 
 // The windows of a stratified sample of [lo, hi) (see above), one per stratum
@@ -1453,15 +1462,41 @@ export const enrichSolanaTagsWithRpc = async (
   const counted = new Set<string>()
   let pages = 0
 
-  // Runs a saved sample to its end, saving as it goes: the map (when missing
-  // or incomplete), the windows (drawn once), then each window as it is
-  // counted. The result becomes the address's entry.
+  // Lists a planned range exactly, from its first slot (or on top of its base
+  // count) up to the tip; past its page cap it is sampled instead.
+  const startListing = (address: string, plan: SampleJob): void => {
+    const { base, lo } = plan
+    // From the history start found in planning when there is no cached count:
+    // splits then never probe the slots before it.
+    const job = newJob(base ? { ...base, method: "exact" } : undefined, base ? undefined : lo)
+    job.pageCap = Math.ceil((1.25 * sampleSettings().exactBelow) / PAGE_SIZE)
+    job.rangeLo = lo
+    if (base && base.method === "sampled") job.sampledBase = true
+    state.jobs[address] = job
+  }
+
+  // Runs a saved sample to its end, saving as it goes: each point of the map
+  // (when missing or incomplete), the windows (drawn once), then each window
+  // as it is counted. The result becomes the address's entry.
   const runSample = async (address: string, tip: number): Promise<void> => {
     const sample = state.samples[address]
     if (!sample.map || sample.map.lo !== sample.lo || sample.map.hi !== sample.hi || !isComplete(sample.map)) {
-      sample.map = await mapRange(rpc, address, sample.lo, sample.hi, tip, 1, sample.map)
+      sample.map = await mapRange(rpc, address, sample.lo, sample.hi, tip, 1, sample.map, (map) => {
+        sample.map = map
+        save()
+      })
       delete sample.windows
       save()
+    }
+    // A plan saved while sizing its range ends the way planning would have.
+    if (sample.sizing) {
+      delete sample.sizing
+      if (sample.map.size <= sampleSettings().exactBelow) {
+        delete state.samples[address]
+        startListing(address, sample)
+        save()
+        return
+      }
     }
     if (!sample.windows) {
       sample.windows = drawWindows(address, sample.lo, sample.hi, sample.map)
@@ -1617,16 +1652,23 @@ export const enrichSolanaTagsWithRpc = async (
         // range it puts far below SOLANA_EXACT_BELOW is listed without the
         // full map, and the others complete it (a sampled range reuses it).
         const quick = quickStride > 1 ? await mapRange(rpc, address, lo, hi, tipSlot, quickStride) : undefined
-        const map =
-          quick && quick.size <= exactBelow / QUICK_LIST_MARGIN ? quick : await mapRange(rpc, address, lo, hi, tipSlot, 1, quick)
+        let map: DensityMap
+        if (quick && quick.size <= exactBelow / QUICK_LIST_MARGIN) {
+          map = quick
+        } else {
+          // The full map is saved point by point, so an interrupted run
+          // resumes it (runSample) instead of measuring it again.
+          const plan: SampleJob = { ...sampleJob(quick), sizing: true }
+          state.samples[address] = plan
+          save()
+          map = await mapRange(rpc, address, lo, hi, tipSlot, 1, quick, (partial) => {
+            plan.map = partial
+            save()
+          })
+          delete state.samples[address]
+        }
         if (map.size <= exactBelow) {
-          // From the history start found above when there is no cached count:
-          // splits then never probe the slots before it.
-          const job = newJob(base ? { ...base, method: "exact" } : undefined, base ? undefined : lo)
-          job.pageCap = Math.ceil((1.25 * exactBelow) / PAGE_SIZE)
-          job.rangeLo = lo
-          if (base && base.method === "sampled") job.sampledBase = true
-          state.jobs[address] = job
+          startListing(address, sampleJob(map))
           plans[address] = sampleJob(map)
           listed++
         } else {
@@ -1640,10 +1682,13 @@ export const enrichSolanaTagsWithRpc = async (
           `(mapped above SOLANA_EXACT_BELOW=${exactBelow} signatures)`
       )
     } else {
-      // Every range is listed to its end here, including one an auto-mode run left.
+      // Every range is listed to its end here, including one an auto-mode run
+      // left, except one that tops up a sampled count: exact mode lists that
+      // address from its first signature, as it does any sampled count.
       for (const address of toCount) {
         const job = state.jobs[address]
-        if (job) delete job.pageCap
+        if (job && job.sampledBase) delete state.jobs[address]
+        else if (job) delete job.pageCap
       }
       const resumed = toCount.filter((address) => state.jobs[address] && topUpResumedJob(state.jobs[address]))
       if (resumed.length > 0) {
@@ -1655,7 +1700,7 @@ export const enrichSolanaTagsWithRpc = async (
       // ones too big to page.
       const toSize = toCount.filter((address) => {
         const entry = state.entries[address]
-        return !state.jobs[address] && !registriesOf(address).has("tokens") && (!entry || entry.method === "estimated")
+        return !state.jobs[address] && !registriesOf(address).has("tokens") && (!entry || entry.method !== "exact")
       })
       if (toSize.length > 0) console.log(`[solana] Sizing ${toSize.length} address(es) outside the Tokens registry before counting`)
       const estimated: string[] = []
