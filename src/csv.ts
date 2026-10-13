@@ -39,7 +39,16 @@ const generateTransactions = (rewards: Reward[]): Transaction[] => {
   return Object.values(transactionMap)
 }
 
-const buildCsv = async (rewards: Reward[]): Promise<void> => {
+// Where the rewards came from, recorded in the generate manifest: `send` reads
+// the period from it to refuse paying a period twice.
+export interface GenerateSource {
+  periodStart?: string
+  periodEnd?: string
+  tagsFile?: string
+  gasFile?: string
+}
+
+const buildCsv = async (rewards: Reward[], source: GenerateSource = {}): Promise<GenerateManifest> => {
   console.info("=== Building csv file ===")
   const filename = new Date().getTime()
   ensureFilesDir()
@@ -115,14 +124,22 @@ const buildCsv = async (rewards: Reward[]): Promise<void> => {
   const manifest: GenerateManifest = {
     runId: String(filename),
     generatedAt: new Date().toISOString(),
+    ...(source.periodStart && source.periodEnd
+      ? { periodStart: source.periodStart, periodEnd: source.periodEnd }
+      : {}),
+    ...(source.tagsFile ? { tagsFile: source.tagsFile } : {}),
+    ...(source.gasFile ? { gasFile: source.gasFile } : {}),
     rewardsFile,
     transactionsFile: `${filename}.json`,
   }
-  writeFileSync(
-    `./${conf.FILES_DIR}/latest_generate_manifest.json`,
-    JSON.stringify(manifest, null, 2),
-    { encoding: "utf-8" }
-  )
+  for (const name of [`${filename}_generate_manifest.json`, "latest_generate_manifest.json"]) {
+    writeFileSync(
+      `./${conf.FILES_DIR}/${name}`,
+      JSON.stringify(manifest, null, 2),
+      { encoding: "utf-8" }
+    )
+  }
+  return manifest
 }
 
 export default buildCsv

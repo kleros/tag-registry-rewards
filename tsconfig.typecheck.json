@@ -1,0 +1,16 @@
+{
+  // `yarn typecheck`: a real type check of src/ and test/. A plain
+  // `tsc --noEmit` reports ~900 syntax errors from @types/yargs (written for
+  // TypeScript 4+) and then skips every semantic check, so yargs is mapped to
+  // a stub here.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "yargs": ["test/types/yargs/index.d.ts"],
+      "yargs/helpers": ["test/types/yargs/helpers.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

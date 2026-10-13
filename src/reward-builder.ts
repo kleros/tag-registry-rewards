@@ -69,7 +69,7 @@ type FormulaRpnToken =
       value: FormulaFunction
     }
 
-type FormulaContext = {
+export type FormulaContext = {
   reward_pool: BigNumber
   total_submissions: number
   txns_with_contract: number
@@ -309,7 +309,7 @@ const formulaValueFromIdentifier = (
   return ctx.sum_sqrt_total_txns_with_all_contracts_scaled
 }
 
-const evalFormula = (
+export const evalFormula = (
   registry: RegistryKey,
   formula: RegistryFormula,
   ctx: FormulaContext
@@ -333,7 +333,7 @@ const evalFormula = (
         stack.push(scaledSqrt(value))
         continue
       }
-      throw new Error(`Unknown function "${token.value}" in formula for ${registry}.`)
+      throw new Error(`Unknown function "${(token as { value: string }).value}" in formula for ${registry}.`)
     }
 
     if (stack.length < 2) {
@@ -370,13 +370,25 @@ const evalFormula = (
   return stack[0].div(FORMULA_SCALE)
 }
 
-const parseRegistryFormula = (
+export const parseRegistryFormula = (
   registry: RegistryKey,
   rawFormula: string
 ): RegistryFormula => {
   const formula = rawFormula.trim()
   const tokens = tokenizeFormula(registry, formula)
   const rpn = toRpn(registry, tokens)
+  // Checked here, not only when evaluated: a registry whose entries all have
+  // no transactions (equal split) never evaluates its formula.
+  let depth = 0
+  for (const token of rpn) {
+    if (token.type === "number" || token.type === "identifier") depth++
+    else if (token.type === "operator") depth = depth >= 2 ? depth - 1 : -1
+    else if (depth < 1) depth = -1
+    if (depth < 0) break
+  }
+  if (depth !== 1) {
+    throw new Error(`Invalid formula for ${registry}: "${formula}"`)
+  }
   return { raw: formula, rpn }
 }
 
@@ -524,6 +536,25 @@ const contractInfosToRewards = (
   return [...cappedRewards, ...lesserRewards]
 }
 
+// A valid formula never hands out more than the pool, nor a negative amount
+// (caps and floor division only lower the total). A misconfigured one can, and
+// no payout file may be written from it.
+const assertWithinPool = (registry: RegistryKey, rewards: Reward[], stipend: BigNumber): void => {
+  let total = BigNumber.from(0)
+  for (const reward of rewards) {
+    if (reward.amount.isNegative()) {
+      throw new Error(`Formula for ${registry} gave ${reward.id} a negative reward (${reward.amount.toString()} wei).`)
+    }
+    total = total.add(reward.amount)
+  }
+  if (total.gt(stipend)) {
+    throw new Error(
+      `Rewards for ${registry} add up to ${formatEther(total)} PNK, more than its pool of ${formatEther(stipend)} PNK. ` +
+        "Check the registry's REWARD_FORMULA_* setting."
+    )
+  }
+}
+
 export const buildRewards = async (
   stipend: BigNumber,
   maxReward: BigNumber,
@@ -576,6 +607,9 @@ export const buildRewards = async (
     redistributionModes.domains,
     "domains"
   )
+  assertWithinPool("addressTags", tagRewards, stipend)
+  assertWithinPool("tokens", tokensRewards, stipend)
+  assertWithinPool("domains", domainsRewards, stipend)
   const rewards = [...tagRewards, ...tokensRewards, ...domainsRewards]
   let sum = BigNumber.from(0)
   for (const reward of rewards) {

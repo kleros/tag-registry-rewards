@@ -57,6 +57,11 @@ export const runSplittableWork = async <U extends SplittableUnit>(
         // (a split) or to split (a first step gives a scan its estimate).
         if (added || steps === 1) notify()
       }
+    } catch (err) {
+      // Recorded before the notify below wakes the idle workers, or one of
+      // them would take this unit and run its failed step again.
+      if (failure === null) failure = err
+      throw err
     } finally {
       unit.busy = false
       unit.splitRequested = false

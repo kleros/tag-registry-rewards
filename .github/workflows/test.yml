@@ -1,0 +1,22 @@
+# The full test suite (yarn test: type check, unit, integration and the slow
+# scenarios) on every pull request and on master. The tests are offline: every
+# RPC, indexer and API they use is a local mock (see test/support/hermetic.js).
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.18.3
+          cache: yarn
+      - run: yarn install --frozen-lockfile
+      - run: yarn test

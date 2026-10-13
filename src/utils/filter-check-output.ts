@@ -3,9 +3,11 @@ import conf from "../config"
 import { FilterCheckReason, FilterCheckRow } from "../types"
 import { ensureFilesDir, formatRegistry } from "./output-helpers"
 
+// Every FilterCheckReason, in the order the filters apply them.
 const REASON_ORDER: FilterCheckReason[] = [
   "chain not configured for rewards",
   "already tagged on explorer",
+  "token on address tags",
   "not a contract (getCode == 0x)",
   "eip-1167 minimal proxy",
   "erc-721 contract",

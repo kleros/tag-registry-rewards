@@ -221,6 +221,12 @@ export interface RewardRecord {
 export interface GenerateManifest {
   runId: string
   generatedAt: string
+  // Period of the fetch the rewards came from, and its files (absent in
+  // manifests from older runs, or when the period could not be told).
+  periodStart?: string
+  periodEnd?: string
+  tagsFile?: string
+  gasFile?: string
   rewardsFile: string
   transactionsFile: string
 }

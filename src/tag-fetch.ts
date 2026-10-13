@@ -182,6 +182,15 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
   return domainItems.filter((item) => !tokenKey0Set.has(item.key0))
 }
 
+// Submitters never rewarded, compared case-insensitively (the indexer returns
+// lowercase addresses today, a checksummed one must not slip through).
+const EXCLUDED_SUBMITTERS = new Set([
+  "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6",
+  "0xd0e76cfaa8af741f3a8b107eca76d393f734dace",
+  "0x6f8e399b94e117d9e44311306c4c756369682720",
+  "0xbf45d3c81f587833635b3a1907f5a26c208532e7",
+])
+
 export const fetchTags = async (period: Period): Promise<Tag[]> => {
   // Fetch all 3 registries in parallel
   const [addressTagsItems, tokensItems, domainsItems] = await Promise.all([
@@ -202,13 +211,5 @@ export const fetchTags = async (period: Period): Promise<Tag[]> => {
   return addressTags
     .concat(tokens)
     .concat(domains)
-    .filter((tag): tag is Tag => {
-      if (!tag) return false
-      return (
-        tag.submitter !== "0xf313d85c7fef79118fcd70498c71bf94e75fc2f6" &&
-        tag.submitter !== "0xd0e76cfaa8af741f3a8b107eca76d393f734dace" &&
-        tag.submitter !== "0x6f8e399b94e117d9e44311306c4c756369682720" &&
-        tag.submitter !== "0xbf45d3c81f587833635b3a1907f5a26c208532e7"
-      )
-    })
+    .filter((tag): tag is Tag => !!tag && !EXCLUDED_SUBMITTERS.has(String(tag.submitter || "").toLowerCase()))
 }

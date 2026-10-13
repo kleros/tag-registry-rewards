@@ -1,12 +1,11 @@
 import { BigNumber } from "ethers"
 import { buildRewards } from "./reward-builder"
-import { sendAllRewards } from "./transaction-sender"
-import { FetchManifest, GasDune, Tag, Transaction } from "./types"
+import { FetchManifest, GasDune, Tag } from "./types"
 import conf from "./config"
 import yargs = require("yargs")
 import { hideBin } from "yargs/helpers"
-import buildCsv from "./csv"
-import { existsSync, readFileSync } from "fs"
+import buildCsv, { GenerateSource } from "./csv"
+import { existsSync, readdirSync, readFileSync } from "fs"
 import { resolve } from "path"
 import { inspect } from "util"
 import { prefetchRoutine, tagsRoutine } from "./tags-routine"
@@ -14,6 +13,7 @@ import { filterCheckRoutine } from "./filter-check-routine"
 import { removalsRoutine } from "./removals-routine"
 import { documentRoutine } from "./document-routine"
 import { verifyTxCounts } from "./verify-tx-counts"
+import { listDisbursementsRoutine, sendRoutine } from "./send-routine"
 import { redactSecrets } from "./utils/solana-rpc"
 import { isBudgetExceeded, setTimeBudget } from "./utils/runtime-helpers"
 import { txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
@@ -57,8 +57,10 @@ const argv: any = yargs(hideBin(process.argv))
       $0 --mode document # merges latest generate + removals outputs
     Run the full compute + publish (everything except send):
       $0 --mode all --period YYYY-MM
-    Send rewards:
-      $0 --mode send --rewards \${filename}.json
+    Send rewards (refuses a file or period already paid; resumes an interrupted send):
+      $0 --mode send --rewards \${filename}.json [--dry-run] [--period YYYY-MM when no manifest gives it]
+    List what was sent (the disbursement ledger):
+      $0 --mode disbursements
     Check the tx-count providers (HyperSync, Solana RPC) against known values:
       $0 --mode verify-counts
     Optional: count this month's tags so far into the cache (no payout files),
@@ -67,7 +69,7 @@ const argv: any = yargs(hideBin(process.argv))
   )
   .option("m", {
     description:
-      "The mode of the execution. Steps: 'fetch', 'filter-check', 'removals', 'generate', 'document', 'all', 'send', 'verify-counts', and 'prefetch'",
+      "The mode of the execution. Steps: 'fetch', 'filter-check', 'removals', 'generate', 'document', 'all', 'send', 'disbursements', 'verify-counts', and 'prefetch'",
     alias: "mode",
   })
   .option("max-minutes", {
@@ -98,7 +100,7 @@ const argv: any = yargs(hideBin(process.argv))
     alias: "rewards",
   })
   .option("period", {
-    description: "Period label (YYYY-MM) for the document mode",
+    description: "The month (YYYY-MM) to work on; for send, the month paid by a file whose manifest gives no period",
   })
   .option("submissions", {
     description: "Submission rewards JSON file for the document mode",
@@ -108,11 +110,40 @@ const argv: any = yargs(hideBin(process.argv))
   })
   .option("atq", {
     description: "ATQ rewards JSON file for the document mode",
+  })
+  .option("dry-run", {
+    description: "send: show what would be sent and every check, without signing or recording anything",
+    type: "boolean",
+  })
+  .option("allow-repeat-period", {
+    description: "send: pay although another file for the same period and kind was already paid",
+    type: "boolean",
+  })
+  .option("skip-paid-on-chain", {
+    description: "send: count the transfers already found on-chain as paid and send the rest",
+    type: "boolean",
+  })
+  .option("skip-onchain-check", {
+    description: "send: do not look for this payout's transfers among the wallet's past transfers",
+    type: "boolean",
+  })
+  .option("from", {
+    description: "send --dry-run: check as this address, without its key (e.g. was this file paid?)",
+    type: "string",
+  })
+  .option("forget-unmined", {
+    description: "send: resend a transfer whose saved transactions can no longer be mined (their nonce went to another transaction)",
+    type: "boolean",
   }).argv
 
+// Strict YYYY-MM-DD: Date.UTC would roll "2026-13-01" over to January 2027.
 const parseDate = (s: string): Date => {
-  const [y, m, d] = s.split("-").map((n) => Number(n))
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(s).trim())
+  const [y, m, d] = match ? [Number(match[1]), Number(match[2]), Number(match[3])] : [NaN, NaN, NaN]
   const date = new Date(Date.UTC(y, m - 1, d))
+  if (!match || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) {
+    throw new Error(`Invalid date "${s}". Expected YYYY-MM-DD.`)
+  }
   return date
 }
 
@@ -124,6 +155,21 @@ const getLatestManifest = (): FetchManifest => {
     )
   }
   return JSON.parse(readFileSync(filename).toString()) as FetchManifest
+}
+
+// The fetch manifest (of any run) that wrote this tags file, if it is here.
+const fetchManifestFor = (tagsFile: string): FetchManifest | null => {
+  const dir = `./${conf.FILES_DIR}`
+  if (!existsSync(dir)) return null
+  for (const name of readdirSync(dir).filter((n) => /(^|_)fetch_manifest\.json$/.test(n))) {
+    try {
+      const manifest = JSON.parse(readFileSync(`${dir}/${name}`).toString()) as FetchManifest
+      if (manifest.generateTagsFile === tagsFile) return manifest
+    } catch {
+      // not a manifest
+    }
+  }
+  return null
 }
 
 const toPeriodLabel = (d: Date): string =>
@@ -154,6 +200,9 @@ const resolvePeriod = (): { start: Date; end: Date; label: string } => {
   } else {
     start = argv.start ? parseDate(argv.start) : start
     end = argv.end ? parseDate(argv.end) : end
+  }
+  if (start.getTime() >= end.getTime()) {
+    throw new Error(`Invalid period: ${start.toISOString()} is not before ${end.toISOString()}.`)
   }
   return { start, end, label: toPeriodLabel(start) }
 }
@@ -203,11 +252,23 @@ const runGenerate = async (
   const stipend = BigNumber.from(conf.STIPEND)
   const maxReward = BigNumber.from(conf.MAX_REWARD)
 
+  // The period of the fetch the rewards come from, recorded for `send`.
+  let source: GenerateSource
   if (!tagsFilename || !gasFilename) {
     const manifest = getLatestManifest()
     tagsFilename = manifest.generateTagsFile
     gasFilename = manifest.generateGasFile
+    source = { periodStart: manifest.periodStart, periodEnd: manifest.periodEnd }
     console.log(`Using latest manifest run ${manifest.runId}`)
+  } else {
+    const manifest = fetchManifestFor(tagsFilename)
+    source = manifest ? { periodStart: manifest.periodStart, periodEnd: manifest.periodEnd } : {}
+  }
+  if (!source.periodStart || !source.periodEnd) {
+    console.warn(
+      `[generate] WARNING: no fetch manifest in ${conf.FILES_DIR}/ gives the period of ${tagsFilename}, so these rewards ` +
+        "carry none: send will refuse them until --period YYYY-MM gives their month."
+    )
   }
 
   const allTags: Tag[] = JSON.parse(
@@ -228,14 +289,15 @@ const runGenerate = async (
   }
   if (!sharedExclusions) warnUnmatchedExclusions(exclusions, ["submissions"])
   const rewards = await buildRewards(stipend, maxReward, tags, gasDunes)
-  await buildCsv(rewards)
+  const manifest = await buildCsv(rewards, { ...source, tagsFile: tagsFilename, gasFile: gasFilename })
+  console.log(`Transactions file (for --mode send): ${manifest.transactionsFile}`)
 }
 
 const main = async () => {
   const mode = argv.mode as string | undefined
   if (mode === undefined) {
     throw new Error(
-      "You must choose a mode, 'fetch' | 'filter-check' | 'removals' | 'generate' | 'document' | 'all' | 'send' | 'verify-counts' | 'prefetch'"
+      "You must choose a mode, 'fetch' | 'filter-check' | 'removals' | 'generate' | 'document' | 'all' | 'send' | 'disbursements' | 'verify-counts' | 'prefetch'"
     )
   }
   if (mode === "fetch") {
@@ -363,16 +425,21 @@ const main = async () => {
         `  yarn start --mode send --rewards ${removalsManifest.atqTransactionsFile}`
     )
   } else if (mode === "send") {
-    // disburse rewards
+    // disburse rewards, recorded in the disbursement ledger (refuses repeats)
     const file = argv.rewards
-    if (!file) throw new Error("JSON file needed to send the full rewards")
-    const fileContent = readFileSync(`./${conf.FILES_DIR}/${file}`).toString()
-    const rewards: Transaction[] = JSON.parse(fileContent)
-    // rewrap the amounts onto BigNumber to recover their methods.
-    rewards.forEach((reward) => {
-      reward.amount = BigNumber.from(reward.amount)
+    if (!file) throw new Error("JSON file needed to send the full rewards: --rewards <transactions file>")
+    await sendRoutine({
+      file: String(file),
+      dryRun: !!argv["dry-run"],
+      allowRepeatPeriod: !!argv["allow-repeat-period"],
+      skipPaidOnChain: !!argv["skip-paid-on-chain"],
+      skipOnchainCheck: !!argv["skip-onchain-check"],
+      forgetUnmined: !!argv["forget-unmined"],
+      from: argv.from ? String(argv.from) : undefined,
+      period: argv.period ? String(argv.period) : undefined,
     })
-    await sendAllRewards(rewards)
+  } else if (mode === "disbursements") {
+    listDisbursementsRoutine()
   } else if (mode === "verify-counts") {
     // check the tx-count providers against known values before a real fetch.
     const ok = await verifyTxCounts()

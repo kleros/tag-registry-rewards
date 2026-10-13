@@ -236,16 +236,20 @@ yarn start --mode fetch
 # Step 2: generate reward allocations from the latest fetch
 yarn start --mode generate
 
-# Step 3: send transactions on-chain
+# Step 3: check, then send the transactions on-chain (refuses a file or period already paid)
+yarn start --mode send --rewards <transactions-file>.json --dry-run
 yarn start --mode send --rewards <transactions-file>.json
 ```
+
+Every `yarn start` first runs the preflight tests (~8 s, see [Testing](#testing))
+and stops if one fails.
 
 ## Modes
 
 Run all commands from this folder:
 
 ```bash
-yarn start --mode <fetch|prefetch|filter-check|removals|generate|document|all|send|verify-counts> [args]
+yarn start --mode <fetch|prefetch|filter-check|removals|generate|document|all|send|disbursements|verify-counts> [args]
 ```
 
 ### 1) Fetch
@@ -389,6 +393,12 @@ You can still override explicitly:
 yarn start --mode generate --tags <file>.json --gas <file>.json
 ```
 
+Its manifest (`latest_generate_manifest.json`) records the period of the fetch
+the rewards come from, so that `send` can refuse a second payout of that month.
+With explicit files that is the period of the fetch manifest in `files/` naming
+the tags file; for a tags file no manifest names, generate warns that the
+rewards carry no period, and `send` then asks for it (`--period YYYY-MM`).
+
 Outputs:
 
 - rewards CSV
@@ -398,11 +408,95 @@ Outputs:
 ### 5) Send
 
 ```bash
+yarn start --mode send --rewards <file>.json --dry-run   # every check, nothing signed
 yarn start --mode send --rewards <file>.json
+yarn start --mode disbursements                          # what was sent
+yarn start --mode send --rewards <file>.json --dry-run --from <wallet>   # was it paid? no key needed
 ```
 
-Uses the generated transactions JSON and sends transfers exactly as before. Run
-it once per transactions file (submissions and removals are separate files).
+Pays a transactions file in PNK from `WALLET_PRIVATE_KEY` on `TX_NETWORK_ID`
+(Gnosis), one transfer at a time, waiting for each receipt. Run it once per
+transactions file (submissions, removals and ATQ are separate files).
+
+Every payout is recorded in the **disbursement ledger**, one JSON file per paid
+transactions file in `disbursements/` (`DISBURSEMENTS_DIR`). Commit it, like
+`exclusions.json`: it is the audit trail of what was paid (transaction hash,
+block and nonce of every transfer), and a machine with it refuses to pay the
+same file again. `send` refuses, before signing anything:
+
+- a payout already disbursed: same recipients and amounts, for the same kind
+  (submissions, removals, ATQ) and period;
+- a file paying exactly what another paid file paid, unless both are clearly
+  different payouts: other months, or other kinds of one month (capped
+  removal and ATQ rewards make identical files recur). A renamed copy has no
+  period, so it is refused;
+- another file for a period and kind already paid, e.g. one regenerated after
+  an exclusion: rewards are pool-based, so it is not a top-up
+  (`--allow-repeat-period` if it really is a deliberate extra payout). A file
+  of unknown kind (a hand-made name) counts as any kind;
+- a new payout whose period is unknown, because no manifest in `files/` names
+  the file (hand-made, renamed or copied without it): nothing would tell a
+  corrected file, whose amounts all differ, from a second payout of a month
+  already paid. `--period YYYY-MM` gives the month it pays, and the checks
+  above apply (`--allow-repeat-period` sends it without one). The file is
+  found under any spelling of its path (`x.json`, `./x.json`, `files/x.json`);
+- transfers that repeat ones this wallet already paid: its PNK transfers since
+  the period ended (or the last `SEND_ONCHAIN_LOOKBACK_DAYS`, default 45, when
+  the file's period is unknown) are read on-chain, and one to the same
+  recipient for the same amount counts, unless the ledger shows it paid a
+  clearly different payout. That catches a file paid from another machine,
+  before the ledger existed, or a corrected copy of a paid file. Nothing is
+  recorded until you decide: if those transfers are this file's (it was paid,
+  or partly paid, from elsewhere), `--skip-paid-on-chain` records them as paid
+  and sends the rest; if they only coincide with it, `--skip-onchain-check`
+  skips the check. A node that refuses `eth_getLogs`, no longer serves the
+  blocks back to that date, or lacks a block needed to find it, makes `send`
+  stop rather than check fewer transfers, or older ones: retry, use an RPC that
+  keeps the history (`TX_RPC_URL`), or skip the check;
+- a wallet without the PNK or the gas the transfers need, a base fee above
+  `SEND_MAX_FEE_GWEI`, an RPC on another chain, a malformed file, or a
+  `*_rewards.json` record file passed by mistake;
+- a second `send` while one is running, or while another payout on the same
+  chain still has transactions in flight (a payout merely left half-paid only
+  gets a warning). Records of another chain or token (a testnet trial) never
+  block a payout.
+
+`--dry-run --from <address>` runs the same checks for any wallet without its
+key, e.g. to confirm on another machine that a file was already paid (the
+September 2026 files are refused that way: all 12 transfers of 2026-10-06 are
+found on-chain).
+
+Interrupted runs resume without paying anyone twice: each transfer's
+transaction is signed and saved in the ledger **before** it is broadcast, and
+the transfer keeps that nonce. Rerunning the same command after a crash, a
+Ctrl+C or a timeout finds the transactions that were mined, waits for or
+rebroadcasts the very same signed bytes of those that were not (lowest nonce
+first), and only then sends the rest. Another machine resumes it the same way
+once it has the ledger (commit and pull `disbursements/`), even without the
+file's manifest in `files/`. Raising `SEND_MAX_FEE_GWEI` (or
+`SEND_MAX_PRIORITY_FEE_GWEI`) replaces a stuck transaction with the same nonce.
+Nodes take a replacement only when both fees rise by 10%, so `send` raises
+both by at least 12.5%, never above `SEND_MAX_FEE_GWEI`: when that cap is too
+low for a replacement, it stops and names the minimum. A node that
+refuses a transaction (underpriced) or answers "nonce too low" (a retried
+broadcast that was in fact mined) never makes `send` forget it: it checks the
+receipt, or stops and says what to do. A reverted transfer (nothing paid) stops
+the run and is sent again on the next one. When the nonce of a saved
+transaction was used and the node has no receipt for it, `send` looks for it
+among the wallet's PNK transfers and records it as paid if it is there (the
+balance check does not count its amount, already gone, a second time).
+Otherwise the nonce went to some other transaction and `send` stops: check
+that transaction on the explorer, then `--forget-unmined` sends the transfer
+again with a new nonce, once the wallet's balance is checked again (the other
+transaction may have spent it). It refuses to while the wallet has, since the payout
+started, a transfer of the same amount to the same recipient that the ledger
+does not know: that one may be this transfer, signed elsewhere.
+
+Settings (all optional, in `.env`): `TX_RPC_URL` (default: the chain's RPC in
+`src/utils/chains.ts`), `SEND_MAX_FEE_GWEI` (2), `SEND_MAX_PRIORITY_FEE_GWEI`
+(1), `SEND_GAS_LIMIT` (100000), `SEND_RECEIPT_TIMEOUT_SECONDS` (300),
+`SEND_ONCHAIN_LOOKBACK_DAYS` (45), `SEND_COUNTDOWN_SECONDS` (10, a pause before
+the first transfer in an interactive terminal).
 
 ### 6) Document (publish to IPFS)
 
@@ -544,7 +638,8 @@ erase the historical months.
 
 **5. Verify before sending.** Compare old vs new transactions csv — only the
 affected registry's recipients should have moved. Then `--mode send` the new
-transactions file.
+transactions file. If the old one was already sent, `send` refuses the new one
+(same period and kind): see the warning below.
 
 > ⚠️ Do all of this **before** `--mode send`. Amounts redistribute, so if the
 > old rewards were already paid on-chain there is no automated diff/claw-back —
@@ -582,7 +677,7 @@ yarn start --mode all --period YYYY-MM
 ```
 
 `all` deliberately does **not** send. Review the amounts, then disburse
-manually. Note the run ids differ per step: the submissions transactions file
+manually (`--dry-run` first; `send` refuses any file or period already paid). Note the run ids differ per step: the submissions transactions file
 is named with the **generate** run's timestamp, while the removals and ATQ
 files share the **removals** run's timestamp (check
 `latest_generate_manifest.json` / `latest_removals_manifest.json` for the
@@ -602,3 +697,57 @@ yarn start --mode generate     # submissions: reward allocations
 yarn start --mode removals     # removals + ATQ rewards + reports
 yarn start --mode document --period YYYY-MM   # publish the combined record to IPFS
 ```
+
+## Testing
+
+```bash
+yarn test         # everything: type check + all tests (~1 min)
+yarn test:fast    # the fast tests (~8 s), also run before every `yarn start`
+yarn test:slow    # the slow scenarios only
+yarn typecheck    # a real type check of src/ and test/
+yarn test:coverage   # everything, with line/branch coverage per file (~95% of lines)
+node test/run.js test/integration/send.test.ts --grep "dry run"   # some tests
+```
+
+`yarn start` runs the fast tests first (`prestart`) and does not run the
+command if one fails: the payout math, the outputs and the send safeguards are
+checked against the working tree right before they are used.
+`SKIP_TESTS=1 yarn start …` skips them (at your own risk). GitHub Actions runs
+`yarn test` on every pull request (`.github/workflows/test.yml`). They also run
+on Node 18 (the Windows fallback above), which lacks the per-test timeout of
+Node 20.11+: a hanging run is stopped after 15 minutes either way
+(`TESTS_TIMEOUT_SECONDS`), every test process with it.
+
+The tests use Node's built-in runner and ts-node, no extra dependency, and run
+offline: every test process (and every CLI a test starts) preloads
+`test/support/hermetic.js`, which blocks network access beyond `127.0.0.1`,
+runs in a temporary directory (so `files/`, `exclusions.json` and
+`disbursements/` are never the repo's) and replaces the shell's pipeline
+settings with the documented ones. The chains, indexer and APIs are local mocks
+in `test/support/`: an EVM node with a PNK token (`evm.ts`), Solana RPC URLs
+that fail the way real providers do plus Jupiter (`solana.ts`), the Curate
+indexer (`subgraph.ts`) and Dune (`dune.ts`).
+
+What is covered:
+
+- `test/unit`: the reward formulas and pool math (caps, redistribution, the
+  Solana divider, a pool never overspent), removal and ATQ rewards, exclusions,
+  every output file and manifest, the IPFS document and index, the tx-count
+  cache and its lock, the ledger, the time budget, and the helpers.
+- `test/integration`: fetching tags, removals and ATQ from the indexer; the
+  address-tag checks (EOA, EIP-1167, ERC-721); HyperSync counting (cutoffs,
+  cache top-ups, resume, splits, pre-Byzantium Ethereum); the Solana RPC pool,
+  holders and enrichment; the Dune lanes; the routines; `send` against the mock
+  node (refusals, crashes and resumes at every step, fee replacement, reverts);
+  and the **September 2026 golden test**: `generate` and `document` on that
+  period's inputs must reproduce the published payout to the wei
+  (`test/fixtures/september-2026/`, change it only when a payout rule changes
+  on purpose).
+- `test/scenarios` (`*.slow.test.ts`): Solana counts under faulty providers
+  (short and empty pages, missing blocks, a moving tip, interrupted samples and
+  maps), the `--max-minutes` budget, lock races between processes, the CLI,
+  and a whole month offline: `--mode all`, `send` of the three files, every
+  attempt to pay again refused.
+
+`yarn start --mode verify-counts` remains the live check of the real providers
+(it needs the keys and the network).
