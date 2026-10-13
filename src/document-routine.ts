@@ -164,41 +164,40 @@ const warnOnPeriodMismatch = (periodLabel: string): void => {
   }
 }
 
-// Same guard for submissions. Two checks, because the rewards actually come
-// from latest_generate_manifest.json (which records no period): the fetch
-// manifest's period must match, AND generate must not predate the fetch it is
-// supposed to have consumed (a stale generate would publish old amounts).
+// Same guard for submissions, whose rewards come from
+// latest_generate_manifest.json: its own period when it records one (generate
+// does since the send ledger), else the latest fetch manifest's, and then
+// generate must not predate the fetch it is supposed to have consumed (a stale
+// generate would publish old amounts).
 const warnOnSubmissionsPeriodMismatch = (periodLabel: string): void => {
-  const fetchPath = `./${conf.FILES_DIR}/latest_fetch_manifest.json`
-  if (!existsSync(fetchPath)) return
+  const read = <T>(name: string): T | null => {
+    const path = `./${conf.FILES_DIR}/${name}`
+    return existsSync(path) ? (JSON.parse(readFileSync(path).toString()) as T) : null
+  }
   try {
-    const fetchManifest = JSON.parse(
-      readFileSync(fetchPath).toString()
-    ) as FetchManifest
-    if (fetchManifest.periodStart) {
-      const fetchLabel = monthLabel(fetchManifest.periodStart)
-      if (fetchLabel !== periodLabel) {
-        console.warn(
-          `[document] WARNING: latest fetch (submissions) was for ${fetchLabel} but ` +
-            `documenting ${periodLabel}. Pass --submissions explicitly to avoid mixing periods.`
-        )
-      }
+    const generateManifest = read<GenerateManifest>("latest_generate_manifest.json")
+    const fetchManifest = read<FetchManifest>("latest_fetch_manifest.json")
+    const [source, start] =
+      generateManifest && generateManifest.periodStart
+        ? ["generate", generateManifest.periodStart]
+        : ["fetch", fetchManifest ? fetchManifest.periodStart : undefined]
+    if (start && monthLabel(start) !== periodLabel) {
+      console.warn(
+        `[document] WARNING: latest ${source} (submissions) was for ${monthLabel(start)} but ` +
+          `documenting ${periodLabel}. Pass --submissions explicitly to avoid mixing periods.`
+      )
     }
-    const generatePath = `./${conf.FILES_DIR}/latest_generate_manifest.json`
-    if (existsSync(generatePath)) {
-      const generateManifest = JSON.parse(
-        readFileSync(generatePath).toString()
-      ) as GenerateManifest
-      if (
-        new Date(generateManifest.generatedAt).getTime() <
+    if (
+      generateManifest &&
+      fetchManifest &&
+      new Date(generateManifest.generatedAt).getTime() <
         new Date(fetchManifest.generatedAt).getTime()
-      ) {
-        console.warn(
-          "[document] WARNING: latest generate output predates the latest fetch — " +
-            "its rewards were built from an OLDER fetch. Run `--mode generate` " +
-            "again (or pass --submissions explicitly) before documenting."
-        )
-      }
+    ) {
+      console.warn(
+        "[document] WARNING: latest generate output predates the latest fetch — " +
+          "its rewards were built from an OLDER fetch. Run `--mode generate` " +
+          "again (or pass --submissions explicitly) before documenting."
+      )
     }
   } catch {
     /* ignore malformed manifest */

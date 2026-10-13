@@ -41,7 +41,9 @@ Fill `.env` values:
 - `REWARD_REDISTRIBUTE_CAPPED_DOMAINS` (`true` or `false`)
 - `SOLANA_TX_DIVIDER` (number `>= 1`; applied in `generate` before formula evaluation)
 - `SOLANA_TX_LOOKBACK_DAYS` (`0`/empty for all-time; a positive N-day window is only supported by the Dune provider)
-- wallet settings are required only for `send`
+- wallet settings are required only for `send`: `WALLET_PRIVATE_KEY` (commented
+  out in `.env.example`) only to sign, so it can stay out of `.env` the rest of
+  the time, and `--dry-run --from <wallet>` never needs it
 - all tx-count settings, including the optional Dune ones, are listed commented
   out in `.env.example`
 
@@ -58,6 +60,12 @@ Formula syntax:
   - `sum_sqrt_total_txns_with_all_contracts`
 - default formula (same logic as before):
   - `(reward_pool/(2*total_submissions)) + ((reward_pool*txns_with_contract)/(2*total_txns_with_all_contracts))`
+- Tokens formula from the October 2026 period (half by share of transactions,
+  half by square root; it was `0.1` and `0.9` until September 2026):
+  - `((token_tx/total_txns_with_all_contracts)*0.5*reward_pool) + ((sqrt(token_tx)/sum_sqrt_total_txns_with_all_contracts)*0.5*reward_pool)`
+- `generate` prints the three formulas it applies and records them in its
+  manifest (`<runId>_generate_manifest.json`), so a payout's formulas can be
+  checked before it is sent and afterwards
 - each registry has its own formula and redistribution toggle
 - capped reward redistribution toggle (per registry):
   - `true`: current behavior, recursively redistributes leftover stipend until no entry is above `MAX_REWARD`
@@ -236,16 +244,20 @@ yarn start --mode fetch
 # Step 2: generate reward allocations from the latest fetch
 yarn start --mode generate
 
-# Step 3: send transactions on-chain
+# Step 3: check, then send the transactions on-chain (refuses a file or period already paid)
+yarn start --mode send --rewards <transactions-file>.json --dry-run
 yarn start --mode send --rewards <transactions-file>.json
 ```
+
+Every `yarn start` first runs the preflight tests (~16 s, see [Testing](#testing))
+and stops if one fails.
 
 ## Modes
 
 Run all commands from this folder:
 
 ```bash
-yarn start --mode <fetch|prefetch|filter-check|removals|generate|document|all|send|verify-counts> [args]
+yarn start --mode <fetch|prefetch|filter-check|removals|generate|document|all|send|disbursements|verify-counts> [args]
 ```
 
 ### 1) Fetch
@@ -259,13 +271,24 @@ yarn start --mode fetch [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 What it does:
 
 - fetches from Address Tags, Tokens, Domains registries
-- drops Domains entries whose chain + address is registered in the Tokens registry
+- drops Domains entries whose chain + address is registered in the Tokens
+  registry (an EVM address in any letter case: `0xAbC…` is `0xabc…`)
 - applies exclusion filters:
   - chain not configured for rewards
+  - Tokens: skip prediction-market outcome tokens (see
+    [Prediction-market outcome tokens](#prediction-market-outcome-tokens-not-rewarded))
   - Address Tags: skip EOA (`getCode == 0x`)
   - Address Tags: skip EIP-1167 proxy when implementation has code
   - Address Tags: skip ERC-721 (`supportsInterface(0x80ac58cd)`)
   - Solana Address Tags skip bytecode checks
+- looks up the Address Tags and Tokens entries (not Domains) on their chain's
+  reference explorer and lists, for review, those tagged there or whose
+  explorer cannot be read in `<runId>_explorer_check.csv`; nothing is excluded
+  for it automatically, see [Explorer tags](#explorer-tags)
+  - the bytecode checks use each chain's `rpc` in `src/utils/chains.ts`: one
+    that does not answer `eth_getCode` (3 attempts) stops the run, naming it,
+    before any transaction is counted, since an unchecked tag would be
+    rewarded; replace that RPC and rerun
 - enriches EVM and Solana rows (see [Transaction counts](#transaction-counts)):
   - `txn count`
   - Solana holders (tokens only)
@@ -311,15 +334,58 @@ What it does:
 - runs only exclusion checks (no tx counts, no Solana holders)
 - reports exclusions from:
   - chain not configured for rewards
+  - tokens appearing in Address Tags registry
+  - Tokens: prediction-market outcome tokens (the Detail column names the market)
   - Address Tags: not a contract (`getCode == 0x`)
   - Address Tags: EIP-1167 proxy
   - Address Tags: ERC-721 contract
-  - tokens appearing in Address Tags registry
 - writes a standalone CSV report and does not touch fetch manifest files
 
-File written under `files/`:
+Files written under `files/`:
 
-- `<runId>_filter_check.csv` (detail rows + summary rows with totals by reason)
+- `<runId>_filter_check.csv` (detail rows + summary rows with totals by
+  reason; the Detail column holds the evidence, e.g. the prediction market)
+- `<runId>_explorer_check.csv` (the explorer check's findings to review, see
+  [Explorer tags](#explorer-tags))
+
+### Explorer tags
+
+Address Tags and Tokens entries already tagged on their chain's reference
+explorer (`explorer` in `src/utils/chains.ts`, the program's list) are not
+rewarded; Domains (CDN) entries are exempt. `fetch` and `filter-check` look
+every such entry up, without any key, and list for review in
+`files/<runId>_explorer_check.csv` (fetch writes it before counting):
+
+- **tagged**: the explorer shows a name tag for it (in the last column):
+  - Etherscan-built explorers (etherscan.io, snowscan.xyz, celoscan.io,
+    basescan.org, lineascan.build, polygonscan.com, mega.etherscan.io,
+    hyperevmscan.io, arc.etherscan.io): the address page's public name tag,
+    the one with the tooltip "Public Name Tag (viewable by anyone)". Labels
+    and badges ("Token Contract", "DEX", the EIP-7702 "Authority") are no tags.
+  - Blockscout explorers (gnosis.blockscout.com, zksync.blockscout.com,
+    robinhoodchain.blockscout.com): the name tags of Blockscout's metadata
+    service, which their address pages show, except Blockscout's copies of
+    Kleros Scout's own entries (or every accepted entry would show up).
+- **not read**: arbiscan.io and optimistic.etherscan.io answer scripts with a
+  Cloudflare challenge, Solscan has no keyless way, and an explorer that fails
+  to answer lands here too: check those pages by hand.
+
+**Nothing is excluded for it automatically.** The rule is about tags that
+existed when the entry was submitted, and no explorer shows when a tag was
+added; Etherscan-built ones do not say where it came from either, and
+Etherscan has been reported to take name tags from Kleros Curate itself. In
+the first half of October 2026, ArcScan already showed a name tag for all 20
+Arc tokens one submitter had registered on Oct 9-13, some of them that same
+day. Open the page, decide, and put the entries that were tagged before their
+submission in `exclusions.json`, then generate and document the period again
+(see [Exclusions](#exclusions-fixing-rewards-after-they-were-generated)).
+`--mode all` documents right after fetching: its summary names the review
+file, to go through before sending.
+
+`EXPLORER_CHECK=off` skips the look-up (then check every entry by hand);
+`prefetch` never runs it. Each Etherscan-built explorer is read at one page per
+2 s, all of them side by side, and Blockscout 50 addresses per request: half a
+month's entries took under 2 minutes.
 
 ### 3) Removals + ATQ
 
@@ -389,6 +455,12 @@ You can still override explicitly:
 yarn start --mode generate --tags <file>.json --gas <file>.json
 ```
 
+Its manifest (`latest_generate_manifest.json`) records the period of the fetch
+the rewards come from, so that `send` can refuse a second payout of that month.
+With explicit files that is the period of the fetch manifest in `files/` naming
+the tags file; for a tags file no manifest names, generate warns that the
+rewards carry no period, and `send` then asks for it (`--period YYYY-MM`).
+
 Outputs:
 
 - rewards CSV
@@ -398,11 +470,134 @@ Outputs:
 ### 5) Send
 
 ```bash
+yarn start --mode send --rewards <file>.json --dry-run   # every check, nothing signed
 yarn start --mode send --rewards <file>.json
+yarn start --mode disbursements                          # what was sent
+yarn start --mode send --rewards <file>.json --dry-run --from <wallet>   # was it paid? no key needed
 ```
 
-Uses the generated transactions JSON and sends transfers exactly as before. Run
-it once per transactions file (submissions and removals are separate files).
+Pays a transactions file in PNK from `WALLET_PRIVATE_KEY` on `TX_NETWORK_ID`
+(Gnosis), one transfer at a time, waiting for each receipt. Run it once per
+transactions file (submissions, removals and ATQ are separate files).
+
+Every payout is recorded in the **disbursement ledger**, one JSON file per paid
+transactions file in `disbursements/` (`DISBURSEMENTS_DIR`). Commit it, like
+`exclusions.json`: it is the audit trail of what was paid (transaction hash,
+block and nonce of every transfer), and a machine with it refuses to pay the
+same file again. `send` refuses, before signing anything:
+
+- a payout already disbursed: same recipients and amounts, for the same kind
+  (submissions, removals, ATQ) and period;
+- a file paying exactly what another paid file paid, unless both are clearly
+  different payouts: other months, or other kinds of one month (capped
+  removal and ATQ rewards make identical files recur). A renamed copy has no
+  period, so it is refused;
+- another file for a period and kind already paid, e.g. one regenerated after
+  an exclusion: rewards are pool-based, so it is not a top-up
+  (`--allow-repeat-period` if it really is a deliberate extra payout). A file
+  of unknown kind (a hand-made name) counts as any kind;
+- a new payout whose period is unknown, because no manifest in `files/` names
+  the file (hand-made, renamed or copied without it): nothing would tell a
+  corrected file, whose amounts all differ, from a second payout of a month
+  already paid. `--period YYYY-MM` gives the month it pays, and the checks
+  above apply (`--allow-repeat-period` sends it without one). A month given
+  that way is your word, not a manifest's: it never makes a file that pays
+  exactly what a paid file paid, or transfers already paid, count as another
+  month's (the on-chain check below then also reads the last
+  `SEND_ONCHAIN_LOOKBACK_DAYS`, in case the month typed is later than the one
+  the file pays), and a file whose month contradicts an unfinished payout of
+  the same transfers, either one given with `--period`, is refused until that
+  payout is finished (unless it is that payout's own file, its month mistyped
+  before its manifest turned up: then it is finished as recorded, with a
+  warning). A payout is known as disbursed whichever way its month was given,
+  and a file already paid under its own name is never paid again. The file is
+  found under any spelling of its path (`x.json`, `./x.json`, `files/x.json`);
+- a payout whose period has not ended yet, whether a manifest or `--period`
+  gives it (e.g. the current month typed for the last one): rewards are paid
+  once their period is over;
+- transfers that repeat ones this wallet already paid: its PNK transfers since
+  the period ended (or the last `SEND_ONCHAIN_LOOKBACK_DAYS`, default 45, when
+  the file's period is unknown, or given with `--period` and ending later) are
+  read on-chain, and one to the same
+  recipient for the same amount counts, unless the ledger shows it paid a
+  clearly different payout. That catches a file paid from another machine,
+  before the ledger existed, or a corrected copy of a paid file. Nothing is
+  recorded until you decide: if those transfers are this file's (it was paid,
+  or partly paid, from elsewhere), `--skip-paid-on-chain` records them as paid
+  and sends the rest; if they only coincide with it, `--skip-onchain-check`
+  skips the check, or `--unrelated-tx <hash>` (repeatable) sets aside just the
+  transactions named, keeping the check for every other transfer. A node that
+  refuses `eth_getLogs`, no longer serves the
+  blocks back to that date, lacks a block needed to find it, whose latest
+  block is older than that date (it lags behind), or whose backends answer an
+  older latest block halfway through, makes `send` stop rather than check
+  fewer transfers, or older ones: retry, use an RPC that keeps the history
+  (`TX_RPC_URL`), or skip the check;
+- a wallet without the PNK or the gas the transfers need, a base fee above
+  `SEND_MAX_FEE_GWEI`, an RPC on another chain, a malformed file, or a
+  `*_rewards.json` record file passed by mistake;
+- a second `send` while one is running, or while another payout on the same
+  chain still has transactions in flight (a payout merely left half-paid only
+  gets a warning). Records of another chain or token (a testnet trial) never
+  block a payout;
+- a payout recorded twice, unfinished: started on two machines, its month
+  given with `--period` on one and by its manifest on the other, whose ledgers
+  were then merged. Check on the explorer which transfers were paid, keep the
+  record holding them, and remove the other once none of its transactions can
+  still be mined;
+- any send at all while a ledger file is unreadable, no longer matches its
+  own ids (its transfers, kind or period, or whether that period was given
+  with `--period`, changed after it was written, by hand or by a merge), or
+  is a copy of another one (a backup, a merge tool's): a resume pays the
+  record's transfers, so restore it from git, or remove the copy.
+
+`--dry-run --from <address>` runs the same checks for any wallet without its
+key, e.g. to confirm on another machine that a file was already paid (the
+September 2026 files are refused that way: all 12 transfers of 2026-10-06 are
+found on-chain).
+
+Interrupted runs resume without paying anyone twice: each transfer's
+transaction is signed and saved in the ledger **before** it is broadcast, and
+the transfer keeps that nonce. Rerunning the same command after a crash, a
+Ctrl+C or a timeout finds the transactions that were mined, waits for or
+rebroadcasts the very same signed bytes of those that were not (lowest nonce
+first), and only then sends the rest. Another machine resumes it the same way
+once it has the ledger (commit and pull `disbursements/`), even without the
+file's manifest in `files/`. Raising `SEND_MAX_FEE_GWEI` (or
+`SEND_MAX_PRIORITY_FEE_GWEI`) replaces a stuck transaction with the same nonce.
+Nodes take a replacement only when both fees rise by 10%, so `send` raises
+both by at least 12.5%, never above `SEND_MAX_FEE_GWEI`: when that cap is too
+low for a replacement, it stops and names the minimum. A node that
+refuses a transaction (underpriced) or answers "nonce too low" (a retried
+broadcast that was in fact mined) never makes `send` forget it: it checks the
+receipt, or stops and says what to do. A reverted transfer (nothing paid) stops
+the run and is sent again on the next one. When the nonce of a saved
+transaction was used and the node has no receipt for it, `send` looks for it
+among the wallet's PNK transfers and records it as paid if it is there (the
+balance check does not count its amount, already gone, a second time).
+Otherwise the nonce went to some other transaction and `send` stops: check
+that transaction on the explorer, then `--forget-unmined` sends the transfer
+again with a new nonce, once the wallet's balance is checked again (the other
+transaction may have spent it). It only forgets transactions an earlier run
+saved, never one the run just broadcast (a lagging node may only not show it
+mined yet). It refuses to while a payment of the same amount to the same
+recipient that the ledger does not know took the nonce, or was mined since the
+payout started (under any nonce): that one may be this transfer, signed
+elsewhere (replaced from another machine whose ledger never came back, or
+paid by hand after cancelling the stuck one), and sending it again would pay
+it twice. If the explorer shows it is, `--skip-paid-on-chain` records it as
+this transfer's payment. If a payment under another nonce only coincides with
+it, `--forget-unmined --unrelated-tx <hash>` sends the transfer again; the one
+that took its nonce is never set aside that way. Payments older than the
+payout belong to something else and are never taken for it. A receipt with
+neither a status nor logs (a proxy that strips them) counts as no receipt yet,
+never as a revert.
+
+Settings (all optional, in `.env`): `TX_RPC_URL` (default: the chain's RPC in
+`src/utils/chains.ts`), `SEND_MAX_FEE_GWEI` (2), `SEND_MAX_PRIORITY_FEE_GWEI`
+(1), `SEND_GAS_LIMIT` (100000), `SEND_RECEIPT_TIMEOUT_SECONDS` (300),
+`SEND_ONCHAIN_LOOKBACK_DAYS` (45), `SEND_COUNTDOWN_SECONDS` (10, a pause before
+the first transfer in an interactive terminal).
 
 ### 6) Document (publish to IPFS)
 
@@ -452,6 +647,71 @@ Notes on publishing:
 - If `document` fails after writing the local snapshot (e.g. the upload
   errors), the index is NOT updated — the local snapshot and index disagree
   until you re-run `document` for that period, which is safe and idempotent.
+
+## Prediction-market outcome tokens (not rewarded)
+
+Since the October 2026 period, outcome / position tokens of prediction markets
+(Seer, Overtime/Thales, Trueo, ...) submitted to the **Tokens** registry are not
+rewarded: they are cheap to mint by the hundred (every market spawns one token
+per outcome) and were being farmed. `fetch`, `prefetch` and `filter-check` drop
+them with the reason `prediction market outcome token`, before the transaction
+counts, so the tokens pool is split only among real submissions.
+
+Detection is **purely on-chain** (`src/utils/prediction-market-detection.ts`);
+the Website / Name fields are submitter-controlled and are never consulted.
+Every EVM token of the period is checked, batched per chain through Multicall3:
+
+- **Generic probe**: the token is a Gnosis `Wrapped1155` ERC-20 wrapper around
+  an ERC-1155 ConditionalTokens position (`multiToken()` returns a contract that
+  is ERC-1155 and answers `getOutcomeSlotCount`). This catches every protocol
+  built on the Gnosis Conditional Tokens Framework (Seer categorical, scalar,
+  futarchy and Circles markets, Omen positions, ...) on every chain, without
+  knowing the protocol.
+- **Protocol probes**: exact matches that also name the market in the log and
+  the `Detail` column: Seer market factories (`allMarkets()` → `wrappedOutcome(i)`
+  on Gnosis, Ethereum, Base, Optimism), Overtime/Thales position tokens
+  (`market()` + manager `isKnownMarket` on Optimism, Arbitrum, Base, Polygon)
+  and Trueo YES/NO tokens (Base). The addresses live in
+  `PREDICTION_MARKET_REGISTRIES` in that file: add a line there to cover a
+  new factory, or a new probe function for a protocol with a different shape.
+
+Reliability rules:
+
+- An RPC failure **aborts the run** after retries (rotating through the chain's
+  configured rpc and a few public fallbacks, `FALLBACK_RPCS`): rewards are
+  pool-based, so silently keeping an undetected token would underpay everyone
+  else. Re-run. Rate limits (HTTP 429) and timeouts rotate to the next rpc;
+  only a genuine EVM revert is treated as "not an outcome token". A whole
+  Multicall3 batch reverting on one rpc (a broken node, or a token burning the
+  batch's gas) is asked again on every other rpc of the chain: any answer is
+  used; a revert, out of gas or empty answer there splits the batch as before
+  (where more than 5 targets or 10 calls of one batch failing on their own
+  stop the run as a broken rpc); and the run aborts when none can tell.
+- A token's address is read as the transaction counts read it: trimmed, in
+  any letter case (`0X…` too), so an oddly written one is never skipped.
+- The filter only applies to periods starting on or after **2026-10-01**, when
+  the rule started, so re-running an older month reproduces what was paid.
+  `PREDICTION_MARKET_FILTER_SINCE=YYYY-MM-DD` in `.env` moves that date
+  (`2000-01-01` applies it to every period).
+- Chains without Multicall3 fall back to one `eth_call` per probe (slower).
+- `PM_DETECT_DEBUG=1` logs the timing of every Multicall3 batch.
+- Removals are unaffected: removing a prediction-market token still earns the
+  usual removal reward. Use `exclusions.json` if a specific removal should not.
+
+Not detected (none submitted so far; check such tokens by hand and use
+`exclusions.json`): Solana outcome tokens (PNP, DFlow-Kalshi, Jupiter Forecast,
+MetaDAO…; the 54 Solana tokens of September 2026 have none as mint authority),
+Overtime/Thales positions of markets their manager has expired, Thales ranged
+IN/OUT positions, Context Markets on Base, and Polymarket ERC-20 wrappers that
+have no `multiToken()`. Seer outcome tokens submitted to **Address Tags** are
+not this rule's business either: they pass the address checks as contracts.
+
+Validated on Aug–Sep 2026 (250/250 Seer tokens detected, 0 false positives on
+the other 277 tokens, 28 s), on Jun 2025–Jul 2026 (2,084 tokens, 0 false
+positives, 81 s) and on the published September 2026 tags (433 EVM tokens: all
+329 of the farmed Seer tokens, nothing else, 26 s). Chains with Seer factories
+cost ~10–40 s each (the markets are enumerated on every run); the rest take well
+under a second.
 
 ## Exclusions: fixing rewards after they were generated
 
@@ -544,7 +804,8 @@ erase the historical months.
 
 **5. Verify before sending.** Compare old vs new transactions csv — only the
 affected registry's recipients should have moved. Then `--mode send` the new
-transactions file.
+transactions file. If the old one was already sent, `send` refuses the new one
+(same period and kind): see the warning below.
 
 > ⚠️ Do all of this **before** `--mode send`. Amounts redistribute, so if the
 > old rewards were already paid on-chain there is no automated diff/claw-back —
@@ -582,7 +843,7 @@ yarn start --mode all --period YYYY-MM
 ```
 
 `all` deliberately does **not** send. Review the amounts, then disburse
-manually. Note the run ids differ per step: the submissions transactions file
+manually (`--dry-run` first; `send` refuses any file or period already paid). Note the run ids differ per step: the submissions transactions file
 is named with the **generate** run's timestamp, while the removals and ATQ
 files share the **removals** run's timestamp (check
 `latest_generate_manifest.json` / `latest_removals_manifest.json` for the
@@ -602,3 +863,62 @@ yarn start --mode generate     # submissions: reward allocations
 yarn start --mode removals     # removals + ATQ rewards + reports
 yarn start --mode document --period YYYY-MM   # publish the combined record to IPFS
 ```
+
+## Testing
+
+```bash
+yarn test         # everything: type check + all tests (~1 min)
+yarn test:fast    # the fast tests (~16 s), also run before every `yarn start`
+yarn test:slow    # the slow scenarios only
+yarn typecheck    # a real type check of src/ and test/
+yarn test:coverage   # everything, with line/branch coverage per file (~95% of lines)
+node test/run.js test/integration/send.test.ts --grep "dry run"   # some tests
+```
+
+`yarn start` runs the fast tests first (`prestart`) and does not run the
+command if one fails: the payout math, the outputs and the send safeguards are
+checked against the working tree right before they are used.
+`SKIP_TESTS=1 yarn start …` skips them (at your own risk; on Windows,
+`set SKIP_TESTS=1 && yarn start …` in cmd, `$env:SKIP_TESTS=1; yarn start …`
+in PowerShell, which keep it set for every later command in that window:
+`set SKIP_TESTS=` or `Remove-Item Env:SKIP_TESTS` turns the tests back on). GitHub Actions runs `yarn test` on every pull request
+(`.github/workflows/test.yml`), and again with the clock three years ahead
+(`TESTS_CLOCK_SHIFT_DAYS=1100`): a test that only passes near the dates of its
+fixtures would one day block every `yarn start`, so it must fail there first. They also run
+on Node 18 (the Windows fallback above), which lacks the per-test timeout of
+Node 20.11+: a hanging run is stopped after 15 minutes either way
+(`TESTS_TIMEOUT_SECONDS`), every test process with it.
+
+The tests use Node's built-in runner and ts-node, no extra dependency, and run
+offline: every test process (and every CLI a test starts) preloads
+`test/support/hermetic.js`, which blocks network access beyond `127.0.0.1`,
+runs in a temporary directory (so `files/`, `exclusions.json` and
+`disbursements/` are never the repo's) and replaces the shell's pipeline
+settings with the documented ones. The chains, indexer and APIs are local mocks
+in `test/support/`: an EVM node with a PNK token (`evm.ts`), Solana RPC URLs
+that fail the way real providers do plus Jupiter (`solana.ts`), the Curate
+indexer (`subgraph.ts`) and Dune (`dune.ts`).
+
+What is covered:
+
+- `test/unit`: the reward formulas and pool math (caps, redistribution, the
+  Solana divider, a pool never overspent), removal and ATQ rewards, exclusions,
+  every output file and manifest, the IPFS document and index, the tx-count
+  cache and its lock, the ledger, the time budget, and the helpers.
+- `test/integration`: fetching tags, removals and ATQ from the indexer; the
+  address-tag checks (EOA, EIP-1167, ERC-721); HyperSync counting (cutoffs,
+  cache top-ups, resume, splits, pre-Byzantium Ethereum); the Solana RPC pool,
+  holders and enrichment; the Dune lanes; the routines; `send` against the mock
+  node (refusals, crashes and resumes at every step, fee replacement, reverts);
+  and the **September 2026 golden test**: `generate` and `document` on that
+  period's inputs must reproduce the published payout to the wei
+  (`test/fixtures/september-2026/`, change it only when a payout rule changes
+  on purpose).
+- `test/scenarios` (`*.slow.test.ts`): Solana counts under faulty providers
+  (short and empty pages, missing blocks, a moving tip, interrupted samples and
+  maps), the `--max-minutes` budget, lock races between processes, the CLI,
+  and a whole month offline: `--mode all`, `send` of the three files, every
+  attempt to pay again refused.
+
+`yarn start --mode verify-counts` remains the live check of the real providers
+(it needs the keys and the network).

@@ -4,3 +4,5 @@ node_modules
 files
 .yarn/
 .DS_Store
+disbursements/.lock
+disbursements/*.tmp

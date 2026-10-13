@@ -20,6 +20,11 @@ export const chainDisplayName = (chainId: string): string =>
 // these chains are considered rewarded by the curate incentive program,
 // if any chain becomes unrewarded by the program, make sure to comment that chain here,
 // and the script will exclude it from the rewards.
+//
+// `explorer` is the program's reference explorer of the chain (where an entry
+// already tagged is not rewarded; the October 2026 rules list them), `rpc` a
+// public node the address-tag checks must be able to reach: a chain whose RPC
+// does not answer stops the run (see address-tag-validation.ts).
 
 export const chains: ChainConfig[] = [
   {
@@ -27,7 +32,7 @@ export const chains: ChainConfig[] = [
     namespaceId: 'eip155',
     name: 'Gnosis Chain',
     label: 'GNO',
-    explorer: 'gnosisscan.io',
+    explorer: 'gnosis.blockscout.com',
     rpc: 'https://rpc.gnosischain.com'
   },
   {
@@ -35,8 +40,8 @@ export const chains: ChainConfig[] = [
     namespaceId: 'eip155',
     name: 'zkSync Mainnet',
     label: 'zkSync',
-    explorer: 'era.zksync.network',
-    rpc: 'https://1rpc.io/zksync2-era'
+    explorer: 'zksync.blockscout.com',
+    rpc: 'https://mainnet.era.zksync.io'
   },
   {
     id: '43114',
@@ -92,7 +97,7 @@ export const chains: ChainConfig[] = [
     name: 'Ethereum Mainnet',
     label: 'ETH',
     explorer: 'etherscan.io',
-    rpc: 'https://eth.llamarpc.com'
+    rpc: 'https://ethereum-rpc.publicnode.com'
   },
   {
     id: '137',
@@ -124,7 +129,7 @@ export const chains: ChainConfig[] = [
     name: 'Optimism',
     label: 'OP',
     explorer: 'optimistic.etherscan.io',
-    rpc: 'https://op-pokt.nodies.app'
+    rpc: 'https://mainnet.optimism.io'
   },
   {
     id: '59144',
@@ -139,7 +144,7 @@ export const chains: ChainConfig[] = [
     namespaceId: 'eip155',
     name: 'MegaETH Mainnet',
     label: 'MegaETH',
-    explorer: 'megaeth.blockscout.com',
+    explorer: 'mega.etherscan.io',
     rpc: 'https://mainnet.megaeth.com/rpc'
   },
   {
