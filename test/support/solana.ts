@@ -21,7 +21,7 @@ export interface Fault {
   // HTTP 400 on getSignaturesForAddress for an address after this many calls
   failAfter?: { [address: string]: number }
   // HTTP 400 on getSignaturesForAddress for an address while this returns true
-  failWhen?: { [address: string]: () => boolean }
+  failWhen?: Map<string, () => boolean>
   // answer getSignaturesForAddress for an address this many ms late
   delay?: { [address: string]: number }
   // HTTP 403 for these methods
@@ -112,7 +112,7 @@ export class MockChain {
         if ((req.url || "").startsWith("/jupiter")) {
           this.count("jupiter")
           if (this.jupiterStatus !== 200) return reply(this.jupiterStatus, { error: "down" })
-          const query = new URL(req.url || "", "http://x").searchParams.get("query") || ""
+          const query = new URL(req.url || "", "https://mock.invalid").searchParams.get("query") || ""
           const out = query
             .split(",")
             .filter((mint) => this.jupiter[mint])
@@ -182,7 +182,8 @@ export class MockChain {
       if (fault.failAfter && fault.failAfter[address] !== undefined) {
         if (this.calls[`gsfa:${address}`] > fault.failAfter[address]) throw { http: 400, message: "injected failure" }
       }
-      if (fault.failWhen && fault.failWhen[address] && fault.failWhen[address]()) {
+      const failNow = fault.failWhen && fault.failWhen.get(address)
+      if (failNow && failNow()) {
         throw { http: 400, message: "injected failure" }
       }
       const list = this.histories[address] || []

@@ -18,5 +18,7 @@ jobs:
         with:
           node-version: 20.18.3
           cache: yarn
-      - run: yarn install --frozen-lockfile
+      # No dependency needs its install scripts here (they set up git hooks,
+      # print notices, or build an optional native module with a JS fallback).
+      - run: yarn install --frozen-lockfile --ignore-scripts
       - run: yarn test

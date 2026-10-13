@@ -235,7 +235,7 @@ describe("Solana counts: interrupted runs", () => {
       const at = Date.now()
       for (const f of c.faults) {
         f.delay = { [e2]: 150 }
-        f.failWhen = { [e2]: () => Date.now() > at + 500 }
+        f.failWhen = new Map([[e2, () => Date.now() > at + 500]])
       }
     })
     assert.ok(await failsWith(() => countSolana(c, [tag(e1), tag(e2)])))

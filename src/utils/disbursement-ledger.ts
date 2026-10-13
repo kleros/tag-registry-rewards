@@ -71,9 +71,11 @@ export const contentId = (
   token: string,
   transfers: { recipient: string; amount: string }[]
 ): string => {
+  // By code unit, as Array.prototype.sort does by default: never by locale,
+  // which could order them otherwise on another machine and change the id.
   const pairs = transfers
     .map((t) => `${t.recipient.toLowerCase()}:${t.amount}`)
-    .sort()
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
   return sha256(JSON.stringify({ chainId, token: token.toLowerCase(), transfers: pairs }))
 }
 

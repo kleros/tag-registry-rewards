@@ -49,7 +49,7 @@ const findTests = (dir) => {
     if (entry.isDirectory()) out.push(...findTests(full))
     else if (entry.name.endsWith(".test.ts")) out.push(full)
   }
-  return out.sort()
+  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
 }
 const isSlow = (file) => file.endsWith(".slow.test.ts")
 
@@ -113,7 +113,8 @@ const started = Date.now()
 const ownGroup = process.platform !== "win32"
 const stopAll = (child, signal) => {
   if (!ownGroup) {
-    spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" })
+    const taskkill = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe")
+    spawnSync(taskkill, ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" })
     return
   }
   try {
