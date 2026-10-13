@@ -466,6 +466,9 @@ main().catch((err) => {
   const keyedUrls = String(process.env.SOLANA_RPC_URLS || "")
     .split(",")
     .concat(String(conf.XDAI_GTCR_SUBGRAPH_URL || ""))
-  console.error(redactSecrets(inspect(err), keyedUrls))
+  // A refusal of send is an answer, not a crash: its message says why and
+  // what to do, and a stack trace would only bury it.
+  const refused = err instanceof Error && err.name === "SendRefusedError"
+  console.error(redactSecrets(refused ? err.message : inspect(err), keyedUrls))
   process.exit(1)
 })

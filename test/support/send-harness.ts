@@ -6,11 +6,17 @@ import { DisbursementRecord, listDisbursements } from "../../src/utils/disbursem
 import { MockEvm } from "./evm"
 import { setEnv } from "./env"
 import { freshWorkdir, writeJson } from "./files"
-import { evmAddress, unix } from "./fixtures"
+import { evmAddress } from "./fixtures"
 
 // What the send tests share: per test a fresh working directory, a funded
 // random wallet and a mock Gnosis node (after the September 2026 period,
 // which most tests pay). The bindings below are live: they change per test.
+//
+// The node's blocks start an hour before the test runs, never at a fixed
+// date: send reads the wallet's history from the period's end, but also from
+// `now − SEND_ONCHAIN_LOOKBACK_DAYS` (a file of unknown period) and from the
+// run's start (a used nonce), and a chain fixed in time drops out of those
+// windows as the calendar moves on (a fixed 2026-10-02 failed from 2026-11-16).
 
 export const PNK = (n: number | string): BigNumber => utils.parseEther(String(n))
 export const SEPTEMBER = { periodStart: "2026-09-01T00:00:00.000Z", periodEnd: "2026-10-01T00:00:00.000Z" }
@@ -58,7 +64,7 @@ export const installSendHarness = (): void => {
     wallet = Wallet.createRandom()
     lines.length = 0
     evm = (null as unknown) as MockEvm
-    await startChain(unix("2026-10-02T00:00:00Z"))
+    await startChain(Math.floor(Date.now() / 1000) - 3600)
   })
   afterEach(async () => {
     restoreEnv()

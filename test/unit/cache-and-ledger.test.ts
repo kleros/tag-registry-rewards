@@ -145,25 +145,32 @@ describe("one run at a time (lock, fail closed)", () => {
 })
 
 describe("disbursement ledger", () => {
-  const record = (overrides: Partial<DisbursementRecord> = {}): DisbursementRecord => ({
-    version: 1,
-    id: "ab".repeat(32),
-    contentId: "cd".repeat(32),
-    file: "1.json",
-    fileSha256: "00",
-    kind: "submissions",
-    periodStart: "2026-09-01T00:00:00.000Z",
-    periodEnd: "2026-10-01T00:00:00.000Z",
-    chainId: 100,
-    token: "0xcb3231aBA3b451343e0Fddfc45883c842f223846",
-    from: "0x0000000000000000000000000000000000000001",
-    status: "completed",
-    total: "1",
-    createdAt: "2026-10-06T00:00:00.000Z",
-    updatedAt: "2026-10-06T00:00:00.000Z",
-    transfers: [{ recipient: "0x0000000000000000000000000000000000000002", amount: "1", status: "confirmed" }],
-    ...overrides,
-  })
+  // A record as send writes it: its ids computed from its transfers, kind and period.
+  const record = (overrides: Partial<DisbursementRecord> = {}): DisbursementRecord => {
+    const r: DisbursementRecord = {
+      version: 1,
+      id: "",
+      contentId: "",
+      file: "1.json",
+      fileSha256: "00",
+      kind: "submissions",
+      periodStart: "2026-09-01T00:00:00.000Z",
+      periodEnd: "2026-10-01T00:00:00.000Z",
+      chainId: 100,
+      token: "0xcb3231aBA3b451343e0Fddfc45883c842f223846",
+      from: "0x0000000000000000000000000000000000000001",
+      status: "completed",
+      total: "1",
+      createdAt: "2026-10-06T00:00:00.000Z",
+      updatedAt: "2026-10-06T00:00:00.000Z",
+      transfers: [{ recipient: "0x0000000000000000000000000000000000000002", amount: "1", status: "confirmed" }],
+      ...overrides,
+    }
+    r.contentId = contentId(r.chainId, r.token, r.transfers)
+    r.id = disbursementId(r.contentId, r.kind, r.periodStart, r.periodEnd)
+    return r
+  }
+  const AUGUST = { periodStart: "2026-08-01T00:00:00.000Z", periodEnd: "2026-09-01T00:00:00.000Z" }
 
   it("identifies what a payout pays: chain, token, recipients and amounts, in any order or casing", () => {
     const a = [
@@ -195,16 +202,18 @@ describe("disbursement ledger", () => {
     assert.equal(periodLabel("2026-12-01T00:00:00.000Z", "2027-01-01T00:00:00.000Z"), "2026-12")
     assert.equal(periodLabel("2026-09-01T00:00:00.000Z", "2026-09-16T00:00:00.000Z"), "2026-09-01_2026-09-16")
     assert.equal(periodLabel(undefined, undefined), "unknown")
-    assert.equal(recordFileName(record()), `2026-09-submissions-${"ab".repeat(6)}.json`)
-    assert.equal(recordFileName(record({ periodStart: undefined, periodEnd: undefined, kind: "atq" })), `unknown-atq-${"ab".repeat(6)}.json`)
+    const september = record()
+    assert.equal(recordFileName(september), `2026-09-submissions-${september.id.slice(0, 12)}.json`)
+    const unknown = record({ periodStart: undefined, periodEnd: undefined, kind: "atq" })
+    assert.equal(recordFileName(unknown), `unknown-atq-${unknown.id.slice(0, 12)}.json`)
   })
 
   it("saves records durably and lists them oldest first", () => {
     assert.deepEqual(listDisbursements(), [])
-    saveDisbursement(record({ id: "cd".repeat(32), createdAt: "2026-10-07T00:00:00.000Z" }))
+    saveDisbursement(record({ ...AUGUST, createdAt: "2026-10-07T00:00:00.000Z" }))
     saveDisbursement(record())
     const records = listDisbursements()
-    assert.deepEqual(records.map((r) => r.id.slice(0, 2)), ["ab", "cd"])
+    assert.deepEqual(records.map((r) => r.periodStart), ["2026-09-01T00:00:00.000Z", AUGUST.periodStart])
     assert.equal(disbursementsDir(), resolve("disbursements"))
     assert.ok(readdirSync(disbursementsDir()).every((name) => name.endsWith(".json")), "no temporary file left")
     assert.ok(records[0].updatedAt > "2026-10-06T00:00:00.000Z", "updatedAt is refreshed on save")
@@ -214,6 +223,25 @@ describe("disbursement ledger", () => {
     mkdirSync(disbursementsDir(), { recursive: true })
     writeFileSync(join(disbursementsDir(), "x.json"), JSON.stringify({ version: 2 }))
     assert.throws(() => listDisbursements(), /is not a disbursement record/)
+  })
+
+  it("stops on a record whose transfers, kind or period changed after it was written", () => {
+    const path = saveDisbursement(record())
+    const original = JSON.parse(readFileSync(path).toString())
+    const changes: [string, object][] = [
+      ["a recipient", { transfers: [{ ...original.transfers[0], recipient: "0x0000000000000000000000000000000000000bad" }] }],
+      ["an amount", { transfers: [{ ...original.transfers[0], amount: "2" }] }],
+      ["the kind", { kind: "atq" }],
+      ["the period", AUGUST],
+      ["the content id", { contentId: "00".repeat(32) }],
+      ["the chain", { chainId: 10200 }],
+    ]
+    for (const [what, change] of changes) {
+      writeFileSync(path, JSON.stringify({ ...original, ...change }))
+      assert.throws(() => listDisbursements(), /does not match its own ids.*Restore it from git before sending/s, what)
+    }
+    writeFileSync(path, JSON.stringify({ ...original, status: "in-progress", transfers: [{ ...original.transfers[0], status: "pending" }] }))
+    assert.equal(listDisbursements().length, 1, "progress is no change of what it pays")
   })
 
   it("honours DISBURSEMENTS_DIR", async () => {

@@ -14,6 +14,27 @@ const net = require("net")
 const os = require("os")
 const path = require("path")
 
+// TESTS_CLOCK_SHIFT_DAYS=n runs the tests n days ahead (CI runs them years
+// ahead): a test that only passes while today is close to its fixtures' dates
+// (a mock chain fixed in time, a month hard-coded as "not over yet") fails at
+// once, not on the day it would have started to block `yarn start`. A mock
+// chain fixed at 2026-10-02 once failed that way from 2026-11-16.
+const shiftDays = Number(process.env.TESTS_CLOCK_SHIFT_DAYS || 0)
+if (shiftDays) {
+  const offset = shiftDays * 86400000
+  const RealDate = Date
+  class ShiftedDate extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) super(RealDate.now() + offset)
+      else super(...args)
+    }
+    static now() {
+      return RealDate.now() + offset
+    }
+  }
+  global.Date = ShiftedDate
+}
+
 const isLoopback = (host) =>
   host === "localhost" || host === "::1" || host === "::ffff:127.0.0.1" || /^127\./.test(String(host))
 

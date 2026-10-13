@@ -131,6 +131,7 @@ describe("CLI send, end to end", () => {
       const again = await runCli(["--mode", "send", "--rewards", file], { cwd, env })
       assert.equal(again.code, 1)
       assert.match(again.stderr, /Refusing to send: this payout was already disbursed/)
+      assert.doesNotMatch(again.stderr, /\n\s+at /, "a refusal is printed as its message, not as a crash")
       assert.equal(evm.transfersFrom(wallet.address).length, 2, "nothing sent the second time")
 
       const list = await runCli(["--mode", "disbursements"], { cwd })

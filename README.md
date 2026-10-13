@@ -241,7 +241,7 @@ yarn start --mode send --rewards <transactions-file>.json --dry-run
 yarn start --mode send --rewards <transactions-file>.json
 ```
 
-Every `yarn start` first runs the preflight tests (~8 s, see [Testing](#testing))
+Every `yarn start` first runs the preflight tests (~16 s, see [Testing](#testing))
 and stops if one fails.
 
 ## Modes
@@ -438,8 +438,15 @@ same file again. `send` refuses, before signing anything:
   the file (hand-made, renamed or copied without it): nothing would tell a
   corrected file, whose amounts all differ, from a second payout of a month
   already paid. `--period YYYY-MM` gives the month it pays, and the checks
-  above apply (`--allow-repeat-period` sends it without one). The file is
-  found under any spelling of its path (`x.json`, `./x.json`, `files/x.json`);
+  above apply (`--allow-repeat-period` sends it without one). A month given
+  that way is your word, not a manifest's: it never makes a file that pays
+  exactly what a paid file paid, or transfers already paid, count as another
+  month's, and one that contradicts an unfinished payout of the same transfers
+  is refused (finish that one without `--period`). The file is found under any
+  spelling of its path (`x.json`, `./x.json`, `files/x.json`);
+- a payout whose period has not ended yet, whether a manifest or `--period`
+  gives it (e.g. the current month typed for the last one): rewards are paid
+  once their period is over;
 - transfers that repeat ones this wallet already paid: its PNK transfers since
   the period ended (or the last `SEND_ONCHAIN_LOOKBACK_DAYS`, default 45, when
   the file's period is unknown) are read on-chain, and one to the same
@@ -450,16 +457,20 @@ same file again. `send` refuses, before signing anything:
   or partly paid, from elsewhere), `--skip-paid-on-chain` records them as paid
   and sends the rest; if they only coincide with it, `--skip-onchain-check`
   skips the check. A node that refuses `eth_getLogs`, no longer serves the
-  blocks back to that date, or lacks a block needed to find it, makes `send`
-  stop rather than check fewer transfers, or older ones: retry, use an RPC that
-  keeps the history (`TX_RPC_URL`), or skip the check;
+  blocks back to that date, lacks a block needed to find it, or whose latest
+  block is older than that date (it lags behind), makes `send` stop rather than
+  check fewer transfers, or older ones: retry, use an RPC that keeps the
+  history (`TX_RPC_URL`), or skip the check;
 - a wallet without the PNK or the gas the transfers need, a base fee above
   `SEND_MAX_FEE_GWEI`, an RPC on another chain, a malformed file, or a
   `*_rewards.json` record file passed by mistake;
 - a second `send` while one is running, or while another payout on the same
   chain still has transactions in flight (a payout merely left half-paid only
   gets a warning). Records of another chain or token (a testnet trial) never
-  block a payout.
+  block a payout;
+- any send at all while a ledger file is unreadable, or no longer matches its
+  own ids (its transfers, kind or period changed after it was written, by hand
+  or by a merge): a resume pays the record's transfers, so restore it from git.
 
 `--dry-run --from <address>` runs the same checks for any wallet without its
 key, e.g. to confirm on another machine that a file was already paid (the
@@ -488,9 +499,17 @@ balance check does not count its amount, already gone, a second time).
 Otherwise the nonce went to some other transaction and `send` stops: check
 that transaction on the explorer, then `--forget-unmined` sends the transfer
 again with a new nonce, once the wallet's balance is checked again (the other
-transaction may have spent it). It refuses to while the wallet has, since the payout
-started, a transfer of the same amount to the same recipient that the ledger
-does not know: that one may be this transfer, signed elsewhere.
+transaction may have spent it). It only forgets transactions an earlier run
+saved, never one the run just broadcast (a lagging node may only not show it
+mined yet). It refuses to while the transaction that took the nonce pays the
+same recipient the same amount and the ledger does not know it: that one may be
+this transfer, signed elsewhere (replaced from another machine whose ledger
+never came back, or paid by hand). If the explorer shows it is,
+`--skip-paid-on-chain` records it as this transfer's payment. A payment of the
+same amount to the same recipient under another nonce belongs to something
+else, and is never taken for this transfer. A receipt
+with neither a status nor logs (a proxy that strips them) counts as no receipt
+yet, never as a revert.
 
 Settings (all optional, in `.env`): `TX_RPC_URL` (default: the chain's RPC in
 `src/utils/chains.ts`), `SEND_MAX_FEE_GWEI` (2), `SEND_MAX_PRIORITY_FEE_GWEI`
@@ -702,7 +721,7 @@ yarn start --mode document --period YYYY-MM   # publish the combined record to I
 
 ```bash
 yarn test         # everything: type check + all tests (~1 min)
-yarn test:fast    # the fast tests (~8 s), also run before every `yarn start`
+yarn test:fast    # the fast tests (~16 s), also run before every `yarn start`
 yarn test:slow    # the slow scenarios only
 yarn typecheck    # a real type check of src/ and test/
 yarn test:coverage   # everything, with line/branch coverage per file (~95% of lines)
@@ -712,8 +731,12 @@ node test/run.js test/integration/send.test.ts --grep "dry run"   # some tests
 `yarn start` runs the fast tests first (`prestart`) and does not run the
 command if one fails: the payout math, the outputs and the send safeguards are
 checked against the working tree right before they are used.
-`SKIP_TESTS=1 yarn start …` skips them (at your own risk). GitHub Actions runs
-`yarn test` on every pull request (`.github/workflows/test.yml`). They also run
+`SKIP_TESTS=1 yarn start …` skips them (at your own risk; on Windows,
+`set SKIP_TESTS=1 && yarn start …` in cmd, `$env:SKIP_TESTS=1; yarn start …`
+in PowerShell). GitHub Actions runs `yarn test` on every pull request
+(`.github/workflows/test.yml`), and again with the clock three years ahead
+(`TESTS_CLOCK_SHIFT_DAYS=1100`): a test that only passes near the dates of its
+fixtures would one day block every `yarn start`, so it must fail there first. They also run
 on Node 18 (the Windows fallback above), which lacks the per-test timeout of
 Node 20.11+: a hanging run is stopped after 15 minutes either way
 (`TESTS_TIMEOUT_SECONDS`), every test process with it.

@@ -47,6 +47,8 @@ export interface SendChain {
   signTransfer(recipient: string, amount: BigNumber, nonce: number, fees: Fees): Promise<{ hash: string; raw: string }>
   broadcast(raw: string): Promise<BroadcastResult>
   receipt(hash: string): Promise<Receipt | null>
+  // A transaction's sender and nonce, or null when the node does not know it.
+  transaction(hash: string): Promise<{ from: string; nonce: number } | null>
   // Null when the node does not serve that block (pruned, or lagging behind).
   blockTimestamp(blockNumber: number): Promise<number | null>
   // Token transfers from the wallet in blocks at or after `sinceUnix`.
@@ -91,11 +93,20 @@ const rpcErrorText = (err: unknown): string => {
 }
 
 // The node's answer, in the words of geth, Erigon, Nethermind, Besu and Reth.
+// Erigon answers a transaction its pool already holds with "existing txn with
+// same hash", and a same-nonce one that does not raise both fees enough with
+// "could not replace existing tx" (both as INTERNAL_ERROR).
 export const classifyBroadcastError = (err: unknown): BroadcastResult | null => {
   const text = rpcErrorText(err).toLowerCase()
-  if (/already known|known transaction|alreadyknown|already imported|already in the pool/.test(text)) return "known"
+  if (/already known|known transaction|alreadyknown|already imported|already in the pool|existing txn? with same hash/.test(text)) {
+    return "known"
+  }
   if (/nonce too low|nonce is too low|oldnonce|noncetoolow|nonce has already been used/.test(text)) return "nonce-too-low"
-  if (/replacement transaction underpriced|replacement.{0,20}not allowed|replacementnotallowed|replacement fee too low/.test(text)) {
+  if (
+    /replacement transaction underpriced|replacement.{0,20}not allowed|replacementnotallowed|replacement fee too low|could not replace existing tx/.test(
+      text
+    )
+  ) {
     return "replacement-underpriced"
   }
   if (/underpriced|fee too low|feetoolow|less than (the )?block base fee|below (the )?(minimum|base fee)|gas price too low/.test(text)) {
@@ -140,19 +151,27 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
   }
   const day = (unix: number): string => new Date(unix * 1000).toISOString().slice(0, 10)
 
-  // The first block whose timestamp is >= `unix` (the latest + 1 when there is
-  // none): back from the latest block in doubling steps, then a binary search.
-  // It must be exact: from too late a block the logs would miss transfers, from
-  // too early a block they would count older ones as this payout's. So a block
-  // the node lacks stops the search, unless it is below the oldest block the
-  // node serves (history expiry, pruning), which must predate `unix`.
+  // The first block whose timestamp is >= `unix`: back from the latest block in
+  // doubling steps, then a binary search. It must be exact: from too late a
+  // block the logs would miss transfers, from too early a block they would
+  // count older ones as this payout's. So a block the node lacks stops the
+  // search, unless it is below the oldest block the node serves (history
+  // expiry, pruning), which must predate `unix`. A latest block older than
+  // `unix` stops it too: the node lags behind, or `unix` is still to come
+  // (a period that has not ended), and reading no history from there would
+  // pass any payout as unpaid.
   const firstBlockAtOrAfter = async (unix: number): Promise<number> => {
     const head = await getBlock("latest")
     if (!head || head.number === undefined || head.number === null || head.timestamp === undefined || head.timestamp === null) {
       throw new Error("the RPC returned no latest block")
     }
     let hi = toNumber(head.number) // its timestamp is >= unix
-    if (toNumber(head.timestamp) < unix) return hi + 1
+    if (toNumber(head.timestamp) < unix) {
+      throw new Error(
+        `the node's latest block, ${hi}, is of ${new Date(toNumber(head.timestamp) * 1000).toISOString()}, before ` +
+          `${new Date(unix * 1000).toISOString()} where the history to check starts: the node lags behind, or that date is still to come`
+      )
+    }
     let lo = -1 // older than unix, or before genesis
     for (let step = 1024; hi > 0; step *= 2) {
       const candidate = Math.max(0, hi - step)
@@ -261,8 +280,12 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
       if (!r || r.blockNumber === null || r.blockNumber === undefined) return null
       if (r.status !== undefined && r.status !== null) return { status: toNumber(r.status), blockNumber: toNumber(r.blockNumber) }
       // No status (a node that leaves it out): the token's Transfer event from
-      // the wallet is what a successful transfer leaves behind.
-      const logs: { address?: string; topics?: string[] }[] = Array.isArray(r.logs) ? r.logs : []
+      // the wallet is what a successful transfer leaves behind. Without its
+      // logs either, nothing tells a success from a revert: taken as no
+      // receipt yet (a rerun finds the transfer in the wallet's logs), never
+      // as a revert, which would send the transfer again.
+      if (!Array.isArray(r.logs)) return null
+      const logs: { address?: string; topics?: string[] }[] = r.logs
       const paid = logs.some(
         (log) =>
           String(log.address || "").toLowerCase() === token.toLowerCase() &&
@@ -272,11 +295,21 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
       )
       return { status: paid ? 1 : 0, blockNumber: toNumber(r.blockNumber) }
     },
+    transaction: async (hash) => {
+      const tx = await rpc("eth_getTransactionByHash", [hash])
+      if (!tx || !tx.from || tx.nonce === undefined || tx.nonce === null) return null
+      return { from: utils.getAddress(tx.from), nonce: toNumber(tx.nonce) }
+    },
     blockTimestamp: (blockNumber) => timestampOf(blockNumber),
     outgoingTransfers: async (sinceUnix) => {
-      const latest = toNumber(await rpc("eth_blockNumber", []))
       const firstBlock = await firstBlockAtOrAfter(sinceUnix)
-      if (firstBlock > latest) return []
+      // Read after the search, so it covers every block the search saw. An
+      // older answer means the RPC's backends disagree: reading up to it would
+      // skip the blocks between.
+      const latest = toNumber(await rpc("eth_blockNumber", []))
+      if (latest < firstBlock) {
+        throw new Error(`the RPC answered ${latest} as its latest block after serving block ${firstBlock} (its backends disagree)`)
+      }
       const logs = await getLogs({ address: token, topics: [transferTopic, fromTopic] }, firstBlock, latest)
       return logs
         .filter((log) => !log.removed && log.topics.length >= 3)

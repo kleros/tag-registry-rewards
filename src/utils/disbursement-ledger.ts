@@ -46,6 +46,9 @@ export interface DisbursementRecord {
   kind: DisbursementKind
   periodStart?: string
   periodEnd?: string
+  // The period was stated with --period (no manifest gave it): the operator's
+  // word, which never proves this payout differs from another one.
+  periodStated?: boolean
   chainId: number
   token: string
   from: string
@@ -109,7 +112,9 @@ export const recordPath = (record: DisbursementRecord): string => join(disbursem
 export const displayPath = (path: string): string => relative(process.cwd(), path) || path
 
 // Every record, oldest first. A record that cannot be read stops the run: a
-// ledger silently skipped could let a paid file be paid again.
+// ledger silently skipped could let a paid file be paid again. So does one
+// whose transfers or kind and period no longer match its ids (edited by hand,
+// or by a bad merge): a resume pays the record's own transfers, never the file's.
 export const listDisbursements = (): DisbursementRecord[] => {
   const dir = disbursementsDir()
   if (!existsSync(dir)) return []
@@ -125,6 +130,20 @@ export const listDisbursements = (): DisbursementRecord[] => {
     }
     if (!record || record.version !== 1 || !record.id || !Array.isArray(record.transfers)) {
       throw new Error(`[disbursements] ${path} is not a disbursement record. Restore it from git before sending.`)
+    }
+    let consistent = false
+    try {
+      consistent =
+        record.contentId === contentId(record.chainId, record.token, record.transfers) &&
+        record.id === disbursementId(record.contentId, record.kind, record.periodStart, record.periodEnd)
+    } catch {
+      // a field missing or of the wrong type
+    }
+    if (!consistent) {
+      throw new Error(
+        `[disbursements] ${path} does not match its own ids: its transfers, kind or period were changed after it was ` +
+          "written (by hand, or by a merge). Restore it from git before sending."
+      )
     }
     records.push(record)
   }

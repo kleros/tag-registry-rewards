@@ -65,6 +65,13 @@ export interface EvmFaults {
   prunedBelow?: number
   // Receipts come without their status field.
   receiptsWithoutStatus?: boolean
+  // Receipts come without their logs (with receiptsWithoutStatus, nothing in
+  // them tells a success from a revert).
+  receiptsWithoutLogs?: boolean
+  // eth_sendRawTransaction refuses in Erigon's words: "existing txn with same
+  // hash" for a transaction the pool holds, "could not replace existing tx"
+  // for a same-nonce one that does not raise both fees enough.
+  erigon?: boolean
   // eth_getBlockByNumber answers null for these blocks (a lagging node).
   blocksWithoutData?: Set<number>
 }
@@ -304,7 +311,9 @@ export class MockEvm {
           blockNumber: hex(tx.blockNumber),
           ...(this.faults.receiptsWithoutStatus ? {} : { status: hex(tx.status) }),
           gasUsed: hex(52000),
-          logs: this.logs.filter((l) => l.transactionHash === tx.hash).map((l) => this.formatLog(l)),
+          ...(this.faults.receiptsWithoutLogs
+            ? {}
+            : { logs: this.logs.filter((l) => l.transactionHash === tx.hash).map((l) => this.formatLog(l)) }),
         }
       }
       case "eth_getTransactionByHash": {
@@ -359,6 +368,9 @@ export class MockEvm {
       return { httpError: true }
     }
     const from = tx.from.toLowerCase()
+    if (this.faults.erigon && this.mempool.some((p) => p.hash === tx.hash)) {
+      throw { code: -32000, message: "INTERNAL_ERROR: existing txn with same hash" }
+    }
     if (this.mined.has(tx.hash) || this.mempool.some((p) => p.hash === tx.hash)) throw { code: -32000, message: "already known" }
     if (tx.nonce < (this.nonces.get(from) || 0)) throw { code: -32000, message: "nonce too low" }
     const pending: PendingTx = {
@@ -379,7 +391,7 @@ export class MockEvm {
       const tip = pending.maxPriorityFeePerGas || BigNumber.from(0)
       const oldTip = same.maxPriorityFeePerGas || BigNumber.from(0)
       if (pending.maxFeePerGas.lt(same.maxFeePerGas.mul(11).div(10)) || tip.lt(oldTip.mul(11).div(10)) || tip.lte(oldTip)) {
-        throw { code: -32000, message: "replacement transaction underpriced" }
+        throw { code: -32000, message: this.faults.erigon ? "INTERNAL_ERROR: could not replace existing tx" : "replacement transaction underpriced" }
       }
       this.mempool.splice(this.mempool.indexOf(same), 1)
     }

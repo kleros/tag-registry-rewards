@@ -8,6 +8,10 @@ on:
     branches: [master]
   pull_request:
 
+# Read-only: the tests need the code, nothing else.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,3 +26,8 @@ jobs:
       # print notices, or build an optional native module with a JS fallback).
       - run: yarn install --frozen-lockfile --ignore-scripts
       - run: yarn test
+      # Again three years ahead: no test may depend on today's date, or it
+      # would one day block every `yarn start` (see test/support/hermetic.js).
+      - run: yarn test
+        env:
+          TESTS_CLOCK_SHIFT_DAYS: "1100"

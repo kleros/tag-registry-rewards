@@ -1,9 +1,10 @@
 import { describe, it } from "node:test"
 import { strict as assert } from "assert"
 import { BigNumber, utils, Wallet } from "ethers"
-import { existsSync, writeFileSync } from "fs"
+import { existsSync, readFileSync, writeFileSync } from "fs"
 import { join } from "path"
 import { contentId, disbursementId, saveDisbursement } from "../../src/utils/disbursement-ledger"
+import { classifyBroadcastError } from "../../src/utils/send-chain"
 import { setEnv } from "../support/env"
 import { listFiles } from "../support/files"
 import { evmAddress, unix } from "../support/fixtures"
@@ -185,6 +186,103 @@ describe("send: interrupted runs never pay twice", () => {
     assert.notEqual(t.nonce, 0)
   })
 
+  it("never forgets a transaction it just broadcast, even with --forget-unmined", async () => {
+    // --forget-unmined given for one stuck transfer, while another one's fresh
+    // broadcast is mined but answered "nonce too low" (a proxy's retry), and a
+    // lagging backend shows neither its receipt nor its block yet
+    const erc20 = new utils.Interface(["function transfer(address to, uint256 amount)"])
+    const [A, B] = PAYOUT
+    writePayout("1790000000001.json", [A, B])
+    evm.autoMine = false
+    await assert.rejects(send("1790000000001.json"), /not mined within/)
+    evm.dropMempool()
+    const other = await wallet.signTransaction({ type: 2, chainId: 100, nonce: 0, to: evmAddress(0x999), value: 0, gasLimit: 21000, maxFeePerGas: 2e9, maxPriorityFeePerGas: 1e9 })
+    evm["sendRaw"](other) // takes A's nonce
+    evm.mine()
+    evm.autoMine = true
+    const realSend = evm["sendRaw"].bind(evm)
+    const realHandle = evm["handle"].bind(evm)
+    let staleHead: number | null = null
+    evm["handle"] = (method: string, params: unknown[]) =>
+      method === "eth_blockNumber" && staleHead !== null ? utils.hexValue(staleHead) : realHandle(method, params)
+    let sendsToB = 0
+    evm["sendRaw"] = (raw: string) => {
+      const to = String(erc20.decodeFunctionData("transfer", utils.parseTransaction(raw).data)[0]).toLowerCase()
+      if (to !== B.recipient.toLowerCase() || ++sendsToB > 1) return realSend(raw)
+      evm.faults.receiptLag = 1e9 // this node never returns its receipt
+      const head = evm.latest.number
+      realSend(raw) // mined
+      evm.faults.receiptLag = 0
+      staleHead = head
+      throw { code: -32000, message: "nonce too low" }
+    }
+    await assert.rejects(send("1790000000001.json", { forgetUnmined: true }), /was used by another transaction/)
+    const t = ledger()[0].transfers[1]
+    assert.equal(t.status, "signed", "kept, not forgotten")
+    assert.equal(t.forgottenTxs, undefined)
+    staleHead = null // the backend catches up
+    await send("1790000000001.json", { forgetUnmined: true })
+    assert.equal(paid().filter((p) => p.to === utils.getAddress(B.recipient) && p.status === 1).length, 1, "B paid once")
+    assert.equal(ledger()[0].status, "completed")
+  })
+
+  it("never forgets a saved transaction its own rebroadcast was answered nonce too low for, even with --forget-unmined", async () => {
+    // the rerun's rebroadcast is mined, but the answer is "nonce too low" and a
+    // lagging backend shows neither its receipt nor its block yet
+    const [A] = PAYOUT
+    writePayout("1790000000001.json", [A])
+    evm.autoMine = false
+    await assert.rejects(send("1790000000001.json"), /not mined within/)
+    evm.dropMempool()
+    evm.autoMine = true
+    const realSend = evm["sendRaw"].bind(evm)
+    const realHandle = evm["handle"].bind(evm)
+    let staleHead: number | null = null
+    evm["handle"] = (method: string, params: unknown[]) =>
+      method === "eth_blockNumber" && staleHead !== null ? utils.hexValue(staleHead) : realHandle(method, params)
+    let first = true
+    evm["sendRaw"] = (raw: string) => {
+      if (!first) return realSend(raw)
+      first = false
+      evm.faults.receiptLag = 1e9
+      const head = evm.latest.number
+      realSend(raw) // mined
+      evm.faults.receiptLag = 0
+      staleHead = head
+      throw { code: -32000, message: "nonce too low" }
+    }
+    await assert.rejects(send("1790000000001.json", { forgetUnmined: true }), /was used by another transaction/)
+    assert.equal(ledger()[0].transfers[0].forgottenTxs, undefined)
+    staleHead = null // the backend catches up
+    await send("1790000000001.json", { forgetUnmined: true })
+    assert.equal(paid().filter((p) => p.status === 1 && p.to === utils.getAddress(A.recipient)).length, 1, "paid once")
+    assert.equal(ledger()[0].status, "completed")
+  })
+
+  it("never takes an unrelated payment of the same amount to the same recipient for a transfer whose nonce went elsewhere", async () => {
+    const R = { recipient: evmAddress(0x5a), amount: PNK(500) }
+    writePayout("1790000000001.json", [R])
+    evm.addPastTransfer(wallet.address, R.recipient, R.amount) // an unrelated payment, under another nonce
+    evm.autoMine = false
+    await assert.rejects(send("1790000000001.json", { skipOnchainCheck: true }), /not mined within/)
+    const saved = ledger()[0].transfers[0]
+    evm.dropMempool()
+    const other = await wallet.signTransaction({ type: 2, chainId: 100, nonce: saved.nonce, to: evmAddress(0x999), value: 0, gasLimit: 21000, maxFeePerGas: 2e9, maxPriorityFeePerGas: 1e9 })
+    evm["sendRaw"](other) // takes its nonce, paying nobody
+    evm.mine()
+    evm.autoMine = true
+    const refused = await send("1790000000001.json").then(() => null, (e: Error) => e)
+    assert.match(String(refused && refused.message), /was used by another transaction.*--forget-unmined/s)
+    assert.doesNotMatch(String(refused && refused.message), /may be this transfer/)
+    await assert.rejects(send("1790000000001.json", { skipPaidOnChain: true }), /was used by another transaction/, "not taken for this transfer")
+    await send("1790000000001.json", { forgetUnmined: true }) // nothing stops forgetting it now
+    const [record] = ledger()
+    assert.equal(record.status, "completed")
+    assert.equal(record.transfers[0].foundOnChain, undefined)
+    assert.deepEqual(record.transfers[0].forgottenTxs, saved.attempts)
+    assert.equal(paid().filter((p) => p.status === 1 && p.to === utils.getAddress(R.recipient)).length, 1, "this payout paid R once")
+  })
+
   it("resumes saved transactions lowest nonce first", async () => {
     writePayout("1790000000001.json", PAYOUT.slice(0, 2))
     // a run signed #2 with nonce 0 and #1 with nonce 1 (#1 had reverted and was
@@ -295,6 +393,22 @@ describe("send: interrupted runs never pay twice", () => {
     } finally {
       restore()
     }
+  })
+
+  it("refuses to resume a ledger record edited after it was written (a bad merge pays nobody)", async () => {
+    writePayout("1790000000001.json", PAYOUT)
+    evm.faults.revertTo = new Set([PAYOUT[1].recipient.toLowerCase()])
+    await assert.rejects(send("1790000000001.json"), /reverted/)
+    evm.faults.revertTo = undefined
+    const dir = join(work, "disbursements")
+    const [name] = listFiles(dir).filter((n) => n.endsWith(".json"))
+    const record = JSON.parse(readFileSync(join(dir, name)).toString())
+    const intruder = evmAddress(0xbad)
+    record.transfers[2].recipient = utils.getAddress(intruder)
+    writeFileSync(join(dir, name), JSON.stringify(record, null, 2))
+    await assert.rejects(send("1790000000001.json"), /does not match its own ids.*Restore it from git before sending/s)
+    assert.equal(evm.tokenBalance(intruder), BigInt(0))
+    assert.equal(paid().filter((t) => t.status === 1).length, 1)
   })
 
   it("refuses a new payout while another one has transactions in flight", async () => {
@@ -426,6 +540,43 @@ describe("send: what nodes answer", () => {
     assert.equal(paid().length, 1, "paid once, by the other transaction")
   })
 
+  it("records a transfer paid by a same-nonce transaction signed elsewhere, once told so (--skip-paid-on-chain)", async () => {
+    writePayout("1790000000001.json", PAYOUT.slice(0, 1))
+    writePayout("1790000000006_removals_transactions.json", [{ recipient: evmAddress(0x5), amount: PNK(1) }], { kind: "removals" })
+    evm.autoMine = false
+    await assert.rejects(send("1790000000001.json"), /not mined within/)
+    const saved = ledger()[0].transfers[0]
+    // another machine replaced it with higher fees, and its ledger never came back
+    evm.dropMempool()
+    const erc20 = new utils.Interface(["function transfer(address to, uint256 amount)"])
+    const replacement = await wallet.signTransaction({
+      type: 2,
+      chainId: 100,
+      nonce: saved.nonce,
+      to: evm.token,
+      value: 0,
+      data: erc20.encodeFunctionData("transfer", [PAYOUT[0].recipient, PAYOUT[0].amount]),
+      gasLimit: 100000,
+      maxFeePerGas: utils.parseUnits("3", "gwei"),
+      maxPriorityFeePerGas: utils.parseUnits("1.5", "gwei"),
+    })
+    evm["sendRaw"](replacement)
+    evm.mine()
+    evm.autoMine = true
+    await assert.rejects(send("1790000000001.json"), /was used by another transaction.*may be this transfer.*--skip-paid-on-chain to record it as paid/s)
+    await assert.rejects(send("1790000000001.json", { forgetUnmined: true }), /not forgetting it: .*--skip-paid-on-chain/s)
+    await assert.rejects(send("1790000000006_removals_transactions.json"), /in flight/)
+    await send("1790000000001.json", { skipPaidOnChain: true })
+    const [record] = ledger()
+    assert.equal(record.status, "completed")
+    assert.equal(record.transfers[0].foundOnChain, true)
+    assert.equal(record.transfers[0].txHash, utils.keccak256(replacement))
+    assert.deepEqual(record.transfers[0].forgottenTxs, saved.attempts)
+    assert.equal(paid().length, 1, "paid once, by the transaction signed elsewhere")
+    await send("1790000000006_removals_transactions.json") // no longer blocked
+    assert.equal(paid().length, 2)
+  })
+
   it("checks the wallet's history on a node that pruned blocks older than the period's end", async () => {
     await startChain(unix("2026-09-20T00:00:00Z"))
     evm.advance(2500)
@@ -479,6 +630,117 @@ describe("send: what nodes answer", () => {
     writePayout("1790000000001.json", PAYOUT)
     await assert.rejects(send("1790000000001.json"), /reverted/)
     assert.deepEqual(ledger()[0].transfers.map((t) => t.status), ["confirmed", "failed", "pending"])
+  })
+
+  it("waits, rather than send again, when a receipt has neither status nor logs", async () => {
+    evm.faults.receiptsWithoutStatus = true
+    evm.faults.receiptsWithoutLogs = true
+    writePayout("1790000000001.json", PAYOUT)
+    await assert.rejects(send("1790000000001.json"), /was not mined within/)
+    assert.equal(ledger()[0].transfers[0].status, "sent", "not taken for a revert")
+    evm.faults.receiptsWithoutStatus = false
+    evm.faults.receiptsWithoutLogs = false
+    await send("1790000000001.json")
+    assert.equal(paid().length, 3, "each transfer paid once")
+  })
+
+  it("names this payout's own transaction when one recorded as reverted is found paying on-chain", async () => {
+    // a node whose receipt says reverted for a transfer that went through
+    const realHandle = evm["handle"].bind(evm)
+    let lying = true
+    evm["handle"] = (method: string, params: unknown[]) => {
+      const answer = realHandle(method, params) as { status?: string } | null
+      return method === "eth_getTransactionReceipt" && lying && answer ? { ...answer, status: "0x0" } : answer
+    }
+    writePayout("1790000000001.json", PAYOUT.slice(0, 1))
+    await assert.rejects(send("1790000000001.json"), /reverted, so nothing was paid by it/)
+    lying = false
+    await assert.rejects(send("1790000000001.json"), /this payout's own transaction, recorded as reverted or never mined, yet it paid/)
+    assert.equal(paid().length, 1, "not sent again")
+  })
+
+  it("tells apart the answers of geth, Nethermind, Erigon and Besu", () => {
+    const cases: [string, string | null][] = [
+      ["already known", "known"],
+      ["AlreadyKnown", "known"],
+      ["ALREADY_EXISTS: already known", "known"],
+      ["INTERNAL_ERROR: existing txn with same hash", "known"],
+      ["Known transaction", "known"],
+      ["nonce too low: next nonce 5, tx nonce 4", "nonce-too-low"],
+      ["OldNonce", "nonce-too-low"],
+      ["INTERNAL_ERROR: nonce too low", "nonce-too-low"],
+      ["replacement transaction underpriced", "replacement-underpriced"],
+      ["ReplacementNotAllowed", "replacement-underpriced"],
+      ["INTERNAL_ERROR: could not replace existing tx", "replacement-underpriced"],
+      ["transaction underpriced", "underpriced"],
+      ["FeeTooLow", "underpriced"],
+      ["FEE_TOO_LOW: underpriced", "underpriced"],
+      ["max fee per gas less than block base fee: maxFeePerGas: 1, baseFee: 7", "underpriced"],
+      ["insufficient funds for gas * price + value", null],
+      ["nonce too high", null],
+    ]
+    for (const [message, expected] of cases) {
+      assert.equal(classifyBroadcastError({ code: -32000, error: { code: -32000, message } }), expected, message)
+      assert.equal(classifyBroadcastError(new Error(`processing response error (body="{\\"error\\":{\\"message\\":\\"${message}\\"}}")`)), expected, `${message}, in a body`)
+    }
+  })
+
+  it("waits for a saved transaction that an Erigon node already holds (existing txn with same hash)", async () => {
+    evm.faults.erigon = true
+    writePayout("1790000000001.json", PAYOUT.slice(0, 1))
+    evm.autoMine = false
+    await assert.rejects(send("1790000000001.json"), /not mined within/)
+    const realSend = evm["sendRaw"].bind(evm)
+    const answers: string[] = []
+    evm["sendRaw"] = (raw: string) => {
+      try {
+        return realSend(raw)
+      } catch (err) {
+        answers.push((err as { message: string }).message)
+        setImmediate(() => evm.mine()) // mined while send waits for it
+        throw err
+      }
+    }
+    await send("1790000000001.json") // rebroadcasts the very same transaction
+    assert.deepEqual(answers, ["INTERNAL_ERROR: existing txn with same hash"])
+    assert.equal(paid().length, 1)
+    assert.equal(ledger()[0].status, "completed")
+  })
+
+  it("never takes a transfer this run just paid for another entry's payment (a recipient listed twice)", async () => {
+    const A = { recipient: evmAddress(0x7), amount: PNK(5) }
+    writePayout("1790000000001.json", [A, A])
+    // right after the first entry is paid, another transaction takes the next nonce
+    const realSend = evm["sendRaw"].bind(evm)
+    let sends = 0
+    evm["sendRaw"] = (raw: string) => {
+      const result = realSend(raw)
+      if (++sends === 1) evm.nonces.set(wallet.address.toLowerCase(), 2)
+      return result
+    }
+    await assert.rejects(send("1790000000001.json", { skipPaidOnChain: true }), /was used by another transaction/)
+    assert.equal(ledger()[0].transfers[1].foundOnChain, undefined, "the first entry's payment is not the second's")
+    assert.equal(paid().length, 1)
+  })
+
+  it("refuses, rather than read part of the history, when the RPC's backends disagree on the latest block", async () => {
+    await startChain(unix("2026-09-30T23:00:00Z"))
+    evm.advance(1000) // into October
+    const realHandle = evm["handle"].bind(evm)
+    evm["handle"] = (method: string, params: unknown[]) => (method === "eth_blockNumber" ? utils.hexValue(10) : realHandle(method, params))
+    writePayout("1790000000001.json", PAYOUT)
+    await assert.rejects(send("1790000000001.json"), /Could not read the wallet's past PNK transfers.*backends disagree/s)
+    assert.equal(paid().length, 0)
+  })
+
+  it("refuses when the node's latest block predates the period's end (a node behind)", async () => {
+    await startChain(unix("2026-09-25T00:00:00Z")) // its newest block is of September
+    writePayout("1790000000001.json", PAYOUT)
+    await assert.rejects(
+      send("1790000000001.json"),
+      /Could not read the wallet's past PNK transfers.*latest block, \d+, is of 2026-09-25.*before 2026-10-01.*lags behind/s
+    )
+    assert.equal(paid().length, 0)
   })
 
   it("keeps waiting for a receipt through RPC errors", async () => {
