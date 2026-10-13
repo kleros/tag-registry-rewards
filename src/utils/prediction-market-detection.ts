@@ -209,7 +209,7 @@ const providerForRpc = (chainCfg: ChainConfig, rpc: string): ethers.providers.Js
 // on that chain; verify eth_chainId once per url and refuse a mismatch (as a
 // transport error, so rotation moves on to the next rpc).
 const chainIdChecks: { [rpc: string]: Promise<void> } = {}
-const ensureChainId = (chainCfg: ChainConfig, provider: ethers.providers.JsonRpcProvider): Promise<void> => {
+export const ensureChainId = (chainCfg: ChainConfig, provider: ethers.providers.JsonRpcProvider): Promise<void> => {
   const rpc = provider.connection.url
   if (!chainIdChecks[rpc]) {
     chainIdChecks[rpc] = (async () => {
@@ -366,7 +366,11 @@ const withRetry = async <T>(
       return result
     } catch (err) {
       lastError = err
-      if (classifyError(err) !== "transport") throw err
+      if (classifyError(err) !== "transport") {
+        // Which rpc said so: one rpc's revert may still be checked on the others.
+        if (err && typeof err === "object") (err as { rpc?: string }).rpc = provider.connection.url
+        throw err
+      }
       const ambiguous = isAmbiguousRevert(err)
       if (!ambiguous) allAmbiguous = false
       if (attempt < RPC_MAX_ATTEMPTS) {
@@ -482,42 +486,94 @@ const callIndividually = async (chainCfg: ChainConfig, calls: Call[]): Promise<C
   return results
 }
 
-const aggregate3 = async (chainCfg: ChainConfig, chunk: Call[]): Promise<CallResult[]> => {
-  const startedAt = Date.now()
-  const decoded = await withRetry(
-    chainCfg,
-    `multicall (${chunk.length} calls) on chain ${chainCfg.id}`,
-    async (provider) => {
-      const data = multicallInterface.encodeFunctionData("aggregate3", [
-        chunk.map((c) => ({ target: c.target.toLowerCase(), allowFailure: true, callData: c.callData })),
-      ])
-      const raw = await ethCall(provider, multicallAddress(chainCfg), data)
-      // Multicall3 (code verified by hasMulticall) only ever answers aggregate3
-      // with a well-formed array. "0x" means this rpc backend has no state for
-      // the call (unsynced / pruned node behind a load balancer): a transport
-      // problem, retried on another rpc. Non-empty undecodable bytes mean the
-      // batch reverted on an rpc that reports reason-less reverts as data.
-      if (raw === "0x") throw emptyResultError("Multicall3.aggregate3")
-      try {
-        return multicallInterface.decodeFunctionResult("aggregate3", raw)[0] as CallResult[]
-      } catch {
-        const error = new Error("aggregate3 batch reverted") as Error & { code: string; data: string }
-        error.code = "SYNTHETIC_REVERT"
-        error.data = raw
-        throw error
-      }
-    }
-  )
+// One aggregate3 batch on one rpc, results in call order.
+const aggregate3Via = async (
+  chainCfg: ChainConfig,
+  provider: ethers.providers.JsonRpcProvider,
+  chunk: Call[]
+): Promise<CallResult[]> => {
+  const data = multicallInterface.encodeFunctionData("aggregate3", [
+    chunk.map((c) => ({ target: c.target.toLowerCase(), allowFailure: true, callData: c.callData })),
+  ])
+  const raw = await ethCall(provider, multicallAddress(chainCfg), data)
+  // Multicall3 (code verified by hasMulticall) only ever answers aggregate3
+  // with a well-formed array. "0x" means this rpc backend has no state for
+  // the call (unsynced / pruned node behind a load balancer): a transport
+  // problem, retried on another rpc. Non-empty undecodable bytes mean the
+  // batch reverted on an rpc that reports reason-less reverts as data.
+  if (raw === "0x") throw emptyResultError("Multicall3.aggregate3")
+  let decoded: CallResult[]
+  try {
+    decoded = multicallInterface.decodeFunctionResult("aggregate3", raw)[0] as CallResult[]
+  } catch {
+    const error = new Error("aggregate3 batch reverted") as Error & { code: string; data: string }
+    error.code = "SYNTHETIC_REVERT"
+    error.data = raw
+    throw error
+  }
   if (decoded.length !== chunk.length) {
     throw new Error(`[pm-detect] multicall returned ${decoded.length} results for ${chunk.length} calls`)
   }
+  return decoded.map((r) => ({ success: r.success, returnData: r.returnData }))
+}
+
+const aggregate3 = async (chainCfg: ChainConfig, chunk: Call[]): Promise<CallResult[]> => {
+  const startedAt = Date.now()
+  const results = await withRetry(chainCfg, `multicall (${chunk.length} calls) on chain ${chainCfg.id}`, (provider) =>
+    aggregate3Via(chainCfg, provider, chunk)
+  )
   if (DEBUG) {
     console.log(
       `[pm-detect:debug] chain ${chainCfg.id} multicall ${chunk.length} calls (selector ${chunk[0].callData.slice(0, 10)}) ` +
         `in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`
     )
   }
-  return decoded.map((r) => ({ success: r.success, returnData: r.returnData }))
+  return results
+}
+
+// A batch that one rpc reverted (withRetry does not rotate on a revert). It
+// may be that rpc's fault (a broken node answering every call with a revert)
+// or the batch's own (a target burning the batch's gas, which some nodes
+// report as a revert, others as out of gas or "0x"). Every other rpc of the
+// chain is asked, those failing in transit again after a pause (once more
+// only, when another one confirmed it already): any answer wins (and that rpc
+// is used from then on). Without one, a revert, out of gas or "0x" there
+// confirms the batch's own (null: bisect it, where calls that revert alone are
+// capped); with none of those either, the run aborts: one rpc's word would
+// turn the batch's outcome tokens into "no match".
+const otherRpcsVerdict = async (chainCfg: ChainConfig, chunk: Call[], err: unknown): Promise<CallResult[] | null> => {
+  const rpcs = rpcsForChain(chainCfg)
+  const reverting = (err as { rpc?: string }).rpc
+  const others = rpcs.filter((r) => r !== reverting)
+  let confirmed = false
+  let lastError: unknown = err
+  let pending = others
+  for (let attempt = 1; attempt <= RPC_MAX_ATTEMPTS && pending.length > 0; attempt++) {
+    if (attempt > 1) await sleepMs(RETRY_BASE_MS * Math.pow(2, attempt - 2))
+    const failedInTransit: string[] = []
+    for (const rpc of pending) {
+      try {
+        const provider = providerForRpc(chainCfg, rpc)
+        await ensureChainId(chainCfg, provider)
+        const results = await aggregate3Via(chainCfg, provider, chunk)
+        preferredRpcIndex[chainCfg.id] = rpcs.indexOf(rpc)
+        console.warn(`[pm-detect] multicall on chain ${chainCfg.id} reverted via ${reverting} but not via ${rpc}: using ${rpc}`)
+        return results
+      } catch (e) {
+        lastError = e
+        if (isAmbiguousRevert(e) || classifyError(e) === "revert") confirmed = true
+        else if (classifyError(e) === "transport") failedInTransit.push(rpc)
+      }
+    }
+    pending = failedInTransit
+    if (confirmed && attempt >= 2) break
+  }
+  if (confirmed) return null
+  throw new Error(
+    `[pm-detect] multicall (${chunk.length} calls) on chain ${chainCfg.id} reverted via ${reverting}, and no other rpc ` +
+      `confirmed it (${others.length} other rpc(s)); aborting so no prediction-market token slips into the rewards. ` +
+      `Last error: ${(lastError as Error)?.message}`
+  )
 }
 
 // aggregate3 with allowFailure=true never reverts because of a failing target,
@@ -525,15 +581,17 @@ const aggregate3 = async (chainCfg: ChainConfig, chunk: Call[]): Promise<CallRes
 // (odd fallback functions, rpc gas caps). Bisect such a batch down to the
 // offending call; a call that reverts even on its own is simply "no match"
 // (every probe we run is a cheap view on a genuine outcome token). If that
-// happens to many calls of one batch something is wrong with the rpc, not the
-// tokens, and the run aborts rather than silently passing them all.
+// happens to many targets of one batch, or to many calls (a gas-burning token
+// fails its two probes, while a broken rpc fails every call of a batch even
+// to one target, e.g. the 2 probes of each position on one ConditionalTokens
+// contract), something is wrong with the rpc, not the tokens, and the run
+// aborts rather than silently passing them all.
 const MAX_SOLO_REVERTS_PER_BATCH = 5
+const MAX_SOLO_REVERT_CALLS_PER_BATCH = 2 * MAX_SOLO_REVERTS_PER_BATCH
 
-const bisect = async (
-  chainCfg: ChainConfig,
-  chunk: Call[],
-  soloReverts: Set<string>
-): Promise<CallResult[]> => {
+type SoloReverts = { targets: Set<string>; calls: number }
+
+const bisect = async (chainCfg: ChainConfig, chunk: Call[], solo: SoloReverts): Promise<CallResult[]> => {
   try {
     return await aggregate3(chainCfg, chunk)
   } catch (err) {
@@ -542,13 +600,19 @@ const bisect = async (
     // bad backend: bisect it like any other batch revert.
     const ambiguousEverywhere = (err as EthersError)?.code === ALL_ATTEMPTS_AMBIGUOUS
     if (!ambiguousEverywhere && classifyError(err) !== "revert") throw err
+    if (!ambiguousEverywhere) {
+      const elsewhere = await otherRpcsVerdict(chainCfg, chunk, err)
+      if (elsewhere) return elsewhere
+    }
     if (chunk.length === 1) {
-      // Several probes hit the same target, so count distinct targets.
-      soloReverts.add(chunk[0].target.toLowerCase())
-      if (soloReverts.size > MAX_SOLO_REVERTS_PER_BATCH) {
+      // Several probes hit the same target: distinct targets and calls are both counted.
+      solo.targets.add(chunk[0].target.toLowerCase())
+      solo.calls++
+      if (solo.targets.size > MAX_SOLO_REVERTS_PER_BATCH || solo.calls > MAX_SOLO_REVERT_CALLS_PER_BATCH) {
         throw new Error(
-          `[pm-detect] more than ${MAX_SOLO_REVERTS_PER_BATCH} distinct targets of one batch revert on their own on chain ${chainCfg.id} ` +
-            `(last: ${chunk[0].target}); the rpc looks broken, aborting so no prediction-market token slips into the rewards`
+          `[pm-detect] more than ${MAX_SOLO_REVERTS_PER_BATCH} distinct targets, or ${MAX_SOLO_REVERT_CALLS_PER_BATCH} calls, ` +
+            `of one batch revert on their own on chain ${chainCfg.id} (last: ${chunk[0].target}); the rpc looks broken, ` +
+            "aborting so no prediction-market token slips into the rewards"
         )
       }
       console.warn(
@@ -557,15 +621,12 @@ const bisect = async (
       return [{ success: false, returnData: "0x" }]
     }
     const mid = Math.ceil(chunk.length / 2)
-    return [
-      ...(await bisect(chainCfg, chunk.slice(0, mid), soloReverts)),
-      ...(await bisect(chainCfg, chunk.slice(mid), soloReverts)),
-    ]
+    return [...(await bisect(chainCfg, chunk.slice(0, mid), solo)), ...(await bisect(chainCfg, chunk.slice(mid), solo))]
   }
 }
 
 const aggregate3Bisecting = (chainCfg: ChainConfig, chunk: Call[]): Promise<CallResult[]> =>
-  bisect(chainCfg, chunk, new Set<string>())
+  bisect(chainCfg, chunk, { targets: new Set<string>(), calls: 0 })
 
 // Batched eth_call via Multicall3. Results are returned in call order. Chunks
 // are paced a little so public rpcs are less likely to answer 429.
@@ -830,13 +891,17 @@ export const detectPredictionMarketTokens = async (
 ): Promise<PredictionMarketMatches> => {
   const matches: PredictionMarketMatches = {}
 
+  // Probed as the transaction counts read it (trimmed, any letter case, "0X"
+  // too), so an address written oddly is checked like any other, not skipped
+  // and still rewarded. Matches are keyed by tag id.
   const byChain: { [chainId: string]: Tag[] } = {}
   for (const tag of tags) {
     const chainCfg = findChainConfig(tag.chain)
     if (!chainCfg || chainCfg.namespaceId !== "eip155") continue
-    if (tag.registry !== "tokens" || !isValidEvmAddress(tag.tagAddress)) continue
+    const address = String(tag.tagAddress || "").trim().toLowerCase()
+    if (tag.registry !== "tokens" || !isValidEvmAddress(address)) continue
     if (!byChain[chainCfg.id]) byChain[chainCfg.id] = []
-    byChain[chainCfg.id].push(tag)
+    byChain[chainCfg.id].push({ ...tag, tagAddress: address })
   }
 
   for (const chainId of Object.keys(byChain)) {

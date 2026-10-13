@@ -1,11 +1,14 @@
 import { ethers } from "ethers"
 import { ChainConfig, FilterCheckReason, Tag } from "../types"
 import { sleep } from "../transaction-sender"
-import { classifyError, rpcsForChain } from "./prediction-market-detection"
+import { classifyError, ensureChainId, rpcsForChain } from "./prediction-market-detection"
 import { errorMessage } from "./runtime-helpers"
 
 // One provider per RPC URL: the chain id is known (no network detection call),
-// and a call that hangs fails after 30 s, not after ethers' 120 s.
+// and a call that hangs fails after 30 s, not after ethers' 120 s. Before its
+// first call, each URL's chain id is checked once (shared with the
+// prediction-market probes): a fallback filed under the wrong chain would
+// answer getCode with 0x and have a real contract excluded as an EOA.
 const providers: { [rpc: string]: ethers.providers.StaticJsonRpcProvider } = {}
 
 const providerFor = (url: string, chainId: string): ethers.providers.StaticJsonRpcProvider => {
@@ -31,7 +34,9 @@ const ask = async <T>(
   let lastError: unknown
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
     try {
-      return await call(providerFor(urls[(attempt - 1) % urls.length], chainCfg.id))
+      const provider = providerFor(urls[(attempt - 1) % urls.length], chainCfg.id)
+      await ensureChainId(chainCfg, provider)
+      return await call(provider)
     } catch (err) {
       const answer = answered ? answered(err) : undefined
       if (answer !== undefined) return answer
@@ -84,9 +89,11 @@ export const getAddressTagExclusionReason = async (
   }
 
   // ERC-721 by ERC-165. Most contracts have no supportsInterface and revert,
-  // and some burn all the gas trying: both mean no ERC-165, so kept. A
-  // transport failure (timeout, HTTP error) is no answer: retried like the
-  // rest, never taken for one, or an NFT would be rewarded.
+  // and some burn all the gas trying: both mean no ERC-165, so kept. Anything
+  // else, a transport failure (timeout, HTTP error) or an RPC refusing the
+  // request (invalid params, method not found), is no answer about the
+  // contract: retried like the rest, on the fallback RPCs too, never taken
+  // for one, or an NFT would be rewarded.
   const data = erc165.encodeFunctionData("supportsInterface", ["0x80ac58cd"])
   const isErc721 = await ask(
     chainCfg,
@@ -99,7 +106,7 @@ export const getAddressTagExclusionReason = async (
         return false // an empty or malformed answer (a fallback function): no ERC-165
       }
     },
-    (err) => (classifyError(err) !== "transport" || GAS_CAP.test(errorMessage(err)) ? false : undefined)
+    (err) => (classifyError(err) === "revert" || GAS_CAP.test(errorMessage(err)) ? false : undefined)
   )
   return isErc721 ? "erc-721 contract" : null
 }

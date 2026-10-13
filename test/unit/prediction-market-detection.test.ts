@@ -132,6 +132,181 @@ describe("prediction-market detection", () => {
     assert.deepEqual(Object.keys(matches), [tag.id])
   })
 
+  it("probes a token whatever way its address is written: the transaction counts read it trimmed, in any case, 0X too", async () => {
+    const evm = await node("4326")
+    const position = evmAddress(0x4001)
+    evm.contracts.set(CTF, ctfStub)
+    evm.contracts.set(position, wrapped(CTF))
+    const spellings = [position.toUpperCase().replace(/^0X/, "0X"), ` ${position} `, `${position}\n`, utils.getAddress(position)]
+    const tags = spellings.map((address) => token("4326", address))
+    const matches = await pm.detectPredictionMarketTokens(tags)
+    assert.deepEqual(Object.keys(matches).sort(), tags.map((t) => t.id).sort())
+  })
+
+  it("fails closed when every multicall fails, though the node answers its chain id and code", async () => {
+    const evm = await node("4663")
+    const position = evmAddress(0x4601)
+    evm.contracts.set(CTF, ctfStub)
+    evm.contracts.set(position, wrapped(CTF))
+    evm.faults.failNext = { eth_call: 100 } // HTTP 500 on every eth_call
+    await assert.rejects(
+      pm.detectPredictionMarketTokens([token("4663", position), token("4663", evmAddress(0x4602))]),
+      /multicall \(\d+ calls\) on chain 4663 failed after 4 attempts.*aborting so no prediction-market token slips/
+    )
+    assert.equal(evm.calls.eth_call, 4, "the batch was retried, never split into 'no match' answers")
+  })
+
+  it("checks a batch one RPC reverts on the chain's other RPCs: one RPC's word never turns tokens into 'no match'", async () => {
+    const evm = await node("5042")
+    const honest = await new MockEvm({ chainId: 5042 }).start()
+    nodes.push(honest)
+    honest.code.set(MULTICALL3, "0x6080")
+    const position = evmAddress(0x5042)
+    for (const n of [evm, honest]) {
+      n.contracts.set(CTF, ctfStub)
+      n.contracts.set(position, wrapped(CTF))
+    }
+    const realHandle = evm["handle"].bind(evm)
+    evm["handle"] = (method: string, params: unknown[]) => {
+      if (method === "eth_call") throw REVERT // a broken node: every eth_call "reverts"
+      return realHandle(method, params)
+    }
+    const tag = token("5042", position)
+    pm.FALLBACK_RPCS["5042"] = ["http://127.0.0.1:9/down"]
+    await assert.rejects(pm.detectPredictionMarketTokens([tag]), /reverted via .*, and no other rpc confirmed it.*aborting/s)
+    pm.FALLBACK_RPCS["5042"] = [honest.url]
+    const matches = await pm.detectPredictionMarketTokens([tag])
+    assert.deepEqual(Object.keys(matches), [tag.id], "caught through the honest RPC")
+  })
+
+  // A second node for a chain whose first one node() started: its fallback RPC.
+  const fallbackNode = async (chainId: string): Promise<MockEvm> => {
+    const evm = await new MockEvm({ chainId: Number(chainId) }).start()
+    evm.code.set(MULTICALL3, "0x6080")
+    nodes.push(evm)
+    pm.FALLBACK_RPCS[chainId] = [evm.url]
+    return evm
+  }
+  const multicall3 = new utils.Interface([
+    "function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) view returns (tuple(bool success, bytes returnData)[] returnData)",
+  ])
+  // A token burning the batch's gas: every batch holding it fails, in the node's own words.
+  const failBatchesWith = (evm: MockEvm, burner: string, answer: () => unknown) => {
+    const realHandle = evm["handle"].bind(evm)
+    evm["handle"] = (method: string, params: { to?: string; data?: string }[]) => {
+      if (method === "eth_call" && String(params[0].to).toLowerCase() === MULTICALL3) {
+        const [calls] = multicall3.decodeFunctionData("aggregate3", String(params[0].data))
+        if (calls.some((c: { target: string }) => c.target.toLowerCase() === burner)) return answer()
+      }
+      return realHandle(method, params)
+    }
+  }
+
+  it("splits a batch that reverts on one RPC and runs out of gas or answers 0x on the other (a token burning its gas)", async () => {
+    for (const [chain, other] of [
+      ["43114", () => { throw { code: -32000, message: "out of gas" } }],
+      ["42220", () => "0x"],
+    ] as [string, () => unknown][]) {
+      const evm = await node(chain)
+      const fallback = await fallbackNode(chain)
+      const position = evmAddress(0x6101)
+      const burner = evmAddress(0xb0b)
+      for (const n of [evm, fallback]) {
+        n.contracts.set(CTF, ctfStub)
+        n.contracts.set(position, wrapped(CTF))
+      }
+      failBatchesWith(evm, burner, () => {
+        throw { code: -32015, message: "VM execution error." } // Nethermind's words for it
+      })
+      failBatchesWith(fallback, burner, other)
+      const tags = [token(chain, position), token(chain, burner)]
+      assert.deepEqual(Object.keys(await pm.detectPredictionMarketTokens(tags)), [tags[0].id], `chain ${chain}`)
+    }
+  })
+
+  it("asks every other RPC of the chain before taking a revert as the batch's own", async () => {
+    const evm = await node("4326")
+    const empty = await new MockEvm({ chainId: 4326 }).start() // answers every eth_call with 0x
+    const honest = await new MockEvm({ chainId: 4326 }).start()
+    nodes.push(empty, honest)
+    pm.FALLBACK_RPCS["4326"] = [empty.url, honest.url]
+    const position = evmAddress(0x4327)
+    for (const n of [evm, empty, honest]) {
+      n.code.set(MULTICALL3, "0x6080")
+      n.contracts.set(CTF, ctfStub)
+      n.contracts.set(position, wrapped(CTF))
+    }
+    for (const [n, answer] of [
+      [evm, () => { throw REVERT }],
+      [empty, () => "0x"],
+    ] as [MockEvm, () => unknown][]) {
+      const realHandle = n["handle"].bind(n)
+      n["handle"] = (method: string, params: unknown[]) => (method === "eth_call" ? answer() : realHandle(method, params))
+    }
+    const tag = token("4326", position)
+    assert.deepEqual(Object.keys(await pm.detectPredictionMarketTokens([tag])), [tag.id], "caught through the honest third RPC")
+  })
+
+  it("stops, as a broken RPC, when every call to one contract fails on its own (two RPCs reverting every batch holding it)", async () => {
+    const evm = await node("42220")
+    const fallback = await fallbackNode("42220")
+    const positions = Array.from({ length: 20 }, (_, i) => evmAddress(0x7000 + i)) // 20 positions of one ConditionalTokens
+    for (const n of [evm, fallback]) {
+      n.contracts.set(CTF, ctfStub)
+      for (const p of positions) n.contracts.set(p, wrapped(CTF))
+      failBatchesWith(n, CTF, () => {
+        throw REVERT
+      })
+    }
+    await assert.rejects(
+      pm.detectPredictionMarketTokens(positions.map((p) => token("42220", p))),
+      /more than 5 distinct targets, or 10 calls, of one batch revert on their own on chain 42220.*the rpc looks broken/s
+    )
+  })
+
+  it("gives a fallback failing in transit one more try only, once another RPC confirmed the revert", async () => {
+    const evm = await node("43114")
+    const dead = await new MockEvm({ chainId: 43114 }).start()
+    const other = await new MockEvm({ chainId: 43114 }).start()
+    nodes.push(dead, other)
+    pm.FALLBACK_RPCS["43114"] = [dead.url, other.url]
+    const position = evmAddress(0x6201)
+    const burner = evmAddress(0xb0f)
+    for (const n of [evm, dead, other]) {
+      n.code.set(MULTICALL3, "0x6080")
+      n.contracts.set(CTF, ctfStub)
+      n.contracts.set(position, wrapped(CTF))
+    }
+    for (const n of [evm, other]) {
+      failBatchesWith(n, burner, () => {
+        throw REVERT
+      })
+    }
+    dead.faults.failNext = { eth_call: 1000 } // HTTP 500 on every eth_call
+    const tags = [token("43114", position), token("43114", burner)]
+    assert.deepEqual(Object.keys(await pm.detectPredictionMarketTokens(tags)), [tags[0].id])
+    assert.ok(other.calls.eth_call > 0)
+    assert.equal(dead.calls.eth_call, 2 * other.calls.eth_call, "two tries per verdict, not one per round")
+  })
+
+  it("asks a fallback RPC again after a transient error before taking its answer", async () => {
+    const evm = await node("4663")
+    const fallback = await fallbackNode("4663")
+    const position = evmAddress(0x4663)
+    for (const n of [evm, fallback]) {
+      n.contracts.set(CTF, ctfStub)
+      n.contracts.set(position, wrapped(CTF))
+    }
+    const realHandle = evm["handle"].bind(evm)
+    evm["handle"] = (method: string, params: unknown[]) => {
+      if (method === "eth_call") throw REVERT // a broken node
+      return realHandle(method, params)
+    }
+    fallback.faults.failNext = { eth_call: 1 } // HTTP 500 once
+    const tag = token("4663", position)
+    assert.deepEqual(Object.keys(await pm.detectPredictionMarketTokens([tag])), [tag.id])
+  })
+
   it("fails closed: an RPC that keeps failing stops the run", async () => {
     const evm = await node("999")
     evm.faults.failNext = { eth_chainId: 100, eth_getCode: 100, eth_call: 100 }

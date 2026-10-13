@@ -110,6 +110,26 @@ describe("address tag validation (eth_getCode, EIP-1167, ERC-165)", () => {
     }
   })
 
+  it("never takes the answer of a fallback RPC that serves another chain", async () => {
+    const realSleep = sender.sleep
+    sender.sleep = async () => undefined
+    const wrongChain = await new MockEvm({ chainId: 1 }).start() // no code there: every address an EOA
+    const fallback = await new MockEvm({ chainId: 31337 }).start()
+    pm.FALLBACK_RPCS["31337"] = [wrongChain.url, fallback.url]
+    try {
+      const contract = evmAddress(0xc0de)
+      fallback.code.set(contract, "0x6080")
+      const down: ChainConfig = { ...chain, rpc: "http://127.0.0.1:9/down" }
+      assert.equal(await getAddressTagExclusionReason(makeTag({ tagAddress: contract }), down), null, "a contract, not an EOA")
+      assert.equal(wrongChain.calls.eth_getCode || 0, 0)
+    } finally {
+      delete pm.FALLBACK_RPCS["31337"]
+      sender.sleep = realSleep
+      await wrongChain.stop()
+      await fallback.stop()
+    }
+  })
+
   it("retries an ERC-165 call that failed in transit, never taking the failure for an answer", async () => {
     const realSleep = sender.sleep
     sender.sleep = async () => undefined
@@ -123,6 +143,29 @@ describe("address tag validation (eth_getCode, EIP-1167, ERC-165)", () => {
       await assert.rejects(reason(nft), /no RPC answered supportsInterface for 0x[0-9a-f]{40}/)
     } finally {
       sender.sleep = realSleep
+    }
+  })
+
+  it("asks the fallback RPC when the chain's own refuses the ERC-165 call, never taking the refusal for an answer", async () => {
+    const realSleep = sender.sleep
+    sender.sleep = async () => undefined
+    const fallback = await new MockEvm({ chainId: 31337 }).start()
+    pm.FALLBACK_RPCS["31337"] = [fallback.url]
+    try {
+      const nft = evmAddress(0x721)
+      for (const node of [evm, fallback]) node.code.set(nft, "0x6080")
+      fallback.interfaces.set(nft, true)
+      const realHandle = evm["handle"].bind(evm)
+      evm["handle"] = (method: string, params: unknown[]) => {
+        if (method === "eth_call") throw { code: -32602, message: "invalid argument 0: json: cannot unmarshal" }
+        return realHandle(method, params)
+      }
+      assert.equal(await reason(nft), "erc-721 contract")
+      assert.equal(fallback.calls.eth_call, 1)
+    } finally {
+      delete pm.FALLBACK_RPCS["31337"]
+      sender.sleep = realSleep
+      await fallback.stop()
     }
   })
 

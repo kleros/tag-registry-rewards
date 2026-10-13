@@ -681,7 +681,14 @@ Reliability rules:
   configured rpc and a few public fallbacks, `FALLBACK_RPCS`): rewards are
   pool-based, so silently keeping an undetected token would underpay everyone
   else. Re-run. Rate limits (HTTP 429) and timeouts rotate to the next rpc;
-  only a genuine EVM revert is treated as "not an outcome token".
+  only a genuine EVM revert is treated as "not an outcome token". A whole
+  Multicall3 batch reverting on one rpc (a broken node, or a token burning the
+  batch's gas) is asked again on every other rpc of the chain: any answer is
+  used; a revert, out of gas or empty answer there splits the batch as before
+  (where more than 5 targets or 10 calls of one batch failing on their own
+  stop the run as a broken rpc); and the run aborts when none can tell.
+- A token's address is read as the transaction counts read it: trimmed, in
+  any letter case (`0X…` too), so an oddly written one is never skipped.
 - The filter only applies to periods starting on or after **2026-10-01**, when
   the rule started, so re-running an older month reproduces what was paid.
   `PREDICTION_MARKET_FILTER_SINCE=YYYY-MM-DD` in `.env` moves that date
