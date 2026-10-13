@@ -58,6 +58,12 @@ Formula syntax:
   - `sum_sqrt_total_txns_with_all_contracts`
 - default formula (same logic as before):
   - `(reward_pool/(2*total_submissions)) + ((reward_pool*txns_with_contract)/(2*total_txns_with_all_contracts))`
+- Tokens formula from the October 2026 period (half by share of transactions,
+  half by square root; it was `0.1` and `0.9` until September 2026):
+  - `((token_tx/total_txns_with_all_contracts)*0.5*reward_pool) + ((sqrt(token_tx)/sum_sqrt_total_txns_with_all_contracts)*0.5*reward_pool)`
+- `generate` prints the three formulas it applies and records them in its
+  manifest (`<runId>_generate_manifest.json`), so a payout's formulas can be
+  checked before it is sent and afterwards
 - each registry has its own formula and redistribution toggle
 - capped reward redistribution toggle (per registry):
   - `true`: current behavior, recursively redistributes leftover stipend until no entry is above `MAX_REWARD`
@@ -263,13 +269,24 @@ yarn start --mode fetch [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 What it does:
 
 - fetches from Address Tags, Tokens, Domains registries
-- drops Domains entries whose chain + address is registered in the Tokens registry
+- drops Domains entries whose chain + address is registered in the Tokens
+  registry (an EVM address in any letter case: `0xAbC…` is `0xabc…`)
 - applies exclusion filters:
   - chain not configured for rewards
+  - Tokens: skip prediction-market outcome tokens (see
+    [Prediction-market outcome tokens](#prediction-market-outcome-tokens-not-rewarded))
   - Address Tags: skip EOA (`getCode == 0x`)
   - Address Tags: skip EIP-1167 proxy when implementation has code
   - Address Tags: skip ERC-721 (`supportsInterface(0x80ac58cd)`)
   - Solana Address Tags skip bytecode checks
+- looks up the Address Tags and Tokens entries (not Domains) on their chain's
+  reference explorer and lists, for review, those tagged there or whose
+  explorer cannot be read in `<runId>_explorer_check.csv`; nothing is excluded
+  for it automatically, see [Explorer tags](#explorer-tags)
+  - the bytecode checks use each chain's `rpc` in `src/utils/chains.ts`: one
+    that does not answer `eth_getCode` (3 attempts) stops the run, naming it,
+    before any transaction is counted, since an unchecked tag would be
+    rewarded; replace that RPC and rerun
 - enriches EVM and Solana rows (see [Transaction counts](#transaction-counts)):
   - `txn count`
   - Solana holders (tokens only)
@@ -315,15 +332,58 @@ What it does:
 - runs only exclusion checks (no tx counts, no Solana holders)
 - reports exclusions from:
   - chain not configured for rewards
+  - tokens appearing in Address Tags registry
+  - Tokens: prediction-market outcome tokens (the Detail column names the market)
   - Address Tags: not a contract (`getCode == 0x`)
   - Address Tags: EIP-1167 proxy
   - Address Tags: ERC-721 contract
-  - tokens appearing in Address Tags registry
 - writes a standalone CSV report and does not touch fetch manifest files
 
-File written under `files/`:
+Files written under `files/`:
 
-- `<runId>_filter_check.csv` (detail rows + summary rows with totals by reason)
+- `<runId>_filter_check.csv` (detail rows + summary rows with totals by
+  reason; the Detail column holds the evidence, e.g. the prediction market)
+- `<runId>_explorer_check.csv` (the explorer check's findings to review, see
+  [Explorer tags](#explorer-tags))
+
+### Explorer tags
+
+Address Tags and Tokens entries already tagged on their chain's reference
+explorer (`explorer` in `src/utils/chains.ts`, the program's list) are not
+rewarded; Domains (CDN) entries are exempt. `fetch` and `filter-check` look
+every such entry up, without any key, and list for review in
+`files/<runId>_explorer_check.csv` (fetch writes it before counting):
+
+- **tagged**: the explorer shows a name tag for it (in the last column):
+  - Etherscan-built explorers (etherscan.io, snowscan.xyz, celoscan.io,
+    basescan.org, lineascan.build, polygonscan.com, mega.etherscan.io,
+    hyperevmscan.io, arc.etherscan.io): the address page's public name tag,
+    the one with the tooltip "Public Name Tag (viewable by anyone)". Labels
+    and badges ("Token Contract", "DEX", the EIP-7702 "Authority") are no tags.
+  - Blockscout explorers (gnosis.blockscout.com, zksync.blockscout.com,
+    robinhoodchain.blockscout.com): the name tags of Blockscout's metadata
+    service, which their address pages show, except Blockscout's copies of
+    Kleros Scout's own entries (or every accepted entry would show up).
+- **not read**: arbiscan.io and optimistic.etherscan.io answer scripts with a
+  Cloudflare challenge, Solscan has no keyless way, and an explorer that fails
+  to answer lands here too: check those pages by hand.
+
+**Nothing is excluded for it automatically.** The rule is about tags that
+existed when the entry was submitted, and no explorer shows when a tag was
+added; Etherscan-built ones do not say where it came from either, and
+Etherscan has been reported to take name tags from Kleros Curate itself. In
+the first half of October 2026, ArcScan already showed a name tag for all 20
+Arc tokens one submitter had registered on Oct 9-13, some of them that same
+day. Open the page, decide, and put the entries that were tagged before their
+submission in `exclusions.json`, then generate and document the period again
+(see [Exclusions](#exclusions-fixing-rewards-after-they-were-generated)).
+`--mode all` documents right after fetching: its summary names the review
+file, to go through before sending.
+
+`EXPLORER_CHECK=off` skips the look-up (then check every entry by hand);
+`prefetch` never runs it. Each Etherscan-built explorer is read at one page per
+2 s, all of them side by side, and Blockscout 50 addresses per request: half a
+month's entries took under 2 minutes.
 
 ### 3) Removals + ATQ
 
@@ -565,6 +625,64 @@ Notes on publishing:
 - If `document` fails after writing the local snapshot (e.g. the upload
   errors), the index is NOT updated — the local snapshot and index disagree
   until you re-run `document` for that period, which is safe and idempotent.
+
+## Prediction-market outcome tokens (not rewarded)
+
+Since the October 2026 period, outcome / position tokens of prediction markets
+(Seer, Overtime/Thales, Trueo, ...) submitted to the **Tokens** registry are not
+rewarded: they are cheap to mint by the hundred (every market spawns one token
+per outcome) and were being farmed. `fetch`, `prefetch` and `filter-check` drop
+them with the reason `prediction market outcome token`, before the transaction
+counts, so the tokens pool is split only among real submissions.
+
+Detection is **purely on-chain** (`src/utils/prediction-market-detection.ts`);
+the Website / Name fields are submitter-controlled and are never consulted.
+Every EVM token of the period is checked, batched per chain through Multicall3:
+
+- **Generic probe**: the token is a Gnosis `Wrapped1155` ERC-20 wrapper around
+  an ERC-1155 ConditionalTokens position (`multiToken()` returns a contract that
+  is ERC-1155 and answers `getOutcomeSlotCount`). This catches every protocol
+  built on the Gnosis Conditional Tokens Framework (Seer categorical, scalar,
+  futarchy and Circles markets, Omen positions, ...) on every chain, without
+  knowing the protocol.
+- **Protocol probes**: exact matches that also name the market in the log and
+  the `Detail` column: Seer market factories (`allMarkets()` → `wrappedOutcome(i)`
+  on Gnosis, Ethereum, Base, Optimism), Overtime/Thales position tokens
+  (`market()` + manager `isKnownMarket` on Optimism, Arbitrum, Base, Polygon)
+  and Trueo YES/NO tokens (Base). The addresses live in
+  `PREDICTION_MARKET_REGISTRIES` in that file: add a line there to cover a
+  new factory, or a new probe function for a protocol with a different shape.
+
+Reliability rules:
+
+- An RPC failure **aborts the run** after retries (rotating through the chain's
+  configured rpc and a few public fallbacks, `FALLBACK_RPCS`): rewards are
+  pool-based, so silently keeping an undetected token would underpay everyone
+  else. Re-run. Rate limits (HTTP 429) and timeouts rotate to the next rpc;
+  only a genuine EVM revert is treated as "not an outcome token".
+- The filter only applies to periods starting on or after **2026-10-01**, when
+  the rule started, so re-running an older month reproduces what was paid.
+  `PREDICTION_MARKET_FILTER_SINCE=YYYY-MM-DD` in `.env` moves that date
+  (`2000-01-01` applies it to every period).
+- Chains without Multicall3 fall back to one `eth_call` per probe (slower).
+- `PM_DETECT_DEBUG=1` logs the timing of every Multicall3 batch.
+- Removals are unaffected: removing a prediction-market token still earns the
+  usual removal reward. Use `exclusions.json` if a specific removal should not.
+
+Not detected (none submitted so far; check such tokens by hand and use
+`exclusions.json`): Solana outcome tokens (PNP, DFlow-Kalshi, Jupiter Forecast,
+MetaDAO…; the 54 Solana tokens of September 2026 have none as mint authority),
+Overtime/Thales positions of markets their manager has expired, Thales ranged
+IN/OUT positions, Context Markets on Base, and Polymarket ERC-20 wrappers that
+have no `multiToken()`. Seer outcome tokens submitted to **Address Tags** are
+not this rule's business either: they pass the address checks as contracts.
+
+Validated on Aug–Sep 2026 (250/250 Seer tokens detected, 0 false positives on
+the other 277 tokens, 28 s), on Jun 2025–Jul 2026 (2,084 tokens, 0 false
+positives, 81 s) and on the published September 2026 tags (433 EVM tokens: all
+329 of the farmed Seer tokens, nothing else, 26 s). Chains with Seer factories
+cost ~10–40 s each (the markets are enumerated on every run); the rest take well
+under a second.
 
 ## Exclusions: fixing rewards after they were generated
 

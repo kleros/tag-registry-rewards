@@ -68,7 +68,7 @@ net.Socket.prototype.connect = function connect(...args) {
 }
 
 // The settings a test may not inherit from the operator's shell.
-const PIPELINE_SETTING = /^(TX_NETWORK_ID|WALLET_PRIVATE_KEY|STIPEND|MAX_REWARD|REWARD_.*|SOLANA_.*|EVM_.*|REMOVAL_.*|MAX_PER_ATQ_.*|PNK|XDAI_.*|FILES_DIR|FILEBASE_TOKEN|IPFS_GATEWAY|EXCLUSIONS_FILE|ENVIO_API_TOKEN|HYPERSYNC_.*|JUPITER_.*|TX_COUNT_CACHE.*|DUNE_.*|TX_RPC_URL|DISBURSEMENTS_DIR|SEND_.*)$/
+const PIPELINE_SETTING = /^(TX_NETWORK_ID|WALLET_PRIVATE_KEY|STIPEND|MAX_REWARD|REWARD_.*|SOLANA_.*|EVM_.*|REMOVAL_.*|MAX_PER_ATQ_.*|PNK|XDAI_.*|FILES_DIR|FILEBASE_TOKEN|IPFS_GATEWAY|EXCLUSIONS_FILE|ENVIO_API_TOKEN|HYPERSYNC_.*|JUPITER_.*|TX_COUNT_CACHE.*|DUNE_.*|TX_RPC_URL|DISBURSEMENTS_DIR|SEND_.*|EXPLORER_CHECK|PREDICTION_MARKET_.*|PM_DETECT_.*)$/
 
 // The documented configuration (.env.example) plus unreachable local URLs for
 // every external service, so a test that forgets a mock fails fast.
@@ -79,7 +79,7 @@ const baseline = (tmp) => ({
   REWARD_FORMULA_ADDRESS_TAGS:
     "(reward_pool/(2*total_submissions)) + ((reward_pool*txns_with_contract)/(2*total_txns_with_all_contracts))",
   REWARD_FORMULA_TOKENS:
-    "((token_tx/total_txns_with_all_contracts)*0.1*reward_pool) + ((sqrt(token_tx)/sum_sqrt_total_txns_with_all_contracts)*0.9*reward_pool)",
+    "((token_tx/total_txns_with_all_contracts)*0.5*reward_pool) + ((sqrt(token_tx)/sum_sqrt_total_txns_with_all_contracts)*0.5*reward_pool)",
   REWARD_FORMULA_DOMAINS:
     "(reward_pool/(2*total_submissions)) + ((reward_pool*txns_with_contract)/(2*total_txns_with_all_contracts))",
   REWARD_REDISTRIBUTE_CAPPED_ADDRESS_TAGS: "true",
@@ -110,6 +110,10 @@ const baseline = (tmp) => ({
   HYPERSYNC_URL_TEMPLATE: "http://127.0.0.1:9/hypersync-not-mocked/{chainId}",
   JUPITER_TOKENS_API_URL: "http://127.0.0.1:9/jupiter-not-mocked",
   DUNE_BASE_URL: "http://127.0.0.1:9/dune-not-mocked",
+  // The explorers are real websites, not mocked: a test turns the check on
+  // with checkExplorerTags stubbed (test/integration/tag-filters.test.ts).
+  EXPLORER_CHECK: "off",
+  PM_DETECT_RETRY_BASE_MS: "1",
 })
 
 if (process.env.HERMETIC_CHILD !== "1") {

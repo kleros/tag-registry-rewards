@@ -17,7 +17,8 @@ let routines: TagsRoutine
 let removals: typeof import("../../src/removals-routine")
 let filterCheck: typeof import("../../src/filter-check-routine")
 const validation = require("../../src/utils/address-tag-validation")
-const explorer = require("../../src/utils/is-tagged-on-etherscan")
+const explorerTags = require("../../src/utils/explorer-tags")
+const pm = require("../../src/utils/prediction-market-detection")
 const sender = require("../../src/transaction-sender")
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let evmLane: any
@@ -53,16 +54,28 @@ before(async () => {
   removals = require("../../src/removals-routine")
   filterCheck = require("../../src/filter-check-routine")
   originals.reason = validation.getAddressTagExclusionReason
-  originals.explorer = explorer.isTaggedOnEtherscan
+  originals.explorer = explorerTags.checkExplorerTags
   originals.sleep = sender.sleep
+  originals.pm = pm.detectPredictionMarketTokens
+  pm.detectPredictionMarketTokens = async () => ({})
   validation.getAddressTagExclusionReason = async (tag: Tag) => (tag.tagAddress === evmAddress(0xe0a) ? "not a contract (getCode == 0x)" : null)
-  explorer.isTaggedOnEtherscan = async () => false
+  // on etherscan.io evmAddress(0xc3) has a name tag; arbiscan.io cannot be read
+  explorerTags.checkExplorerTags = async (items: { key: string; host: string; address: string }[]) =>
+    new Map(
+      items.map((i) => [
+        i.key,
+        i.host === "arbiscan.io"
+          ? { tagged: null, names: [], ignored: [], detail: "arbiscan.io shuts scripts out (Cloudflare challenge)", url: `https://arbiscan.io/address/${i.address}` }
+          : { tagged: i.address === evmAddress(0xc3), names: ["Circle: USDC Token"], ignored: [], detail: "", url: `https://${i.host}/address/${i.address}` },
+      ])
+    )
   sender.sleep = async () => undefined
 })
 after(async () => {
   validation.getAddressTagExclusionReason = originals.reason
-  explorer.isTaggedOnEtherscan = originals.explorer
+  explorerTags.checkExplorerTags = originals.explorer
   sender.sleep = originals.sleep
+  pm.detectPredictionMarketTokens = originals.pm
   logs.restore()
   await dune.stop()
 })
@@ -108,6 +121,15 @@ describe("tagsRoutine (fetch)", () => {
       { chain: SOLANA_CHAIN, address: popular, tx_count: 99999 },
     ])
     assert.deepEqual(readJson(join(work, "files", "latest_fetch_manifest.json")).runId, manifest.runId)
+  })
+
+  it("records the explorer check's review file, named with the fetch's runId, in its manifest", async () => {
+    subgraph.add(subgraphItem("tokens", { requests: [reg(evmAddress(4))], key0: `eip155:1:${evmAddress(0xc3)}` }))
+    dune.evmCounts = { "1": { [evmAddress(0xc3)]: 10 } }
+    const manifest = await withEnv({ EXPLORER_CHECK: "on" }, () => routines.tagsRoutine(PERIOD))
+    assert.deepEqual(manifest.explorerCheck, { file: `${manifest.runId}_explorer_check.csv`, tagged: 1, notRead: 0 })
+    assert.ok(require("fs").existsSync(join(work, "files", manifest.explorerCheck!.file)))
+    assert.equal(manifest.includedCount, 1, "listed for review, not excluded")
   })
 
   it("never writes outputs when a count is missing (payouts are never split on zeros)", async () => {
@@ -221,5 +243,28 @@ describe("filterCheckRoutine", () => {
       ["chain not configured for rewards", "not a contract (getCode == 0x)"]
     )
     assert.equal(dune.sqls.length, 0, "no tx count is fetched")
+    assert.equal(report.explorerCheckFile, undefined, "EXPLORER_CHECK=off in the test baseline")
+  })
+
+  it("with the explorer check, lists each entry tagged on its explorer or not readable, for review", async () => {
+    subgraph.add(
+      subgraphItem("tokens", { requests: [reg(evmAddress(3))], key0: `eip155:1:${evmAddress(0xc3)}` }),
+      subgraphItem("tokens", { requests: [reg(evmAddress(4))], key0: `eip155:42161:${evmAddress(0xa4)}` }),
+      subgraphItem("domains", { requests: [reg(evmAddress(5))], key0: `eip155:1:${evmAddress(0xc3)}` })
+    )
+    const report = await withEnv({ EXPLORER_CHECK: "on" }, () => filterCheck.filterCheckRoutine(PERIOD))
+    assert.equal(report.excludedCount, 0, "nothing is excluded for it automatically")
+    assert.deepEqual([report.explorerTaggedCount, report.explorerNotReadCount], [1, 1])
+    const review = readCsv(join(work, "files", report.explorerCheckFile as string))
+    const header = review[0]
+    assert.deepEqual(header, ["Explorer", "Item ID", "Submitter", "Registry", "Chain ID", "Address tagged", "Registered at", "Explorer page", "Tags there, or why not read"])
+    const col = (name: string) => header.indexOf(name)
+    assert.deepEqual(
+      review.slice(1).map((r) => [r[col("Explorer")], r[col("Chain ID")], r[col("Explorer page")], r[col("Tags there, or why not read")]]),
+      [
+        ["tagged", "1", `https://etherscan.io/address/${evmAddress(0xc3)}`, "etherscan.io: Circle: USDC Token"],
+        ["not read", "42161", `https://arbiscan.io/address/${evmAddress(0xa4)}`, "arbiscan.io shuts scripts out (Cloudflare challenge)"],
+      ]
+    )
   })
 })

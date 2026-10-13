@@ -120,16 +120,20 @@ const itemToTag = async (
   }
 }
 
+// A CAIP-10 key0 as the address it names: an EVM address (eip155) is the same
+// in any letter case (0xAbC… and 0xabc…), a Solana one is not (base58).
+export const caipAddressKey = (key0: string): string => {
+  const key = key0.trim()
+  return /^eip155:/i.test(key) ? key.toLowerCase() : key
+}
+
+// CDN entries whose contract is live in the Tokens registry are not rewarded
+// (the Contract Domain Name rules). Compared by address, so a token registered
+// as 0xabc… also excludes the CDN entry written 0xAbC…: every live Tokens
+// entry is read (key0 only), since the indexer matches key0 letter for letter.
 const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
   if (domainItems.length === 0) return []
 
-  const caipAddresses = domainItems
-    .map((item) => item?.key0)
-    .filter((k): k is string => !!k)
-
-  if (caipAddresses.length === 0) return domainItems
-
-  // Batch query: find all items in the tokens registry matching any of these key0 values
   const allTokenItems: Item[] = []
   let offset = 0
 
@@ -139,7 +143,6 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
         {
           litems:LItem(where: {
             registry_id: { _eq: "${conf.XDAI_REGISTRY_TOKENS}"},
-            key0: {_in: ${JSON.stringify(caipAddresses)}},
             status: {_in: ["Registered", "ClearingRequested"]},
           }, limit: ${PAGE_SIZE}, offset: ${offset}, order_by: {id: asc}) {
             key0
@@ -175,11 +178,20 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
     offset += PAGE_SIZE
   }
 
-  // Build a set of key0 values that are active tokens
-  const tokenKey0Set = new Set(allTokenItems.map((item) => item.key0))
+  const tokenAddresses = new Set(allTokenItems.filter((item) => !!item.key0).map((item) => caipAddressKey(item.key0)))
 
-  // A domain is kept only if its key0 is NOT in the tokens registry
-  return domainItems.filter((item) => !tokenKey0Set.has(item.key0))
+  // A domain is kept only if its address is NOT a live token (one without
+  // key0 is kept here, and skipped with a warning when read)
+  const kept = domainItems.filter((item) => !item.key0 || !tokenAddresses.has(caipAddressKey(item.key0)))
+  const exact = new Set(allTokenItems.map((item) => item.key0))
+  const caseOnly = domainItems.filter(
+    (item) => !!item.key0 && !exact.has(item.key0) && tokenAddresses.has(caipAddressKey(item.key0))
+  ).length
+  console.log(
+    `[fetch] ${domainItems.length - kept.length} of ${domainItems.length} Domains entries are live in the Tokens registry: ` +
+      `not rewarded${caseOnly > 0 ? ` (${caseOnly} of them written there in another letter case)` : ""}`
+  )
+  return kept
 }
 
 // Submitters never rewarded, compared case-insensitively (the indexer returns

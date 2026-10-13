@@ -183,6 +183,16 @@ describe("writeFetchOutputs", () => {
 })
 
 describe("writeFilterCheckOutput", () => {
+  it("names the prediction market of an excluded outcome token in the Detail column", async () => {
+    const row: FilterCheckRow = { ...makeTag({ registry: "tokens" }), reason: "prediction market outcome token", detail: "seer: Seer MarketFactory market 0xm outcome #1" }
+    const out = await writeFilterCheckOutput("6", [row])
+    const csv = readCsv(file(out.csvFile))
+    assert.equal(csv[0][csv[0].length - 1], "Detail")
+    const detail = csv.find((r) => r[0] === "detail") as string[]
+    assert.equal(detail[detail.length - 1], "seer: Seer MarketFactory market 0xm outcome #1")
+    assert.deepEqual(out.summaryByReason.filter((r) => r.count > 0), [{ reason: "prediction market outcome token", count: 1 }])
+  })
+
   const row = (reason: FilterCheckRow["reason"]): FilterCheckRow => {
     const tag = makeTag()
     return { ...tag, reason }

@@ -83,30 +83,43 @@ describe("formula engine: arithmetic", () => {
     )
   })
 
-  it("evaluates the Tokens formula so that the shares of a registry add up to the pool", () => {
-    const formula =
-      "((token_tx/total_txns_with_all_contracts)*0.1*reward_pool) + ((sqrt(token_tx)/sum_sqrt_total_txns_with_all_contracts)*0.9*reward_pool)"
-    const counts = [1, 4, 9, 16, 1000000]
+  // The Tokens formula of each period: 10% by share of transactions and 90% by
+  // square root until September 2026, half and half from October 2026.
+  const tokensFormula = (linear: string, sqrt: string) =>
+    `((token_tx/total_txns_with_all_contracts)*${linear}*reward_pool) + ((sqrt(token_tx)/sum_sqrt_total_txns_with_all_contracts)*${sqrt}*reward_pool)`
+  const TOKENS_UNTIL_SEPTEMBER_2026 = tokensFormula("0.1", "0.9")
+  const TOKENS_FROM_OCTOBER_2026 = tokensFormula("0.5", "0.5")
+  const tokensRewards = (formula: string, counts: number[], pool: BigNumber): BigNumber[] => {
     const total = counts.reduce((a, b) => a + b, 0)
     const sumSqrt = counts.reduce((acc, c) => acc.add(scaledSqrt(c)), BigNumber.from(0))
-    const pool = PNK(3000)
-    let sum = BigNumber.from(0)
-    for (const count of counts) {
-      sum = sum.add(
-        run(
-          formula,
-          ctx({
-            reward_pool: pool,
-            total_submissions: counts.length,
-            txns_with_contract: count,
-            total_txns_with_all_contracts: total,
-            sum_sqrt_total_txns_with_all_contracts_scaled: sumSqrt,
-          })
-        )
+    return counts.map((count) =>
+      run(
+        formula,
+        ctx({
+          reward_pool: pool,
+          total_submissions: counts.length,
+          txns_with_contract: count,
+          total_txns_with_all_contracts: total,
+          sum_sqrt_total_txns_with_all_contracts_scaled: sumSqrt,
+        })
       )
+    )
+  }
+
+  it("evaluates the Tokens formula so that the shares of a registry add up to the pool", () => {
+    for (const formula of [TOKENS_UNTIL_SEPTEMBER_2026, TOKENS_FROM_OCTOBER_2026]) {
+      const pool = PNK(3000)
+      const sum = tokensRewards(formula, [1, 4, 9, 16, 1000000], pool).reduce((acc, r) => acc.add(r), BigNumber.from(0))
+      assert.ok(sum.lte(pool), "floor division never hands out more than the pool")
+      assert.ok(pool.sub(sum).lt(1000000), `only rounding dust may remain, got ${pool.sub(sum).toString()} wei`)
     }
-    assert.ok(sum.lte(pool), "floor division never hands out more than the pool")
-    assert.ok(pool.sub(sum).lt(1000000), `only rounding dust may remain, got ${pool.sub(sum).toString()} wei`)
+  })
+
+  it("weighs transactions and their square root 10/90 until September 2026, 50/50 from October", () => {
+    // 1 and 9 transactions: shares 10% and 90%, square-root shares 1/4 and 3/4
+    const pool = PNK(1000)
+    assert.deepEqual(tokensRewards(TOKENS_UNTIL_SEPTEMBER_2026, [1, 9], pool), [PNK(235), PNK(765)]) // 0.1·10% + 0.9·25%
+    assert.deepEqual(tokensRewards(TOKENS_FROM_OCTOBER_2026, [1, 9], pool), [PNK(175), PNK(825)]) // 0.5·10% + 0.5·25%
   })
 })
 

@@ -15,6 +15,8 @@ import { assertSolanaRpcSettings } from "./utils/solana-rpc-enrichment"
 import { acquireTxCountCacheLock, txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
 import { writeFetchOutputs } from "./utils/fetch-output"
 import { applyTagFilters } from "./utils/tag-filters"
+import { writeExplorerCheck } from "./utils/filter-check-output"
+import conf from "./config"
 import { BudgetExceededError, isBudgetExceeded, startTimeBudget } from "./utils/runtime-helpers"
 
 // Settings that would only fail once a lookup starts, checked up front so a
@@ -183,20 +185,35 @@ export const tagsRoutine = async (period: Period): Promise<FetchManifest> => {
   const tags = await fetchTags(period)
   console.log("Fetched tags:", tags.length)
 
-  const { passed: filteredTags, excluded } = await applyTagFilters(tags)
-  for (const { tag, reason } of excluded) {
-    console.log(`[filter] Excluded (${reason}):`, tag.tagAddress, `| chain: ${tag.chain}`)
+  const { passed: filteredTags, excluded, explorerReview } = await applyTagFilters(tags, { period })
+  for (const { tag, reason, detail } of excluded) {
+    console.log(`[filter] Excluded (${reason}):`, tag.tagAddress, `| chain: ${tag.chain}` + (detail ? ` | ${detail}` : ""))
   }
   console.log("Tags after fetch filtering:", filteredTags.length)
+  // Written now, not after the counts: those take hours, and the review is
+  // what can be worked on meanwhile (confirmed ones go to exclusions.json).
+  // Named with the fetch's runId, like the rest of its outputs.
+  const runId = String(new Date().getTime())
+  const explorerFile = await writeExplorerCheck(runId, explorerReview)
+  const tagged = explorerReview.filter((r) => r.status === "tagged").length
+  if (explorerFile) {
+    console.log(
+      `[filter] Explorer check to review: ${conf.FILES_DIR}/${explorerFile}. Add the entries already tagged before ` +
+        "their submission to exclusions.json, then run generate and document again (README \"Explorer tags\")"
+    )
+  }
 
   const { enrichedTags, droppedBySolanaHoldersCount, enrichment } = await enrichTags(filteredTags)
-  const runId = String(new Date().getTime())
   const manifest = await writeFetchOutputs(
     runId,
     enrichedTags,
     droppedBySolanaHoldersCount,
     period,
-    { excludedCount: excluded.length, enrichment }
+    {
+      excludedCount: excluded.length,
+      enrichment,
+      ...(explorerFile ? { explorerCheck: { file: explorerFile, tagged, notRead: explorerReview.length - tagged } } : {}),
+    }
   )
 
   console.log("Fetch completed:", manifest)
@@ -220,7 +237,8 @@ export const prefetchRoutine = async (period: Period): Promise<{ complete: boole
   console.log("Prefetch period:", period)
   preflight(true, true)
   const tags = await fetchTags(period)
-  const { passed } = await applyTagFilters(tags)
+  // no explorer check: prefetch only counts transactions, fetch decides
+  const { passed } = await applyTagFilters(tags, { period, skipExplorerCheck: true })
   console.log(`Prefetching tx counts for ${passed.length} tag(s) registered so far`)
   try {
     const { enrichedTags } = await enrichTags(passed)

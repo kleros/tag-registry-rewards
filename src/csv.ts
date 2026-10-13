@@ -46,6 +46,7 @@ export interface GenerateSource {
   periodEnd?: string
   tagsFile?: string
   gasFile?: string
+  formulas?: GenerateManifest["formulas"]
 }
 
 const buildCsv = async (rewards: Reward[], source: GenerateSource = {}): Promise<GenerateManifest> => {
@@ -129,6 +130,7 @@ const buildCsv = async (rewards: Reward[], source: GenerateSource = {}): Promise
       : {}),
     ...(source.tagsFile ? { tagsFile: source.tagsFile } : {}),
     ...(source.gasFile ? { gasFile: source.gasFile } : {}),
+    ...(source.formulas ? { formulas: source.formulas } : {}),
     rewardsFile,
     transactionsFile: `${filename}.json`,
   }

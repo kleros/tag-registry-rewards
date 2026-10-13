@@ -12,6 +12,13 @@ const erc20 = new utils.Interface([
   "event Transfer(address indexed from, address indexed to, uint256 value)",
 ])
 const TRANSFER_TOPIC = erc20.getEventTopic("Transfer")
+export const MULTICALL3 = "0xca11bde05977b3631167028862be2a173976ca11"
+const multicall3 = new utils.Interface([
+  "function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) view returns (tuple(bool success, bytes returnData)[] returnData)",
+])
+// A view function of a stubbed contract: gets the calldata, returns the ABI-encoded
+// result, or throws { code: 3, message: "execution reverted" } like a revert.
+export type ContractStub = (data: string) => string
 const hex = (n: number | bigint | BigNumber): string => BigNumber.from(n).toHexString().replace(/^0x0+(?=.)/, "0x")
 
 interface Block {
@@ -88,6 +95,8 @@ export class MockEvm {
   logs: Log[] = []
   code = new Map<string, string>()
   interfaces = new Map<string, boolean>()
+  // eth_call answers of stubbed contracts, by lowercase address (prediction-market probes).
+  contracts = new Map<string, ContractStub>()
   autoMine = true
   baseFee = BigInt(7) // wei
   faults: EvmFaults = {}
@@ -276,6 +285,20 @@ export class MockEvm {
         return this.code.get(String(params[0]).toLowerCase()) || "0x"
       case "eth_call": {
         const { to, data } = params[0]
+        const target = String(to).toLowerCase()
+        if (target === MULTICALL3 && this.code.has(MULTICALL3) && String(data).startsWith(multicall3.getSighash("aggregate3"))) {
+          const [calls] = multicall3.decodeFunctionData("aggregate3", data)
+          const results = calls.map((c: { target: string; allowFailure: boolean; callData: string }) => {
+            try {
+              return { success: true, returnData: this.stubCall(String(c.target).toLowerCase(), c.callData) }
+            } catch (err) {
+              if (!c.allowFailure) throw err
+              return { success: false, returnData: "0x" }
+            }
+          })
+          return multicall3.encodeFunctionResult("aggregate3", [results])
+        }
+        if (this.contracts.has(target)) return this.stubCall(target, data)
         const selector = String(data).slice(0, 10)
         if (String(to).toLowerCase() === this.token.toLowerCase() && selector === erc20.getSighash("balanceOf")) {
           const [owner] = erc20.decodeFunctionData("balanceOf", data)
@@ -344,6 +367,12 @@ export class MockEvm {
       default:
         throw { code: -32601, message: `method ${method} not mocked` }
     }
+  }
+
+  private stubCall(target: string, data: string): string {
+    const stub = this.contracts.get(target)
+    if (!stub) throw { code: 3, message: "execution reverted" }
+    return stub(data)
   }
 
   private formatLog(l: Log) {

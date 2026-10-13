@@ -59,6 +59,12 @@ describe("CLI generate", () => {
     const manifest = readJson(join(cwd, "files", "latest_generate_manifest.json"))
     assert.equal(manifest.periodStart, "2026-09-01T00:00:00.000Z")
     assert.equal(manifest.tagsFile, "1790000000000_generate_tags.json")
+    assert.deepEqual(manifest.formulas, {
+      addressTags: process.env.REWARD_FORMULA_ADDRESS_TAGS,
+      tokens: process.env.REWARD_FORMULA_TOKENS,
+      domains: process.env.REWARD_FORMULA_DOMAINS,
+    })
+    assert.ok(res.stdout.includes(`tokens:      ${process.env.REWARD_FORMULA_TOKENS}`), "the formulas are printed")
     assert.match(res.stdout, new RegExp(`Transactions file \\(for --mode send\\): ${manifest.transactionsFile}`))
     assert.deepEqual(readJson(join(cwd, "files", `${manifest.runId}_generate_manifest.json`)), manifest)
     const tx = readJson(join(cwd, "files", manifest.transactionsFile))

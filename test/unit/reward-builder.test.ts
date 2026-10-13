@@ -140,16 +140,29 @@ describe("buildRewards: registries", () => {
     assert.equal(amountOf(rewards, domain.tag), "200.0")
   })
 
-  it("ranks Tokens by the documented formula: 10% by count, 90% by square root of the count", async () => {
+  it("ranks Tokens by the documented formula: half by count, half by square root of the count (from October 2026)", async () => {
     const entries = [1, 4, 9, 16].map((count) => withCount(makeTag({ registry: "tokens", chain: "100" }), count))
     const rewards = await build(entries, PNK(3000))
+    // 50% of 3000 by count (total 30) + 50% by sqrt (total 10): 50*tx + 150*sqrt(tx)
+    const expected = [200, 500, 900, 1400]
+    entries.forEach((entry, i) => {
+      const got = Number(amountOf(rewards, entry.tag))
+      assert.ok(Math.abs(got - expected[i]) < 1e-9, `entry ${i}: ${got} vs ${expected[i]}`)
+    })
+    assert.ok(sum(rewards).lte(PNK(3000)))
+  })
+
+  it("ranks Tokens 10% by count and 90% by square root with the formula of September 2026 and before", async () => {
+    const entries = [1, 4, 9, 16].map((count) => withCount(makeTag({ registry: "tokens", chain: "100" }), count))
+    const formula =
+      "((token_tx/total_txns_with_all_contracts)*0.1*reward_pool) + ((sqrt(token_tx)/sum_sqrt_total_txns_with_all_contracts)*0.9*reward_pool)"
+    const rewards = await withEnv({ REWARD_FORMULA_TOKENS: formula }, () => build(entries, PNK(3000)))
     // 10% of 3000 by count (total 30) + 90% by sqrt (total 10): 10*tx + 270*sqrt(tx)
     const expected = [280, 580, 900, 1240]
     entries.forEach((entry, i) => {
       const got = Number(amountOf(rewards, entry.tag))
       assert.ok(Math.abs(got - expected[i]) < 1e-9, `entry ${i}: ${got} vs ${expected[i]}`)
     })
-    assert.ok(sum(rewards).lte(PNK(3000)))
   })
 
   it("divides Solana counts by SOLANA_TX_DIVIDER before the formula, and only them", async () => {

@@ -74,6 +74,8 @@ export interface FetchManifest {
   droppedBySolanaHoldersCount?: number
   // Where the tx counts came from (absent in manifests from older runs).
   enrichment?: FetchEnrichmentInfo
+  // The explorer check's findings to review (see utils/explorer-tags.ts), when any.
+  explorerCheck?: { file: string; tagged: number; notRead: number }
 }
 
 export interface FetchEnrichmentInfo {
@@ -123,8 +125,8 @@ export interface GenerateInput {
 
 export type FilterCheckReason =
   | "chain not configured for rewards"
-  | "already tagged on explorer"
   | "token on address tags"
+  | "prediction market outcome token"
   | "not a contract (getCode == 0x)"
   | "eip-1167 minimal proxy"
   | "erc-721 contract"
@@ -137,12 +139,30 @@ export interface FilterCheckRow {
   tagAddress: string
   latestRequestResolutionTime: number
   reason: FilterCheckReason
+  // The evidence: the explorer's name tag, the prediction market…
+  detail?: string
+}
+
+// An Address Tags or Tokens entry as its reference explorer shows it: tagged
+// there (with the tags), or an explorer that could not be read (a Cloudflare
+// challenge, Solscan). Reported for review, never excluded automatically: no
+// explorer tells when a tag was added, nor whether it came from Kleros Scout
+// itself (see explorer-tags.ts); a confirmed one goes to exclusions.json.
+export interface ExplorerReview {
+  tag: Tag
+  status: "tagged" | "not read"
+  url: string
+  detail: string // the tags, or why the explorer was not read
 }
 
 export interface FilterCheckReport {
   runId: string
   csvFile: string
   excludedCount: number
+  // the explorer check: entries tagged there, explorers not read, the file
+  explorerTaggedCount?: number
+  explorerNotReadCount?: number
+  explorerCheckFile?: string
   summaryByReason: Array<{ reason: FilterCheckReason; count: number }>
 }
 
@@ -227,6 +247,9 @@ export interface GenerateManifest {
   periodEnd?: string
   tagsFile?: string
   gasFile?: string
+  // The REWARD_FORMULA_* settings the rewards were computed with (they change
+  // between periods: the Tokens weighting did from October 2026).
+  formulas?: { addressTags: string; tokens: string; domains: string }
   rewardsFile: string
   transactionsFile: string
 }

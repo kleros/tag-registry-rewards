@@ -288,8 +288,16 @@ const runGenerate = async (
     )
   }
   if (!sharedExclusions) warnUnmatchedExclusions(exclusions, ["submissions"])
+  // Printed and recorded: they change between periods (the Tokens weighting
+  // did from October 2026), and a payout's own must be checkable.
+  const formulas = {
+    addressTags: String(conf.REWARD_FORMULA_ADDRESS_TAGS || "").trim(),
+    tokens: String(conf.REWARD_FORMULA_TOKENS || "").trim(),
+    domains: String(conf.REWARD_FORMULA_DOMAINS || "").trim(),
+  }
+  console.log(`[generate] Formulas:\n  addressTags: ${formulas.addressTags}\n  tokens:      ${formulas.tokens}\n  domains:     ${formulas.domains}`)
   const rewards = await buildRewards(stipend, maxReward, tags, gasDunes)
-  const manifest = await buildCsv(rewards, { ...source, tagsFile: tagsFilename, gasFile: gasFilename })
+  const manifest = await buildCsv(rewards, { ...source, tagsFile: tagsFilename, gasFile: gasFilename, formulas })
   console.log(`Transactions file (for --mode send): ${manifest.transactionsFile}`)
 }
 
@@ -383,8 +391,9 @@ const main = async () => {
 
     console.log("\n=== [all] 1/4 fetch (submissions) ===")
     applyTimeBudget()
+    let fetchManifest: FetchManifest
     try {
-      await tagsRoutine({ start, end })
+      fetchManifest = await tagsRoutine({ start, end })
     } catch (err) {
       if (!isBudgetExceeded(err)) throw err
       console.log(
@@ -408,6 +417,16 @@ const main = async () => {
     console.log("\n=== [all] done ===")
     console.log(`Documented ${entry.recipientCount} recipients for ${entry.period}.`)
     if (entry.url) console.log(`IPFS URL: ${entry.url}`)
+    const review = fetchManifest.explorerCheck
+    if (review) {
+      // Published already: an exclusion found in the review means generating
+      // and documenting the period again (README "Exclusions").
+      console.log(
+        `Explorer check to review before sending: ${conf.FILES_DIR}/${review.file} (${review.tagged} tagged on their ` +
+          `explorer, ${review.notRead} to check by hand). For any entry tagged before its submission, add it to ` +
+          "exclusions.json, then run generate and document again."
+      )
+    }
     // Print the exact filenames — submissions use the generate run's timestamp,
     // removals/ATQ the removals run's, so a single <runId> placeholder misleads.
     let submissionsTxFile = "<see latest_generate_manifest.json: transactionsFile>"

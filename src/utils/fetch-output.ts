@@ -31,7 +31,7 @@ export const writeFetchOutputs = async (
   enrichedTags: EnrichedTag[],
   droppedBySolanaHoldersCount = 0,
   period?: Period,
-  extras: { excludedCount?: number; enrichment?: FetchEnrichmentInfo } = {}
+  extras: { excludedCount?: number; enrichment?: FetchEnrichmentInfo; explorerCheck?: FetchManifest["explorerCheck"] } = {}
 ): Promise<FetchManifest> => {
   ensureFilesDir()
 
@@ -121,6 +121,7 @@ export const writeFetchOutputs = async (
     excludedCount: extras.excludedCount,
     droppedBySolanaHoldersCount,
     enrichment: extras.enrichment,
+    ...(extras.explorerCheck ? { explorerCheck: extras.explorerCheck } : {}),
   }
   writeFileSync(
     `./${conf.FILES_DIR}/${manifestFile}`,

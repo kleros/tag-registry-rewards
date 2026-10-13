@@ -131,6 +131,20 @@ describe("fetchTags", () => {
     assert.deepEqual(tags.map((t) => t.submitter), [evmAddress(3), evmAddress(5)], "a removed token does not block its domain")
   })
 
+  it("matches a Domains entry to its token whatever the letter case of an EVM address, not of a Solana one", async () => {
+    const solanaMint = `solana:${SOLANA_CHAIN}:So11111111111111111111111111111111111111112`
+    subgraph.add(
+      subgraphItem("tokens", { requests: [registration(evmAddress(1), BEFORE)], key0: "eip155:1:0x93ed3fbe21207ec2e8f2d3c3de6e058cb73bc04d" }),
+      subgraphItem("domains", { requests: [registration(evmAddress(2), IN)], key0: "eip155:1:0x93ED3FBe21207Ec2E8f2d3C3de6e058Cb73Bc04d" }),
+      subgraphItem("domains", { requests: [registration(evmAddress(3), IN)], key0: "eip155:10:0x93ed3fbe21207ec2e8f2d3c3de6e058cb73bc04d" }), // another chain
+      subgraphItem("tokens", { requests: [registration(evmAddress(4), BEFORE)], key0: solanaMint }),
+      subgraphItem("domains", { requests: [registration(evmAddress(5), IN)], key0: solanaMint }),
+      subgraphItem("domains", { requests: [registration(evmAddress(6), IN)], key0: solanaMint.replace("So111", "so111") }) // another account
+    )
+    const tags = await fetchTags(PERIOD)
+    assert.deepEqual(tags.map((t) => t.submitter), [evmAddress(3), evmAddress(6)])
+  })
+
   it("never rewards the excluded submitters, whatever the casing", async () => {
     subgraph.add(
       subgraphItem("tokens", { requests: [registration("0xf313d85c7fef79118fcd70498c71bf94e75fc2f6", IN)] }),
