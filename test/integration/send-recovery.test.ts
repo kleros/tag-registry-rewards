@@ -283,6 +283,140 @@ describe("send: interrupted runs never pay twice", () => {
     assert.equal(paid().filter((p) => p.status === 1 && p.to === utils.getAddress(R.recipient)).length, 1, "this payout paid R once")
   })
 
+  // A's transaction is stuck and leaves the pools; its nonce goes to a cancel
+  // (a transaction to the wallet itself), then A's amount is paid to A with
+  // the next nonce: A paid by hand, or a payment that only coincides with it.
+  type Entry = { recipient: string; amount: BigNumber | string }
+  const fees = { type: 2, chainId: 100, maxFeePerGas: 3e9, maxPriorityFeePerGas: 2e9 }
+  // A PNK transfer from the wallet, signed and broadcast outside send (by hand).
+  const payByHand = async (nonce: number, e: Entry): Promise<string> => {
+    const erc20 = new utils.Interface(["function transfer(address to, uint256 amount)"])
+    const raw = await wallet.signTransaction({
+      ...fees,
+      nonce,
+      to: evm.token,
+      value: 0,
+      data: erc20.encodeFunctionData("transfer", [e.recipient, e.amount]),
+      gasLimit: 90000,
+    })
+    evm["sendRaw"](raw)
+    return utils.keccak256(raw)
+  }
+  const cancelThenPay = async (A: Entry, payout: Entry[] = [A], firstRun: { skipOnchainCheck?: boolean } = {}) => {
+    writePayout("1790000000001.json", payout)
+    evm.autoMine = false
+    await assert.rejects(send("1790000000001.json", firstRun), /not mined within/)
+    const saved = ledger()[0].transfers.find((t) => t.recipient === utils.getAddress(A.recipient))!
+    evm.dropMempool()
+    evm["sendRaw"](await wallet.signTransaction({ ...fees, nonce: saved.nonce, to: wallet.address, value: 0, gasLimit: 21000 }))
+    const later = await payByHand((saved.nonce as number) + 1, A)
+    evm.mine()
+    evm.autoMine = true
+    return { saved, later }
+  }
+  const paidTo = (recipient: string) => paid().filter((p) => p.status === 1 && p.to === utils.getAddress(recipient)).length
+
+  it("never forgets a transfer paid by hand under a later nonce after its own was cancelled; --skip-paid-on-chain records that payment", async () => {
+    const [A] = PAYOUT
+    const { saved, later } = await cancelThenPay(A)
+    assert.equal(paidTo(A.recipient), 1, "paid by hand")
+    await assert.rejects(
+      send("1790000000001.json"),
+      new RegExp(`was used by another transaction.*nonce ${(saved.nonce as number) + 1}\\) pays the same recipient the same amount, mined since this payout started.*--skip-paid-on-chain to record it as paid`, "s")
+    )
+    await assert.rejects(send("1790000000001.json", { forgetUnmined: true }), /not forgetting it: tx 0x[0-9a-f]{64} .*may be this transfer \(nonce \d+\), paid by hand/s)
+    assert.equal(paidTo(A.recipient), 1, "never sent again")
+    await send("1790000000001.json", { skipPaidOnChain: true })
+    const [record] = ledger()
+    assert.equal(record.status, "completed")
+    assert.equal(record.transfers[0].txHash, later)
+    assert.equal(record.transfers[0].foundOnChain, true)
+    assert.deepEqual(record.transfers[0].forgottenTxs, saved.attempts)
+    assert.equal(paidTo(A.recipient), 1)
+  })
+
+  it("sends a transfer again with --forget-unmined --unrelated-tx <hash> when a later payment only coincides with it", async () => {
+    const [A] = PAYOUT
+    const { saved, later } = await cancelThenPay(A) // e.g. the same amount owed to A by another payout, paid by hand
+    await assert.rejects(send("1790000000001.json", { forgetUnmined: true }), new RegExp(`not forgetting it: .*rerun with --forget-unmined --unrelated-tx ${later}`, "s"))
+    await assert.rejects(send("1790000000001.json", { forgetUnmined: true, skipOnchainCheck: true }), /not forgetting it/, "--skip-onchain-check sets nothing aside here")
+    await send("1790000000001.json", { forgetUnmined: true, unrelatedTxs: [`0x${later.slice(2).toUpperCase()}`] })
+    const [record] = ledger()
+    assert.equal(record.status, "completed")
+    assert.deepEqual(record.transfers[0].forgottenTxs, saved.attempts)
+    assert.equal(record.transfers[0].foundOnChain, undefined)
+    assert.equal(paidTo(A.recipient), 2, "the coinciding payment and this transfer")
+  })
+
+  it("keeps refusing to forget a transfer paid by hand while --skip-onchain-check is given for another transfer's coincidence", async () => {
+    const [A, B] = PAYOUT
+    evm.addPastTransfer(wallet.address, B.recipient, B.amount) // B owed the same by another payout: the operator skips the check
+    const { later } = await cancelThenPay(A, [A, B], { skipOnchainCheck: true })
+    await assert.rejects(send("1790000000001.json", { forgetUnmined: true }), /repeat transfers this wallet already paid/)
+    await assert.rejects(
+      send("1790000000001.json", { forgetUnmined: true, skipOnchainCheck: true }),
+      new RegExp(`not forgetting it: tx ${later} .*may be this transfer \\(nonce \\d+\\), paid by hand`, "s")
+    )
+    assert.equal(paidTo(A.recipient), 1, "never paid twice")
+  })
+
+  it("never sets aside a payment whose nonce the node does not tell: it may be the one that took this transfer's", async () => {
+    const [A] = PAYOUT
+    writePayout("1790000000001.json", [A])
+    evm.autoMine = false
+    await assert.rejects(send("1790000000001.json"), /not mined within/)
+    const saved = ledger()[0].transfers[0]
+    evm.dropMempool()
+    const replacement = await payByHand(saved.nonce as number, A) // replaced from another machine, same nonce
+    evm.mine()
+    evm.autoMine = true
+    const realHandle = evm["handle"].bind(evm)
+    evm["handle"] = (method: string, params: unknown[]) =>
+      method === "eth_getTransactionByHash" && String(params[0]).toLowerCase() === replacement ? null : realHandle(method, params)
+    await assert.rejects(
+      send("1790000000001.json", { forgetUnmined: true, unrelatedTxs: [replacement] }),
+      new RegExp(`not forgetting it: tx ${replacement} .*the node does not tell its nonce: it may be this transfer \\(nonce ${saved.nonce}\\).*cannot be set aside`, "s")
+    )
+    assert.equal(paidTo(A.recipient), 1, "never paid twice")
+  })
+
+  it("keeps the on-chain check for the other transfers when --unrelated-tx sets one payment aside", async () => {
+    const [A, , C] = PAYOUT
+    const { saved, later } = await cancelThenPay(A, [A, C]) // A's amount paid to A for something else
+    await payByHand((saved.nonce as number) + 2, C) // then C is paid from another machine
+    await assert.rejects(
+      send("1790000000001.json", { forgetUnmined: true, unrelatedTxs: [later] }),
+      /1 of the 1 transfers to send repeat transfers this wallet already paid/
+    )
+    assert.equal(paidTo(C.recipient), 1)
+    assert.equal(paidTo(A.recipient), 1)
+  })
+
+  it("records a transfer another machine paid under a later nonce, whose ledger never came back (--skip-paid-on-chain)", async () => {
+    const [A] = PAYOUT
+    writePayout("1790000000001.json", PAYOUT)
+    writePayout("1790000000006_atq_transactions.json", [{ recipient: evmAddress(0x5), amount: PNK(1) }], { kind: "atq" })
+    evm.autoMine = false
+    await assert.rejects(send("1790000000001.json"), /not mined within/)
+    evm.dropMempool()
+    evm.autoMine = true
+    // machine B, with a ledger of its own: an ATQ payout takes the stuck nonce, then B pays this file
+    const restore = setEnv({ DISBURSEMENTS_DIR: join(work, "machine-b-ledger") })
+    try {
+      await send("1790000000006_atq_transactions.json")
+      await send("1790000000001.json")
+    } finally {
+      restore()
+    }
+    assert.equal(paidTo(A.recipient), 1, "B paid A")
+    await assert.rejects(send("1790000000001.json"), /2 of the 2 transfers to send repeat transfers this wallet already paid/)
+    await send("1790000000001.json", { skipPaidOnChain: true })
+    const [record] = ledger()
+    assert.equal(record.status, "completed")
+    assert.deepEqual(record.transfers.map((t) => !!t.foundOnChain), [true, true, true])
+    for (const { recipient } of PAYOUT) assert.equal(paidTo(recipient), 1, `${recipient} paid once`)
+  })
+
   it("resumes saved transactions lowest nonce first", async () => {
     writePayout("1790000000001.json", PAYOUT.slice(0, 2))
     // a run signed #2 with nonce 0 and #1 with nonce 1 (#1 had reverted and was
@@ -537,6 +671,9 @@ describe("send: what nodes answer", () => {
     evm.mine()
     evm.autoMine = true
     await assert.rejects(send("1790000000001.json", { forgetUnmined: true }), /not forgetting it: tx 0x[0-9a-f]{64} .* may be this transfer/s)
+    // the one that took its nonce is never set aside, whatever the flags
+    const unrelatedTxs = [utils.keccak256(elsewhere)]
+    await assert.rejects(send("1790000000001.json", { forgetUnmined: true, unrelatedTxs, skipOnchainCheck: true }), /not forgetting it: .*took its nonce/s)
     assert.equal(paid().length, 1, "paid once, by the other transaction")
   })
 
@@ -731,6 +868,31 @@ describe("send: what nodes answer", () => {
     writePayout("1790000000001.json", PAYOUT)
     await assert.rejects(send("1790000000001.json"), /Could not read the wallet's past PNK transfers.*backends disagree/s)
     assert.equal(paid().length, 0)
+  })
+
+  it("refuses when the RPC answers a latest block older than the one its history search started from", async () => {
+    // a payment in the newest block, and a backend one block behind answering eth_blockNumber
+    writePayout("1790000000001.json", PAYOUT)
+    evm.addPastTransfer(wallet.address, PAYOUT[0].recipient, PAYOUT[0].amount)
+    const head = evm.latest.number
+    const realHandle = evm["handle"].bind(evm)
+    evm["handle"] = (method: string, params: unknown[]) => (method === "eth_blockNumber" ? utils.hexValue(head - 1) : realHandle(method, params))
+    await assert.rejects(
+      send("1790000000001.json"),
+      new RegExp(`Could not read the wallet's past PNK transfers.*answered ${head - 1} as its latest block after serving block ${head}`, "s")
+    )
+    assert.equal(paid().length, 0)
+  })
+
+  it("asks again when the RPC's latest block lags a moment behind the one its search started from", async () => {
+    writePayout("1790000000001.json", PAYOUT)
+    const head = evm.latest.number
+    const realHandle = evm["handle"].bind(evm)
+    let lagging = 2 // the payout's start block, then the first read after the search
+    evm["handle"] = (method: string, params: unknown[]) =>
+      method === "eth_blockNumber" && lagging-- > 0 ? utils.hexValue(head - 1) : realHandle(method, params)
+    await send("1790000000001.json")
+    assert.equal(paid().length, 3)
   })
 
   it("refuses when the node's latest block predates the period's end (a node behind)", async () => {

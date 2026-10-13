@@ -2,7 +2,7 @@ import { beforeEach, describe, it } from "node:test"
 import { strict as assert } from "assert"
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs"
 import { homedir } from "os"
-import { join, resolve } from "path"
+import { basename, join, resolve } from "path"
 import {
   acquireTxCountCacheLock,
   readCacheFile,
@@ -167,7 +167,7 @@ describe("disbursement ledger", () => {
       ...overrides,
     }
     r.contentId = contentId(r.chainId, r.token, r.transfers)
-    r.id = disbursementId(r.contentId, r.kind, r.periodStart, r.periodEnd)
+    r.id = disbursementId(r.contentId, r.kind, r.periodStart, r.periodEnd, r.periodStated)
     return r
   }
   const AUGUST = { periodStart: "2026-08-01T00:00:00.000Z", periodEnd: "2026-09-01T00:00:00.000Z" }
@@ -235,6 +235,7 @@ describe("disbursement ledger", () => {
       ["the period", AUGUST],
       ["the content id", { contentId: "00".repeat(32) }],
       ["the chain", { chainId: 10200 }],
+      ["a --period mark added", { periodStated: true }],
     ]
     for (const [what, change] of changes) {
       writeFileSync(path, JSON.stringify({ ...original, ...change }))
@@ -242,6 +243,25 @@ describe("disbursement ledger", () => {
     }
     writeFileSync(path, JSON.stringify({ ...original, status: "in-progress", transfers: [{ ...original.transfers[0], status: "pending" }] }))
     assert.equal(listDisbursements().length, 1, "progress is no change of what it pays")
+  })
+
+  it("stops on a copy of a record (a backup, a merge tool's), naming both files: it would count the payout twice", () => {
+    const path = saveDisbursement(record())
+    const copy = join(disbursementsDir(), `${basename(path, ".json")} (1).json`) // sorts before the original
+    writeFileSync(copy, readFileSync(path))
+    assert.throws(
+      () => listDisbursements(),
+      (err: Error) => err.message.includes(copy) && err.message.includes(path) && /one is a copy\. Keep .*\.json and remove the other/.test(err.message)
+    )
+  })
+
+  it("stops on a record whose --period mark was dropped: that mark keeps it from passing for another month's payout", () => {
+    const path = saveDisbursement(record({ file: "copy.json", periodStated: true }))
+    assert.equal(listDisbursements().length, 1)
+    const { periodStated, ...dropped } = JSON.parse(readFileSync(path).toString())
+    assert.equal(periodStated, true)
+    writeFileSync(path, JSON.stringify(dropped))
+    assert.throws(() => listDisbursements(), /does not match its own ids/)
   })
 
   it("honours DISBURSEMENTS_DIR", async () => {

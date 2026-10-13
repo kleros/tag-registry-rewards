@@ -124,7 +124,7 @@ describe("send: refusing to pay twice", () => {
     await send("1790000000001.json")
     writeJson(join(work, "files", "september-final.json"), PAYOUT.map((e) => ({ recipient: e.recipient, amount: BigNumber.from(e.amount).add(1).toString() })))
     const running = new Date().toISOString().slice(0, 7) // this month: not over yet
-    const notOver = new RegExp(`pays ${running}, which only ends on \\d{4}-\\d\\d-01: check the month given to --period.*Nothing was sent`, "s")
+    const notOver = new RegExp(`pays ${running}, which only ends on \\d{4}-\\d\\d-01 00:00 UTC: check the month given to --period.*Nothing was sent`, "s")
     await assert.rejects(send("september-final.json", { period: running }), notOver)
     await assert.rejects(send("september-final.json", { period: running, dryRun: true }), notOver)
     // nor from a manifest: rewards generated from a fetch of the running month
@@ -151,6 +151,22 @@ describe("send: refusing to pay twice", () => {
     assert.equal(paid().length, 3)
   })
 
+  it("reads the wallet's history back SEND_ONCHAIN_LOOKBACK_DAYS too when --period gives a later month than the file pays", async () => {
+    await startChain(unix("2026-09-05T00:00:00Z")) // August's payout goes out on September 5
+    writePayout("1790000000001.json", PAYOUT, { period: AUGUST })
+    await send("1790000000001.json")
+    evm.advance(1, Math.floor(Date.now() / 1000) - evm.latest.timestamp) // the chain goes on to today
+    // August's file corrected (one amount changed) and renamed, its month typed as September
+    writeJson(join(work, "files", "fixed.json"), PAYOUT.map((e, i) => ({ recipient: e.recipient, amount: i === 2 ? PNK(8).toString() : BigNumber.from(e.amount).toString() })))
+    const restore = setEnv({ SEND_ONCHAIN_LOOKBACK_DAYS: "5000" }) // back past September 5, whatever today is
+    try {
+      await assert.rejects(send("fixed.json", { period: "2026-09" }), /2 of the 3 transfers to send repeat transfers this wallet already paid.*paid by submissions for 2026-08/s)
+    } finally {
+      restore()
+    }
+    assert.equal(paid().length, 3)
+  })
+
   it("refuses a --period that contradicts an unfinished payout of the same transfers", async () => {
     writePayout("1790000000001.json", PAYOUT)
     evm.faults.revertTo = new Set([PAYOUT[1].recipient.toLowerCase()])
@@ -162,6 +178,149 @@ describe("send: refusing to pay twice", () => {
     await send("1790000000001.json") // without --period: resumed
     assert.equal(paid().filter((t) => t.status === 1).length, 3, "each transfer paid once")
     assert.equal(ledger().length, 1)
+  })
+
+  it("records, for a month given with --period, the payment made since that month ended rather than an older identical one", async () => {
+    const [A] = PAYOUT
+    await startChain(unix("2026-09-05T00:00:00Z"))
+    const august = evm.addPastTransfer(wallet.address, A.recipient, A.amount) // August's payout, September 5
+    evm.advance(1, 31 * 86400)
+    const september = evm.addPastTransfer(wallet.address, A.recipient, A.amount) // September's, October 6
+    evm.advance(1, Math.max(5, Math.floor(Date.now() / 1000) - evm.latest.timestamp))
+    writePayout("manual.json", [A], { period: null })
+    const restore = setEnv({ SEND_ONCHAIN_LOOKBACK_DAYS: "5000" }) // both within the lookback, whatever today is
+    try {
+      await send("manual.json", { period: "2026-09", skipPaidOnChain: true })
+    } finally {
+      restore()
+    }
+    const [t] = ledger()[0].transfers
+    assert.equal(t.txHash, september)
+    assert.notEqual(t.txHash, august)
+    assert.equal(paid().length, 0)
+  })
+
+  it("refuses a file whose month contradicts an unfinished payout of the same transfers given another month with --period", async () => {
+    const entries = [
+      { recipient: evmAddress(0x9826), amount: PNK(7000) },
+      { recipient: evmAddress(0x1cfd), amount: PNK(500) },
+    ]
+    // August's capped removals, hand-made and given their month with --period; the second transfer reverts
+    writeJson(join(work, "files", "august_removals_transactions.json"), entries.map((e) => ({ recipient: e.recipient, amount: e.amount.toString() })))
+    evm.faults.revertTo = new Set([entries[1].recipient.toLowerCase()])
+    await assert.rejects(send("august_removals_transactions.json", { period: "2026-08" }), /reverted/)
+    evm.faults.revertTo = undefined
+    // September's identical removals, from their manifest: not that payout's resumption
+    writePayout("1790000000020_removals_transactions.json", entries, { kind: "removals" })
+    await assert.rejects(
+      send("1790000000020_removals_transactions.json"),
+      /pays 2026-09, but removals for 2026-08 \(august_removals_transactions\.json\).*was given 2026-08 with --period\. Finish that one first/s
+    )
+    assert.deepEqual(ledger().map((r) => r.status), ["in-progress"])
+    // August finished with its own file, September is a payout of its own
+    await send("august_removals_transactions.json", { period: "2026-08" })
+    await assert.rejects(send("1790000000020_removals_transactions.json"), /pays exactly the same transfers/)
+    await send("1790000000020_removals_transactions.json", { allowRepeatPeriod: true, skipOnchainCheck: true })
+    assert.deepEqual(ledger().map((r) => `${r.kind} ${r.periodStart!.slice(0, 7)} ${r.status}`), ["removals 2026-08 completed", "removals 2026-09 completed"])
+    assert.equal(paid().filter((t) => t.status === 1).length, 4, "each payout paid both transfers once")
+  })
+
+  it("finishes a file's own payout started with a mistyped --period once its manifest gives another month", async () => {
+    const entries = [
+      { recipient: evmAddress(0x9826), amount: PNK(7000) },
+      { recipient: evmAddress(0x1cfd), amount: PNK(500) },
+    ]
+    const file = "1790000000020_removals_transactions.json"
+    // a machine without the manifest, the month typed wrong; the second transfer reverts
+    writeJson(join(work, "files", file), entries.map((e) => ({ recipient: e.recipient, amount: e.amount.toString() })))
+    evm.faults.revertTo = new Set([entries[1].recipient.toLowerCase()])
+    await assert.rejects(send(file, { period: "2026-08" }), /reverted/)
+    evm.faults.revertTo = undefined
+    writePayout(file, entries, { kind: "removals" }) // its manifest arrives: September
+    await send(file)
+    assert.match(output(), /WARNING: removals for 2026-08 .*was given 2026-08 with --period, while 1790000000020_removals_manifest\.json gives 2026-09: finishing it as recorded/)
+    assert.deepEqual(ledger().map((r) => r.status), ["completed"])
+    // paid under its own name: never again, whatever month the ledger holds for it
+    await assert.rejects(send(file, { allowRepeatPeriod: true, skipOnchainCheck: true }), /this payout was already disbursed/)
+    assert.equal(paid().filter((t) => t.status === 1).length, 2, "each transfer paid once")
+  })
+
+  // Machine B (no manifest, the month given with --period) starts the payout
+  // and stops with its first transaction stuck, which then leaves the pools;
+  // machine A (the manifest, a ledger of its own) runs it too. Then the two
+  // ledgers are merged into A's.
+  const startedOnTwoMachines = async (onA: () => Promise<unknown>) => {
+    const manifest = join(work, "files", "1790000000001_generate_manifest.json")
+    writePayout("1790000000001.json", PAYOUT)
+    const kept = readJson(manifest)
+    require("fs").unlinkSync(manifest)
+    const machineB = join(work, "machine-b")
+    const restore = setEnv({ DISBURSEMENTS_DIR: machineB })
+    evm.autoMine = false
+    try {
+      await assert.rejects(send("1790000000001.json", { period: "2026-09" }), /not mined within/)
+    } finally {
+      restore()
+    }
+    evm.dropMempool()
+    evm.autoMine = true
+    writeJson(manifest, kept)
+    await onA()
+    for (const name of listFiles(machineB).filter((n) => n.endsWith(".json"))) {
+      copyFileSync(join(machineB, name), join(work, "disbursements", name))
+    }
+    assert.equal(ledger().length, 2)
+    return manifest
+  }
+
+  it("knows a payout disbursed on one machine when another started it with its month given the other way", async () => {
+    const manifest = await startedOnTwoMachines(() => send("1790000000001.json"))
+    await assert.rejects(send("1790000000001.json"), /this payout was already disbursed/)
+    require("fs").unlinkSync(manifest) // machine B's way: --period, no manifest
+    await assert.rejects(send("1790000000001.json", { period: "2026-09", forgetUnmined: true, skipPaidOnChain: true }), /this payout was already disbursed/)
+    assert.equal(paid().filter((t) => t.status === 1).length, 3, "each transfer paid once")
+  })
+
+  it("refuses a payout recorded twice, unfinished on both machines, until a person keeps one record", async () => {
+    await startedOnTwoMachines(async () => {
+      evm.faults.revertTo = new Set([PAYOUT[1].recipient.toLowerCase()])
+      await assert.rejects(send("1790000000001.json"), /reverted/)
+      evm.faults.revertTo = undefined
+    })
+    await assert.rejects(send("1790000000001.json"), /this payout is recorded twice.*keep the record holding them, and remove the other/s)
+    await assert.rejects(send("1790000000001.json", { period: "2026-09" }), /this payout is recorded twice/)
+    assert.equal(paid().filter((t) => t.status === 1).length, 1)
+  })
+
+  it("knows a disbursed payout whichever way its month is given (its manifest on one machine, --period on another)", async () => {
+    writePayout("1790000000001.json", PAYOUT)
+    await send("1790000000001.json")
+    const manifest = join(work, "files", "1790000000001_generate_manifest.json")
+    const kept = readJson(manifest)
+    require("fs").unlinkSync(manifest) // another machine: the file and the ledger, no manifest
+    const flags = { period: "2026-09", allowRepeatPeriod: true, skipOnchainCheck: true }
+    await assert.rejects(send("1790000000001.json", flags), /this payout was already disbursed/)
+    // and the other way round: paid with --period, then its manifest turns up
+    writePayout("1790000000002.json", [{ recipient: evmAddress(0x777), amount: PNK(3) }], { period: null })
+    await send("1790000000002.json", { period: "2026-08" })
+    writeJson(join(work, "files", "1790000000002_generate_manifest.json"), { ...kept, ...AUGUST, transactionsFile: "1790000000002.json" })
+    await assert.rejects(send("1790000000002.json", { allowRepeatPeriod: true, skipOnchainCheck: true }), /this payout was already disbursed/)
+    assert.equal(paid().length, 4)
+  })
+
+  it("sets aside the transactions --unrelated-tx names, keeping the on-chain check for the rest", async () => {
+    const [A, B] = PAYOUT
+    const coincidence = evm.addPastTransfer(wallet.address, A.recipient, A.amount) // owed to A by another payout
+    evm.addPastTransfer(wallet.address, B.recipient, B.amount) // B was paid from elsewhere
+    evm.advance(1)
+    writePayout("1790000000001.json", PAYOUT)
+    await assert.rejects(send("1790000000001.json", { unrelatedTxs: ["0x1234"] }), /--unrelated-tx "0x1234" is not a transaction hash/)
+    const refused = await send("1790000000001.json", { unrelatedTxs: [coincidence] }).then(() => null, (e: Error) => e)
+    assert.match(String(refused && refused.message), /1 of the 3 transfers to send repeat transfers this wallet already paid/)
+    assert.ok(refused!.message.includes(`to ${utils.getAddress(B.recipient)}: tx`), "B's payment still counts")
+    await send("1790000000001.json", { unrelatedTxs: [coincidence], skipPaidOnChain: true })
+    assert.deepEqual(ledger()[0].transfers.map((t) => !!t.foundOnChain), [false, true, false])
+    assert.equal(paid().length, 2, "A and the third sent, B counted as paid")
   })
 
   it("refuses a --period that contradicts the file's manifest, or is not a month", async () => {
@@ -514,7 +673,8 @@ describe("send: the September 2026 payout", () => {
     // already paid while 2026-10-06 is within SEND_ONCHAIN_LOOKBACK_DAYS, then
     // until --period gives the month
     await assert.rejects(send("1790985007241.json"), /every remaining transfer of this payout is already paid|period of 1790985007241\.json is unknown/)
-    await assert.rejects(send("1790985007241.json", { period: "2026-09" }), /every remaining transfer of this payout is already paid since 2026-10-01/)
+    // (since 2026-10-01, or SEND_ONCHAIN_LOOKBACK_DAYS ago when that is earlier: the month is only stated)
+    await assert.rejects(send("1790985007241.json", { period: "2026-09" }), /every remaining transfer of this payout is already paid since \d{4}-\d\d-\d\d/)
     assert.equal(paid().length, 0)
     assert.deepEqual(ledger(), [])
     await send("1790985007241.json", { period: "2026-09", skipPaidOnChain: true }) // recorded as paid, nothing sent

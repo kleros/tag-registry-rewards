@@ -52,6 +52,10 @@ export interface DisbursementRecord {
   chainId: number
   token: string
   from: string
+  // The chain's latest block when the payout started sending: a payment of
+  // the same amount to the same recipient mined after it, unknown to the
+  // ledger, may be one of its transfers paid elsewhere.
+  startBlock?: number
   status: "in-progress" | "completed"
   total: string // wei
   createdAt: string
@@ -85,9 +89,25 @@ export const contentId = (
 // A payout: its content for a kind and period. Capped removal and ATQ rewards
 // make identical files recur (the same remover, 7,000 PNK, two months in a
 // row; one address owed 500 PNK as remover and as ATQ requester), and those
-// are different payouts.
-export const disbursementId = (content: string, kind: DisbursementKind, periodStart?: string, periodEnd?: string): string =>
-  sha256(JSON.stringify({ content, kind, periodStart: periodStart || null, periodEnd: periodEnd || null }))
+// are different payouts. A period stated with --period is part of it too: it
+// decides whether the payout may count as another one, so a record that lost
+// (or gained) that mark no longer matches its id.
+export const disbursementId = (
+  content: string,
+  kind: DisbursementKind,
+  periodStart?: string,
+  periodEnd?: string,
+  periodStated?: boolean
+): string =>
+  sha256(
+    JSON.stringify({
+      content,
+      kind,
+      periodStart: periodStart || null,
+      periodEnd: periodEnd || null,
+      ...(periodStated ? { periodStated: true } : {}),
+    })
+  )
 
 // "2026-09" for a calendar month, else the dates; "unknown" without a period.
 export const periodLabel = (start?: string, end?: string): string => {
@@ -113,12 +133,14 @@ export const displayPath = (path: string): string => relative(process.cwd(), pat
 
 // Every record, oldest first. A record that cannot be read stops the run: a
 // ledger silently skipped could let a paid file be paid again. So does one
-// whose transfers or kind and period no longer match its ids (edited by hand,
-// or by a bad merge): a resume pays the record's own transfers, never the file's.
+// whose transfers, kind or period (and whether it was stated) no longer match
+// its ids (edited by hand, or by a bad merge): a resume pays the record's own
+// transfers, never the file's.
 export const listDisbursements = (): DisbursementRecord[] => {
   const dir = disbursementsDir()
   if (!existsSync(dir)) return []
   const records: DisbursementRecord[] = []
+  const paths = new Map<string, string>() // record id -> the file it was read from
   for (const name of readdirSync(dir).sort()) {
     if (!name.endsWith(".json")) continue
     const path = join(dir, name)
@@ -135,7 +157,7 @@ export const listDisbursements = (): DisbursementRecord[] => {
     try {
       consistent =
         record.contentId === contentId(record.chainId, record.token, record.transfers) &&
-        record.id === disbursementId(record.contentId, record.kind, record.periodStart, record.periodEnd)
+        record.id === disbursementId(record.contentId, record.kind, record.periodStart, record.periodEnd, record.periodStated)
     } catch {
       // a field missing or of the wrong type
     }
@@ -145,6 +167,16 @@ export const listDisbursements = (): DisbursementRecord[] => {
           "written (by hand, or by a merge). Restore it from git before sending."
       )
     }
+    // send only ever writes a record to its own name: another file holding it
+    // is a copy (a backup, a merge tool's), which would count it twice.
+    const copyOf = paths.get(record.id)
+    if (copyOf) {
+      throw new Error(
+        `[disbursements] ${copyOf} and ${path} hold the same record: one is a copy. Keep ${recordFileName(record)} and ` +
+          "remove the other file before sending."
+      )
+    }
+    paths.set(record.id, path)
     records.push(record)
   }
   return records.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))

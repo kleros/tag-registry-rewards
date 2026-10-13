@@ -199,6 +199,36 @@ describe("yarn start (dotenv-safe and the documented .env.example)", () => {
     assert.match(res.stdout, /No disbursement recorded/)
   })
 
+  it("checks any wallet with --dry-run --from, no WALLET_PRIVATE_KEY in .env (only signing needs it)", async () => {
+    const cwd = freshDir("start-")
+    const example = readFileSync(join(REPO, ".env.example"), "utf8")
+    writeFileSync(join(cwd, ".env.example"), example)
+    const withoutKey = envFrom(example).split("\n").filter((line) => !line.startsWith("WALLET_PRIVATE_KEY="))
+    writeFileSync(join(cwd, ".env"), withoutKey.join("\n"))
+    writeJson(join(cwd, "files", "1790000000001.json"), [{ recipient: evmAddress(1), amount: PNK(5).toString() }])
+    writeJson(join(cwd, "files", "1790000000001_generate_manifest.json"), {
+      runId: "1790000000001",
+      periodStart: "2026-09-01T00:00:00.000Z",
+      periodEnd: "2026-10-01T00:00:00.000Z",
+      transactionsFile: "1790000000001.json",
+    })
+    const evm = await new MockEvm({ startTime: Math.floor(Date.now() / 1000) - 3600 }).start()
+    const wallet = evmAddress(0xbe7e)
+    evm.setTokenBalance(wallet, PNK(100))
+    evm.setNativeBalance(wallet, PNK(1))
+    try {
+      const args = ["--mode", "send", "--rewards", "1790000000001.json", "--dry-run", "--from", wallet]
+      const res = await runNode(START.concat(args), {
+        cwd,
+        env: { TS_NODE_FILES: "true", ...emptyPipelineEnv(), TX_RPC_URL: evm.url, PNK: evm.token },
+      })
+      assert.equal(res.code, 0, res.output)
+      assert.match(res.stdout, /Dry run: would send 1 transfer\(s\)/)
+    } finally {
+      await evm.stop()
+    }
+  })
+
   it("refuses to start when .env misses a required key", async () => {
     const cwd = freshDir("start-")
     const example = readFileSync(join(REPO, ".env.example"), "utf8")

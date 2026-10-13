@@ -2,7 +2,7 @@ import { BigNumber, ethers, utils } from "ethers"
 import ERC20Abi from "../../abi/ERC20.json"
 import conf from "../config"
 import { chains } from "./chains"
-import { errorMessage } from "./runtime-helpers"
+import { envInt, errorMessage, sleep } from "./runtime-helpers"
 
 // What `send` needs from the chain: balances, nonces, signing a PNK transfer,
 // broadcasting it, its receipt, and the wallet's past PNK transfers. Plain
@@ -40,6 +40,7 @@ export interface SendChain {
   readonly from: string
   readonly token: string
   networkChainId(): Promise<number>
+  blockNumber(): Promise<number>
   tokenBalance(): Promise<BigNumber>
   nativeBalance(): Promise<BigNumber>
   baseFee(): Promise<BigNumber | null>
@@ -159,13 +160,14 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
   // expiry, pruning), which must predate `unix`. A latest block older than
   // `unix` stops it too: the node lags behind, or `unix` is still to come
   // (a period that has not ended), and reading no history from there would
-  // pass any payout as unpaid.
-  const firstBlockAtOrAfter = async (unix: number): Promise<number> => {
+  // pass any payout as unpaid. Returns that block and the latest one.
+  const firstBlockAtOrAfter = async (unix: number): Promise<{ first: number; head: number }> => {
     const head = await getBlock("latest")
     if (!head || head.number === undefined || head.number === null || head.timestamp === undefined || head.timestamp === null) {
       throw new Error("the RPC returned no latest block")
     }
-    let hi = toNumber(head.number) // its timestamp is >= unix
+    const headNumber = toNumber(head.number)
+    let hi = headNumber // its timestamp is >= unix
     if (toNumber(head.timestamp) < unix) {
       throw new Error(
         `the node's latest block, ${hi}, is of ${new Date(toNumber(head.timestamp) * 1000).toISOString()}, before ` +
@@ -193,7 +195,7 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
       if (at < unix) lo = mid
       else hi = mid
     }
-    return hi
+    return { first: hi, head: headNumber }
   }
 
   // The node serves no block `missing`, but serves `served`: the oldest block
@@ -239,6 +241,7 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
     from,
     token,
     networkChainId: async () => toNumber(await rpc("eth_chainId", [])),
+    blockNumber: async () => toNumber(await rpc("eth_blockNumber", [])),
     tokenBalance: async () => {
       const data = erc20.encodeFunctionData("balanceOf", [from])
       const out = await rpc("eth_call", [{ to: token, data }, "latest"])
@@ -302,13 +305,19 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
     },
     blockTimestamp: (blockNumber) => timestampOf(blockNumber),
     outgoingTransfers: async (sinceUnix) => {
-      const firstBlock = await firstBlockAtOrAfter(sinceUnix)
+      const { first: firstBlock, head } = await firstBlockAtOrAfter(sinceUnix)
       // Read after the search, so it covers every block the search saw. An
-      // older answer means the RPC's backends disagree: reading up to it would
-      // skip the blocks between.
-      const latest = toNumber(await rpc("eth_blockNumber", []))
-      if (latest < firstBlock) {
-        throw new Error(`the RPC answered ${latest} as its latest block after serving block ${firstBlock} (its backends disagree)`)
+      // answer older than the latest block the search started from means the
+      // RPC's backends disagree: reading up to it would skip the blocks
+      // between, and a payment in them would pass as unpaid. A backend a
+      // block or two behind catches up in seconds: asked again a few times.
+      let latest = toNumber(await rpc("eth_blockNumber", []))
+      for (let retry = 0; latest < head && retry < 3; retry++) {
+        await sleep(envInt("SEND_POLL_MS", 2000) || 2000)
+        latest = toNumber(await rpc("eth_blockNumber", []))
+      }
+      if (latest < head) {
+        throw new Error(`the RPC answered ${latest} as its latest block after serving block ${head} (its backends disagree)`)
       }
       const logs = await getLogs({ address: token, topics: [transferTopic, fromTopic] }, firstBlock, latest)
       return logs

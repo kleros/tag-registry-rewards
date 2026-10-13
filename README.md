@@ -41,7 +41,9 @@ Fill `.env` values:
 - `REWARD_REDISTRIBUTE_CAPPED_DOMAINS` (`true` or `false`)
 - `SOLANA_TX_DIVIDER` (number `>= 1`; applied in `generate` before formula evaluation)
 - `SOLANA_TX_LOOKBACK_DAYS` (`0`/empty for all-time; a positive N-day window is only supported by the Dune provider)
-- wallet settings are required only for `send`
+- wallet settings are required only for `send`: `WALLET_PRIVATE_KEY` (commented
+  out in `.env.example`) only to sign, so it can stay out of `.env` the rest of
+  the time, and `--dry-run --from <wallet>` never needs it
 - all tx-count settings, including the optional Dune ones, are listed commented
   out in `.env.example`
 
@@ -501,26 +503,36 @@ same file again. `send` refuses, before signing anything:
   above apply (`--allow-repeat-period` sends it without one). A month given
   that way is your word, not a manifest's: it never makes a file that pays
   exactly what a paid file paid, or transfers already paid, count as another
-  month's, and one that contradicts an unfinished payout of the same transfers
-  is refused (finish that one without `--period`). The file is found under any
-  spelling of its path (`x.json`, `./x.json`, `files/x.json`);
+  month's (the on-chain check below then also reads the last
+  `SEND_ONCHAIN_LOOKBACK_DAYS`, in case the month typed is later than the one
+  the file pays), and a file whose month contradicts an unfinished payout of
+  the same transfers, either one given with `--period`, is refused until that
+  payout is finished (unless it is that payout's own file, its month mistyped
+  before its manifest turned up: then it is finished as recorded, with a
+  warning). A payout is known as disbursed whichever way its month was given,
+  and a file already paid under its own name is never paid again. The file is
+  found under any spelling of its path (`x.json`, `./x.json`, `files/x.json`);
 - a payout whose period has not ended yet, whether a manifest or `--period`
   gives it (e.g. the current month typed for the last one): rewards are paid
   once their period is over;
 - transfers that repeat ones this wallet already paid: its PNK transfers since
   the period ended (or the last `SEND_ONCHAIN_LOOKBACK_DAYS`, default 45, when
-  the file's period is unknown) are read on-chain, and one to the same
+  the file's period is unknown, or given with `--period` and ending later) are
+  read on-chain, and one to the same
   recipient for the same amount counts, unless the ledger shows it paid a
   clearly different payout. That catches a file paid from another machine,
   before the ledger existed, or a corrected copy of a paid file. Nothing is
   recorded until you decide: if those transfers are this file's (it was paid,
   or partly paid, from elsewhere), `--skip-paid-on-chain` records them as paid
   and sends the rest; if they only coincide with it, `--skip-onchain-check`
-  skips the check. A node that refuses `eth_getLogs`, no longer serves the
-  blocks back to that date, lacks a block needed to find it, or whose latest
-  block is older than that date (it lags behind), makes `send` stop rather than
-  check fewer transfers, or older ones: retry, use an RPC that keeps the
-  history (`TX_RPC_URL`), or skip the check;
+  skips the check, or `--unrelated-tx <hash>` (repeatable) sets aside just the
+  transactions named, keeping the check for every other transfer. A node that
+  refuses `eth_getLogs`, no longer serves the
+  blocks back to that date, lacks a block needed to find it, whose latest
+  block is older than that date (it lags behind), or whose backends answer an
+  older latest block halfway through, makes `send` stop rather than check
+  fewer transfers, or older ones: retry, use an RPC that keeps the history
+  (`TX_RPC_URL`), or skip the check;
 - a wallet without the PNK or the gas the transfers need, a base fee above
   `SEND_MAX_FEE_GWEI`, an RPC on another chain, a malformed file, or a
   `*_rewards.json` record file passed by mistake;
@@ -528,9 +540,16 @@ same file again. `send` refuses, before signing anything:
   chain still has transactions in flight (a payout merely left half-paid only
   gets a warning). Records of another chain or token (a testnet trial) never
   block a payout;
-- any send at all while a ledger file is unreadable, or no longer matches its
-  own ids (its transfers, kind or period changed after it was written, by hand
-  or by a merge): a resume pays the record's transfers, so restore it from git.
+- a payout recorded twice, unfinished: started on two machines, its month
+  given with `--period` on one and by its manifest on the other, whose ledgers
+  were then merged. Check on the explorer which transfers were paid, keep the
+  record holding them, and remove the other once none of its transactions can
+  still be mined;
+- any send at all while a ledger file is unreadable, no longer matches its
+  own ids (its transfers, kind or period, or whether that period was given
+  with `--period`, changed after it was written, by hand or by a merge), or
+  is a copy of another one (a backup, a merge tool's): a resume pays the
+  record's transfers, so restore it from git, or remove the copy.
 
 `--dry-run --from <address>` runs the same checks for any wallet without its
 key, e.g. to confirm on another machine that a file was already paid (the
@@ -561,15 +580,18 @@ that transaction on the explorer, then `--forget-unmined` sends the transfer
 again with a new nonce, once the wallet's balance is checked again (the other
 transaction may have spent it). It only forgets transactions an earlier run
 saved, never one the run just broadcast (a lagging node may only not show it
-mined yet). It refuses to while the transaction that took the nonce pays the
-same recipient the same amount and the ledger does not know it: that one may be
-this transfer, signed elsewhere (replaced from another machine whose ledger
-never came back, or paid by hand). If the explorer shows it is,
-`--skip-paid-on-chain` records it as this transfer's payment. A payment of the
-same amount to the same recipient under another nonce belongs to something
-else, and is never taken for this transfer. A receipt
-with neither a status nor logs (a proxy that strips them) counts as no receipt
-yet, never as a revert.
+mined yet). It refuses to while a payment of the same amount to the same
+recipient that the ledger does not know took the nonce, or was mined since the
+payout started (under any nonce): that one may be this transfer, signed
+elsewhere (replaced from another machine whose ledger never came back, or
+paid by hand after cancelling the stuck one), and sending it again would pay
+it twice. If the explorer shows it is, `--skip-paid-on-chain` records it as
+this transfer's payment. If a payment under another nonce only coincides with
+it, `--forget-unmined --unrelated-tx <hash>` sends the transfer again; the one
+that took its nonce is never set aside that way. Payments older than the
+payout belong to something else and are never taken for it. A receipt with
+neither a status nor logs (a proxy that strips them) counts as no receipt yet,
+never as a revert.
 
 Settings (all optional, in `.env`): `TX_RPC_URL` (default: the chain's RPC in
 `src/utils/chains.ts`), `SEND_MAX_FEE_GWEI` (2), `SEND_MAX_PRIORITY_FEE_GWEI`
@@ -851,7 +873,8 @@ command if one fails: the payout math, the outputs and the send safeguards are
 checked against the working tree right before they are used.
 `SKIP_TESTS=1 yarn start …` skips them (at your own risk; on Windows,
 `set SKIP_TESTS=1 && yarn start …` in cmd, `$env:SKIP_TESTS=1; yarn start …`
-in PowerShell). GitHub Actions runs `yarn test` on every pull request
+in PowerShell, which keep it set for every later command in that window:
+`set SKIP_TESTS=` or `Remove-Item Env:SKIP_TESTS` turns the tests back on). GitHub Actions runs `yarn test` on every pull request
 (`.github/workflows/test.yml`), and again with the clock three years ahead
 (`TESTS_CLOCK_SHIFT_DAYS=1100`): a test that only passes near the dates of its
 fixtures would one day block every `yarn start`, so it must fail there first. They also run

@@ -53,6 +53,11 @@ export interface SendOptions {
   // Send again a transfer whose saved transactions can no longer be mined:
   // the wallet's nonce they hold went to another transaction.
   forgetUnmined?: boolean
+  // Transactions the operator says only coincide with one of this payout's
+  // transfers (same recipient, same amount): never taken for its payment, by
+  // the on-chain check or by --forget-unmined. Never one that took the
+  // transfer's own nonce.
+  unrelatedTxs?: string[]
   // Dry run only: check as this address, without its key.
   from?: string
   // The month (YYYY-MM) the file pays, for a file no manifest gives the period of.
@@ -360,6 +365,10 @@ export const sendRoutine = async (
 ): Promise<SendResult> => {
   const log = deps.log || ((line: string) => console.log(line))
   if (opts.from && !opts.dryRun) throw new SendRefusedError("--from only works with --dry-run: sending needs WALLET_PRIVATE_KEY")
+  const unrelated = new Set((opts.unrelatedTxs || []).map((hash) => String(hash).trim().toLowerCase()))
+  for (const hash of unrelated) {
+    if (!/^0x[0-9a-f]{64}$/.test(hash)) throw new SendRefusedError(`--unrelated-tx "${hash}" is not a transaction hash (0x and 64 hex digits).`)
+  }
   const settings = sendSettings()
   const { fees } = settings
   const name = transactionsFileName(opts.file)
@@ -370,7 +379,7 @@ export const sendRoutine = async (
   const planned = transfers.map((t) => ({ recipient: t.recipient, amount: t.amount.toString() }))
   const source = sourceOf(name, opts.period)
   const content = contentId(chainId, token, planned)
-  const id = disbursementId(content, source.kind, source.periodStart, source.periodEnd)
+  const id = disbursementId(content, source.kind, source.periodStart, source.periodEnd, source.periodStated)
   const total = sumOf(transfers.map((t) => t.amount))
 
   log(`=== ${opts.dryRun ? "Dry run: " : ""}send ${name} ===`)
@@ -382,7 +391,7 @@ export const sendRoutine = async (
   if (source.periodEnd && Date.parse(source.periodEnd) > Date.now()) {
     throw new SendRefusedError(
       `Refusing to send: ${name} pays ${periodLabel(source.periodStart, source.periodEnd)}, which only ends on ` +
-        `${source.periodEnd.slice(0, 10)}${source.periodStated ? ": check the month given to --period" : ""}. ` +
+        `${source.periodEnd.slice(0, 10)} 00:00 UTC${source.periodStated ? ": check the month given to --period" : ""}. ` +
         "Rewards are paid once their period is over. Nothing was sent."
     )
   }
@@ -398,11 +407,40 @@ export const sendRoutine = async (
     const records = listDisbursements().filter(
       (r) => r.chainId === chainId && String(r.token).toLowerCase() === token.toLowerCase()
     )
-    // This payout's record: the same id, or an unfinished record paying exactly
-    // the same transfers that this file cannot be told apart from (a period
-    // unknown on one side: the manifests stay in files/, which another machine
-    // may not have).
-    let record = records.find((r) => r.id === id) || null
+    // This payout's records: its id, or its month given the other way (by a
+    // manifest on one machine, with --period on another).
+    const sameMonthOtherWay =
+      source.periodStart && source.periodEnd
+        ? disbursementId(content, source.kind, source.periodStart, source.periodEnd, !source.periodStated)
+        : null
+    const mine = records.filter((r) => r.id === id || r.id === sameMonthOtherWay)
+    // Paid already: a record of this payout, or this very file under its own
+    // name, whatever month was given for it then (mistyped with --period
+    // before its manifest turned up, say).
+    const sameFile = records.find(
+      (r) => r.status === "completed" && r.file === name && r.contentId === content && r.kind === source.kind
+    )
+    const disbursed = mine.find((r) => r.status === "completed") || sameFile
+    if (disbursed) {
+      throw new SendRefusedError(
+        `Refusing to send: this payout was already disbursed. ${describeRecord(disbursed)}. Nothing was sent.` +
+          (disbursed === sameFile && !mine.includes(sameFile) && !source.manifest
+            ? " (A hand-made file reused for another month needs a name of its own.)"
+            : "")
+      )
+    }
+    if (mine.length > 1) {
+      throw new SendRefusedError(
+        `Refusing to send: this payout is recorded twice, ${mine.map(describeRecord).join("; ")}: started on two machines, ` +
+          "its month given with --period on one and by its manifest on the other. Check on the explorer which of their " +
+          "transfers were paid, keep the record holding them, and remove the other once none of its transactions can " +
+          "still be mined (each one mined, or its nonce used by another). Nothing was sent."
+      )
+    }
+    // Otherwise an unfinished record paying exactly the same transfers that
+    // this file cannot be told apart from (a period unknown on one side: the
+    // manifests stay in files/, which another machine may not have).
+    let record = mine[0] || null
     if (!record) {
       const sameUnfinished = records.filter(
         (r) => r.status === "in-progress" && r.contentId === content && !distinctPayouts(source, r)
@@ -414,23 +452,34 @@ export const sendRoutine = async (
         )
       }
       record = sameUnfinished[0] || null
-      if (
-        record &&
-        source.periodStated &&
-        record.periodStart &&
-        record.periodEnd &&
-        (Date.parse(record.periodStart) !== Date.parse(source.periodStart as string) ||
-          Date.parse(record.periodEnd) !== Date.parse(source.periodEnd as string))
-      ) {
-        throw new SendRefusedError(
-          `Refusing to send: --period ${String(opts.period).trim()} contradicts ${describeRecord(record)}, an unfinished payout of ` +
-            `exactly these transfers. If ${name} is that payout, finish it without --period. Nothing was sent.`
-        )
+      // Either month may be the operator's word (--period), which never makes
+      // this file that payout, or another one: a person has to say which.
+      // Unless it is this very file's record, its month mistyped when it was
+      // started (its manifest missing then): finished as recorded.
+      const contradicts =
+        !!record &&
+        (source.periodStated || !!record.periodStated) &&
+        !!(source.periodStart && source.periodEnd && record.periodStart && record.periodEnd) &&
+        (Date.parse(String(record.periodStart)) !== Date.parse(String(source.periodStart)) ||
+          Date.parse(String(record.periodEnd)) !== Date.parse(String(source.periodEnd)))
+      if (record && contradicts) {
+        const recordMonth = periodLabel(record.periodStart, record.periodEnd)
+        const fileMonth = periodLabel(source.periodStart, source.periodEnd)
+        if (!source.periodStated && record.file === name) {
+          log(`WARNING: ${describeRecord(record)} was given ${recordMonth} with --period, while ${source.manifest} gives ${fileMonth}: finishing it as recorded`)
+        } else {
+          throw new SendRefusedError(
+            source.periodStated
+              ? `Refusing to send: --period ${String(opts.period).trim()} contradicts ${describeRecord(record)}, an unfinished payout ` +
+                  `of exactly these transfers. If ${name} is that payout, finish it without --period. Nothing was sent.`
+              : `Refusing to send: ${name} pays ${fileMonth}, but ${describeRecord(record)}, an unfinished payout of exactly these ` +
+                  `transfers, was given ${recordMonth} with --period. Finish that one first, with its own file and that --period: ` +
+                  "if it was this payout, this file is then refused as paid; if it was another month's, pay this one afterwards " +
+                  "with --allow-repeat-period --skip-onchain-check (the same transfers will be on-chain). Nothing was sent."
+          )
+        }
       }
       if (record) log(`Ledger: this file pays exactly what an unfinished payout pays: ${describeRecord(record)}`)
-    }
-    if (record && record.status === "completed") {
-      throw new SendRefusedError(`Refusing to send: this payout was already disbursed. ${describeRecord(record)}. Nothing was sent.`)
     }
     const others = records.filter((r) => r !== record)
     // Another payout with transactions in flight holds nonces of the wallet;
@@ -502,6 +551,8 @@ export const sendRoutine = async (
       )
     }
     const now = new Date().toISOString()
+    // A new payout notes where the chain is before anything of it is signed.
+    const startBlock = record ? undefined : await chain.blockNumber()
     const current: DisbursementRecord = record || {
       version: 1,
       id,
@@ -514,6 +565,7 @@ export const sendRoutine = async (
       chainId,
       token,
       from: chain.from,
+      ...(startBlock !== undefined ? { startBlock } : {}),
       status: "in-progress",
       total: total.toString(),
       createdAt: now,
@@ -533,12 +585,14 @@ export const sendRoutine = async (
     // The wallet's PNK transfers since the period ended (or the last
     // SEND_ONCHAIN_LOOKBACK_DAYS): one to the same recipient for the same
     // amount repeats a transfer of this file, unless the ledger shows it paid
-    // a clearly different payout (another month, another kind).
+    // a clearly different payout (another month, another kind). A month stated
+    // with --period may be later than the one the file pays, and its end
+    // after that month's payout: the lookback applies when it reaches further.
     const open = current.transfers.filter((t) => t.status === "pending" || t.status === "failed")
     if (open.length > 0 && !opts.skipOnchainCheck) {
-      const since = current.periodEnd
-        ? Math.floor(Date.parse(current.periodEnd) / 1000)
-        : Math.floor(Date.now() / 1000) - settings.lookbackDays * 86400
+      const lookbackStart = Math.floor(Date.now() / 1000) - settings.lookbackDays * 86400
+      const periodEnd = current.periodEnd ? Math.floor(Date.parse(current.periodEnd) / 1000) : null
+      const since = periodEnd === null ? lookbackStart : current.periodStated ? Math.min(periodEnd, lookbackStart) : periodEnd
       let found: OnchainTransfer[]
       try {
         found = await chain.outgoingTransfers(since)
@@ -558,13 +612,28 @@ export const sendRoutine = async (
       for (const r of others) for (const t of r.transfers) for (const hash of paidHashes(t)) holder.set(hash, r)
       const candidates = found.filter((f) => {
         const hash = f.txHash.toLowerCase()
-        if (own.has(hash)) return false
+        if (own.has(hash) || unrelated.has(hash)) return false
         const r = holder.get(hash)
         return !r || !distinctPayouts(current, r)
       })
+      // Read back further than the stated month's end, a transfer's own payment
+      // is still the first one since that end: an older one is matched only
+      // when there is none (the month typed was later than the one paid).
+      const sinceEnd = new Map<number, boolean>()
+      const minedSinceEnd = async (f: OnchainTransfer): Promise<boolean> => {
+        if (periodEnd === null || since === periodEnd) return true
+        if (!sinceEnd.has(f.blockNumber)) {
+          const at = await chain.blockTimestamp(f.blockNumber)
+          sinceEnd.set(f.blockNumber, at === null || at >= periodEnd)
+        }
+        return sinceEnd.get(f.blockNumber) as boolean
+      }
       const matches: { transfer: LedgerTransfer; tx: OnchainTransfer }[] = []
       for (const t of open) {
-        const i = candidates.findIndex((f) => f.to.toLowerCase() === t.recipient.toLowerCase() && f.amount === t.amount)
+        const same = (f: OnchainTransfer) => f.to.toLowerCase() === t.recipient.toLowerCase() && f.amount === t.amount
+        let i = -1
+        for (let j = 0; j < candidates.length && i < 0; j++) if (same(candidates[j]) && (await minedSinceEnd(candidates[j]))) i = j
+        if (i < 0) i = candidates.findIndex(same)
         if (i >= 0) matches.push({ transfer: t, tx: candidates.splice(i, 1)[0] })
       }
       const sinceText = new Date(since * 1000).toISOString().slice(0, 10)
@@ -593,11 +662,13 @@ export const sendRoutine = async (
             (all
               ? `Refusing to send: every remaining transfer of this payout is already paid since ${sinceText}:\n${lines.join("\n")}\n` +
                 "If they are this file's (paid from another machine, or before the ledger), rerun with --skip-paid-on-chain to " +
-                "record it as paid. If they only coincide with it, rerun with --skip-onchain-check to send it."
+                "record it as paid. If they only coincide with it, rerun with --skip-onchain-check to send it, or name each " +
+                "transaction that only coincides with --unrelated-tx <hash>."
               : `Refusing to send: ${matches.length} of the ${open.length} transfers to send repeat transfers this wallet already paid ` +
                 `since ${sinceText} (same recipient, same amount):\n${lines.join("\n")}\n` +
                 "Another machine, a run before the ledger, or a payout listed above may have paid part of this file. Rerun with " +
-                "--skip-paid-on-chain to count those as paid and send the rest, or with --skip-onchain-check to send everything anyway.") +
+                "--skip-paid-on-chain to count those as paid and send the rest, or with --skip-onchain-check to send everything anyway; " +
+                "--unrelated-tx <hash> names one that only coincides, keeping the check for the rest.") +
               " Nothing was sent."
           )
         }
@@ -669,7 +740,9 @@ export const sendRoutine = async (
       log,
       forgetUnmined: !!opts.forgetUnmined,
       skipPaidOnChain: !!opts.skipPaidOnChain,
+      unrelated,
       startedAt: current.createdAt,
+      startBlock: current.startBlock,
       checkFunds: async (label) => {
         const missing = shortfall(await fundsFor(chain, current.transfers, fees), fees)
         if (missing) throw new SendRefusedError(`${label}: not sending it again: ${missing}`)
@@ -721,7 +794,9 @@ interface SendContext {
   log: (line: string) => void
   forgetUnmined: boolean
   skipPaidOnChain: boolean
+  unrelated: Set<string> // --unrelated-tx, lowercase
   startedAt: string // when this payout's record was created
+  startBlock?: number // the chain's latest block then (unknown for a record without it: every payment counts as later)
   checkFunds: (label: string) => Promise<void> // throws when the wallet no longer covers what is left to send
   known: Set<string> // every transaction hash the ledger holds for this chain, and those this run signs
 }
@@ -807,10 +882,10 @@ const refusedBroadcast = (result: "replacement-underpriced" | "underpriced", t: 
 // when the transfer is to be sent anew: only with `mayForget` (--forget-unmined
 // for a transaction an earlier run saved; never for one this run just
 // broadcast, which a lagging node may only not show yet), once neither a
-// receipt nor the wallet's logs show any of its transactions mined. With
-// --skip-paid-on-chain, a transfer of the same amount to the same recipient
-// that the ledger does not know (its transaction replaced from another machine,
-// or paid by hand) is recorded as its payment instead.
+// receipt nor the wallet's logs show any of its transactions mined, nor a
+// payment that may be this transfer made elsewhere. With --skip-paid-on-chain,
+// such a payment (its transaction replaced from another machine, or paid by
+// hand) is recorded as its payment instead.
 const nonceUsed = async (ctx: SendContext, t: LedgerTransfer, label: string, mayForget: boolean): Promise<boolean> => {
   const outcome = await waitForSettle(ctx.chain, t, Math.min(ctx.settings.receiptTimeoutMs, 60000), ctx.settings.pollMs)
   if (outcome !== "pending") {
@@ -839,12 +914,17 @@ const nonceUsed = async (ctx: SendContext, t: LedgerTransfer, label: string, may
     return false
   }
   // A payment of the same amount to the same recipient that the ledger does
-  // not know is this very transfer, signed elsewhere (a replacement from
-  // another machine, a payment by hand), only if it took this transfer's
-  // nonce: one under another nonce belongs to something else. One whose nonce
-  // the node does not tell is never taken for it, but still stops forgetting.
-  let lookalike: OnchainTransfer | undefined
-  let unchecked: OnchainTransfer | undefined
+  // not know may be this very transfer, signed elsewhere: replaced from
+  // another machine whose ledger never came back, or paid by hand, under its
+  // nonce or, once that nonce went to something else (a cancel), a later one.
+  // So the one that took its nonce counts, and so does any other mined since
+  // the payout started (older ones belong to something else). Sending it
+  // again would pay it twice: forgetting it takes the operator naming that
+  // payment as one that only coincides (--unrelated-tx <hash>), which the one
+  // that took its nonce never is, and --skip-paid-on-chain records it as this
+  // transfer's payment, the one with its nonce first.
+  let sameNonce: OnchainTransfer | undefined
+  let later: { transfer: OnchainTransfer; nonce: number | null } | undefined
   for (const f of logs || []) {
     if (f.to.toLowerCase() !== t.recipient.toLowerCase() || f.amount !== t.amount || ctx.known.has(f.txHash.toLowerCase())) {
       continue
@@ -855,13 +935,17 @@ const nonceUsed = async (ctx: SendContext, t: LedgerTransfer, label: string, may
     } catch {
       tx = null
     }
-    if (!tx) {
-      unchecked = unchecked || f
-    } else if (tx.from.toLowerCase() === ctx.chain.from.toLowerCase() && tx.nonce === t.nonce) {
-      lookalike = f
+    if (tx && tx.from.toLowerCase() === ctx.chain.from.toLowerCase() && tx.nonce === t.nonce) {
+      sameNonce = f
       break
     }
+    const sinceStart = ctx.startBlock === undefined || f.blockNumber > ctx.startBlock
+    // One whose nonce the node does not tell may be the one that took this
+    // transfer's: never set aside.
+    const setAside = tx !== null && ctx.unrelated.has(f.txHash.toLowerCase())
+    if (!later && sinceStart && !setAside) later = { transfer: f, nonce: tx ? tx.nonce : null }
   }
+  const lookalike = sameNonce || (later && later.transfer)
   if (lookalike && ctx.skipPaidOnChain) {
     // The operator says it is this transfer's: recorded as its payment, once.
     ctx.known.add(lookalike.txHash.toLowerCase())
@@ -879,16 +963,24 @@ const nonceUsed = async (ctx: SendContext, t: LedgerTransfer, label: string, may
     )
     return false
   }
-  const lookalikeText = lookalike
+  const lookalikeText = !lookalike
+    ? ""
+    : sameNonce
     ? `tx ${lookalike.txHash} (block ${lookalike.blockNumber}) took its nonce ${t.nonce} and pays the same recipient the ` +
-      "same amount, unknown to the ledger, so it may be this transfer. Look it up on the explorer: if it is (signed " +
-      "elsewhere, or paid by hand), rerun with --skip-paid-on-chain to record it as paid."
-    : unchecked
-    ? `tx ${unchecked.txHash} (block ${unchecked.blockNumber}) pays the same recipient the same amount, unknown to the ` +
-      "ledger, and the node did not say which nonce it used, so it may be this transfer. Retry, or look it up on the explorer."
-    : ""
+      "same amount, unknown to the ledger, so it may be this transfer, signed elsewhere (replaced from another machine); " +
+      "this transfer is not sent again past it. Look it up on the explorer, then rerun with --skip-paid-on-chain to record it as paid."
+    : later && later.nonce === null
+    ? `tx ${lookalike.txHash} (block ${lookalike.blockNumber}) pays the same recipient the same amount, mined since this ` +
+      `payout started and unknown to the ledger, and the node does not tell its nonce: it may be this transfer (nonce ` +
+      `${t.nonce}), signed elsewhere or paid by hand. Look it up on the explorer: if it is, rerun with --skip-paid-on-chain ` +
+      "to record it as paid. It cannot be set aside while its nonce is unknown: retry, or use a TX_RPC_URL that returns it."
+    : `tx ${lookalike.txHash} (block ${lookalike.blockNumber}, nonce ${later && later.nonce}) pays the same recipient the ` +
+      `same amount, mined since this payout started and unknown to the ledger, so it may be this transfer (nonce ` +
+      `${t.nonce}), paid by hand or from another machine. Look it up on the explorer: if it is, rerun with ` +
+      "--skip-paid-on-chain to record it as paid; if it only coincides with it, rerun with --forget-unmined " +
+      `--unrelated-tx ${lookalike.txHash} to send this transfer again.`
   if (mayForget && logs) {
-    if (lookalikeText) {
+    if (lookalike) {
       ctx.save()
       throw new SendRefusedError(`${label}: not forgetting it: ${lookalikeText}`)
     }

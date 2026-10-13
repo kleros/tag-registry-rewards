@@ -134,6 +134,12 @@ const argv: any = yargs(hideBin(process.argv))
   .option("forget-unmined", {
     description: "send: resend a transfer whose saved transactions can no longer be mined (their nonce went to another transaction)",
     type: "boolean",
+  })
+  .option("unrelated-tx", {
+    description:
+      "send: a transaction that only coincides with one of the file's transfers (same recipient, same amount), never taken for its payment; repeat for several",
+    type: "string",
+    array: true,
   }).argv
 
 // Strict YYYY-MM-DD: Date.UTC would roll "2026-13-01" over to January 2027.
@@ -454,6 +460,7 @@ const main = async () => {
       skipPaidOnChain: !!argv["skip-paid-on-chain"],
       skipOnchainCheck: !!argv["skip-onchain-check"],
       forgetUnmined: !!argv["forget-unmined"],
+      unrelatedTxs: ([] as unknown[]).concat(argv["unrelated-tx"] || []).map(String),
       from: argv.from ? String(argv.from) : undefined,
       period: argv.period ? String(argv.period) : undefined,
     })
