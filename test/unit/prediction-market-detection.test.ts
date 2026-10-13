@@ -137,7 +137,7 @@ describe("prediction-market detection", () => {
     const position = evmAddress(0x4001)
     evm.contracts.set(CTF, ctfStub)
     evm.contracts.set(position, wrapped(CTF))
-    const spellings = [position.toUpperCase().replace(/^0X/, "0X"), ` ${position} `, `${position}\n`, utils.getAddress(position)]
+    const spellings = [position.toUpperCase(), position.replace(/^0x/, "0X"), ` ${position} `, `${position}\n`, utils.getAddress(position)]
     const tags = spellings.map((address) => token("4326", address))
     const matches = await pm.detectPredictionMarketTokens(tags)
     assert.deepEqual(Object.keys(matches).sort(), tags.map((t) => t.id).sort())
