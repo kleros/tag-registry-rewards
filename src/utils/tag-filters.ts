@@ -190,7 +190,7 @@ export const reviewOnExplorer = async (tags: Tag[]): Promise<ExplorerReview[]> =
   })
   const tagged = review.filter((r) => r.status === "tagged").length
   const notReadText = Object.keys(notRead)
-    .sort()
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
     .map((host) => `${host} ${notRead[host]}`)
     .join(", ")
   console.log(
