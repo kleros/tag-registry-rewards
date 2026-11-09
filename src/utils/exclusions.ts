@@ -132,6 +132,15 @@ const applyScoped = <T>(
   return kept
 }
 
+// The entry naming this item (by itemID) for submissions, if any: an item that
+// fetch cannot read at all (no address anywhere) is left out only when an
+// entry names it, so that leaving it unpaid is a decision with a reason.
+export const submissionExclusionFor = (list: ExclusionList, id: string): Exclusion | undefined => {
+  const entry = list.entries.find((e) => scopeApplies(e, "submissions") && itemIdMatches(e, id))
+  if (entry) entry.hits++
+  return entry
+}
+
 export const applyTagExclusions = (list: ExclusionList, tags: Tag[]): Tag[] =>
   applyScoped(
     list,

@@ -84,7 +84,7 @@ transactions sent to it**, counted up to the run. The counts are free:
 | Provider (default) | Envio HyperSync, `EVM_TX_PROVIDER=hypersync` | JSON-RPC, `SOLANA_TX_PROVIDER=rpc` |
 | What is counted | top-level txs with `to` = address and `status = 1` (pre-Byzantium Ethereum, which has no status: `gasUsed < gas` or the receipt has logs, see below); on HyperEVM, user-signed txs only (see below) | signatures from `getSignaturesForAddress` with `err == null`; histories above 1.5M signatures estimated by sampling (below) |
 | Key | `ENVIO_API_TOKEN` (free, required) | none; `SOLANA_RPC_URLS` to add free Helius/Alchemy URLs |
-| Holders (Tokens) | — | distinct owners of open token accounts, any balance (Jupiter's count when it already shows ≥ 5,000); an entry that is not a token mint gets 0 |
+| Holders (Tokens) | — | distinct owners of token accounts holding a non-zero balance, as Jupiter and Solscan count holders (Jupiter's count when it already shows ≥ 5,000); an entry that is not a token mint gets 0 |
 
 Ethereum receipts before Byzantium (block 4,370,000, October 2017) have no
 status. A failed transaction then burnt all its gas and kept no logs, so one
@@ -270,7 +270,28 @@ yarn start --mode fetch [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 
 What it does:
 
+- first checks the indexer against Gnosis, and stops when it could leave a
+  registered item out (each such item would be unpaid, its share going to the
+  others):
+  - it must have processed the whole period (`_meta.progressBlock` past the
+    period's end): an indexer behind still has the last days' items as
+    requested, not registered;
+  - every item each registry ever created on-chain (its `NewItem` events, read
+    with HyperSync) must be in it.
+  `INDEXER_CHECK=off` skips this (the tests do); `removals` checks the same,
+  with the ATQ registry too
 - fetches from Address Tags, Tokens, Domains registries
+  - an item the indexer left blank (no `key0`: its one IPFS fetch failed and
+    was cached as empty, gtcr-indexer PR #11) has its keys read from its own
+    IPFS file, derived as the indexer derives them (`IPFS_READ_GATEWAYS` sets
+    the gateways). Until November 2026 such items were skipped: Tokens entries
+    in July, September and October 2026 went unpaid. Removals and ATQ read
+    them the same way
+  - nothing registered is dropped silently: an item that still has no address
+    (no IPFS file, a file that cannot be read or names none) or that has no
+    registration request stops the run, naming it, unless `exclusions.json`
+    names it by `itemID` (`"scope": "submissions"` or `"all"`), with the reason
+    it is left out
 - drops Domains entries whose chain + address is registered in the Tokens
   registry (an EVM address in any letter case: `0xAbC…` is `0xabc…`)
 - applies exclusion filters:
@@ -280,7 +301,16 @@ What it does:
   - Address Tags: skip EOA (`getCode == 0x`)
   - Address Tags: skip EIP-1167 proxy when implementation has code
   - Address Tags: skip ERC-721 (`supportsInterface(0x80ac58cd)`)
-  - Solana Address Tags skip bytecode checks
+  - Address Tags: skip ERC-20 (`totalSupply()`, `balanceOf()` and
+    `allowance()`, the functions every ERC-20 has, all answer; `decimals()`
+    and `symbol()` are optional); before November 2026 only a name tag ending
+    in "token" was caught
+  - Address Tags: a contract that answers a function it cannot have (a
+    fallback returning data) answers anything, so neither interface check can
+    judge it: kept, with a warning to check it by hand
+  - Address Tags: skip Solana token mints (an SPL Token or Token-2022 mint
+    account, Solana's ERC-20)
+  - Solana Address Tags skip the bytecode checks (no EVM code there)
 - looks up the Address Tags and Tokens entries (not Domains) on their chain's
   reference explorer and lists, for review, those tagged there or whose
   explorer cannot be read in `<runId>_explorer_check.csv`; nothing is excluded
@@ -292,7 +322,11 @@ What it does:
 - enriches EVM and Solana rows (see [Transaction counts](#transaction-counts)):
   - `txn count`
   - Solana holders (tokens only)
-- filters out Solana token rows with holders `< 5000`
+- filters out Solana token rows with holders `< 5000`: owners holding a
+  non-zero balance. Until November 2026 every open token account counted,
+  empty ones too, which passed tokens with 1,100–4,800 real holders on 5,800–24,000
+  emptied accounts (29 of them in October 2026). The Dune lane
+  (`SOLANA_TX_PROVIDER=dune`) still counts every account its table holds
 - stops with an error, writing nothing, if any count is missing: counts drive
   the payout split, so they never default to 0. Rerun to resume.
 
@@ -339,6 +373,8 @@ What it does:
   - Address Tags: not a contract (`getCode == 0x`)
   - Address Tags: EIP-1167 proxy
   - Address Tags: ERC-721 contract
+  - Address Tags: ERC-20 contract
+  - Address Tags: Solana token mint
 - writes a standalone CSV report and does not touch fetch manifest files
 
 Files written under `files/`:
@@ -906,7 +942,7 @@ What is covered:
   every output file and manifest, the IPFS document and index, the tx-count
   cache and its lock, the ledger, the time budget, and the helpers.
 - `test/integration`: fetching tags, removals and ATQ from the indexer; the
-  address-tag checks (EOA, EIP-1167, ERC-721); HyperSync counting (cutoffs,
+  address-tag checks (EOA, EIP-1167, ERC-721, ERC-20, Solana mints); the indexer checks; HyperSync counting (cutoffs,
   cache top-ups, resume, splits, pre-Byzantium Ethereum); the Solana RPC pool,
   holders and enrichment; the Dune lanes; the routines; `send` against the mock
   node (refusals, crashes and resumes at every step, fee replacement, reverts);

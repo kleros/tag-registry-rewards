@@ -2,6 +2,7 @@ import fetch from "node-fetch"
 import conf from "./config"
 import { AtqRow, Item, ItemRequest, Period, Removal, Tag } from "./types"
 import { chainDisplayName } from "./utils/chains"
+import { fillMissingKeys } from "./utils/item-data"
 
 const PAGE_SIZE = 1000
 
@@ -44,6 +45,7 @@ const fetchItemsByStatus = async (
               resolutionTime
               submissionTime
             }
+            data
             key0
             key1
             key2
@@ -134,18 +136,24 @@ export const fetchRemovals = async (period: Period): Promise<Removal[]> => {
       `[removals-fetch] ${registry}: received ${items.length} Absent items`
     )
 
-    for (const item of items) {
-      // A genuine removal (registered, then cleared) has more than one request.
-      // Registrations that were simply rejected have exactly one.
-      if (Number(item.numberOfRequests ?? 0) <= 1) continue
-
+    // A genuine removal (registered, then cleared) has more than one request.
+    // Registrations that were simply rejected have exactly one. Attributed to
+    // the period the removal itself resolved in — NOT the item's latest request,
+    // which may be a later rejected re-registration.
+    const removedInPeriod = items.filter((item) => {
+      if (Number(item.numberOfRequests ?? 0) <= 1) return false
       const clearing = latestRequestOfType(item, "ClearingRequested")
-      if (!clearing) continue
+      return !!clearing && inPeriod(requestResolvedAt(item, clearing), period)
+    })
 
-      // Attribute to the period the removal itself resolved in — NOT the item's
-      // latest request, which may be a later rejected re-registration.
+    // A removal of an item the indexer left blank is paid like any other: its
+    // address comes from the item's IPFS file. Without an address it is still
+    // paid (the remover earned it), deduplicated by its item id.
+    const filled = await fillMissingKeys(removedInPeriod, "removals-fetch")
+    for (const u of filled.unresolved) console.warn(`[removals-fetch] removal of ${u.id} paid without its address: ${u.why}`)
+    for (const item of filled.items) {
+      const clearing = latestRequestOfType(item, "ClearingRequested") as ItemRequest
       const removedAt = requestResolvedAt(item, clearing)
-      if (!inPeriod(removedAt, period)) continue
 
       // Pay only the on-chain requester of the winning ClearingRequested.
       // item.latestRequester is NOT a safe fallback: it belongs to the item's
@@ -186,13 +194,16 @@ const buildMetadata = (item: Item): string =>
 
 // ATQ registered submissions whose latest registration resolved in the period.
 export const fetchAtqRegistered = async (period: Period): Promise<AtqRow[]> => {
-  const items = await fetchItemsByStatus(conf.XDAI_REGISTRY_ATQ, "Registered")
-  const rows: AtqRow[] = []
-  for (const item of items) {
+  const items = (await fetchItemsByStatus(conf.XDAI_REGISTRY_ATQ, "Registered")).filter((item) => {
     const registration = latestRequestOfType(item, "RegistrationRequested")
-    if (!registration) continue
-    const resolvedAt = requestResolvedAt(item, registration)
-    if (!inPeriod(resolvedAt, period)) continue
+    return !!registration && inPeriod(requestResolvedAt(item, registration), period)
+  })
+  const rows: AtqRow[] = []
+  // the keys are only the report's metadata here: an unreadable file is a warning
+  const filled = await fillMissingKeys(items, "removals-fetch")
+  for (const u of filled.unresolved) console.warn(`[removals-fetch] ATQ item ${u.id} listed without its metadata: ${u.why}`)
+  for (const item of filled.items) {
+    const registration = latestRequestOfType(item, "RegistrationRequested") as ItemRequest
     rows.push({
       itemID: item.itemID ?? item.id,
       submissionTime: Number(registration.submissionTime ?? 0),
@@ -209,14 +220,16 @@ export const fetchAtqRegistered = async (period: Period): Promise<AtqRow[]> => {
 
 // ATQ removals whose ClearingRequested resolved in the period.
 export const fetchAtqAbsent = async (period: Period): Promise<AtqRow[]> => {
-  const items = await fetchItemsByStatus(conf.XDAI_REGISTRY_ATQ, "Absent")
-  const rows: AtqRow[] = []
-  for (const item of items) {
-    if (Number(item.numberOfRequests ?? 0) <= 1) continue
+  const items = (await fetchItemsByStatus(conf.XDAI_REGISTRY_ATQ, "Absent")).filter((item) => {
+    if (Number(item.numberOfRequests ?? 0) <= 1) return false
     const clearing = latestRequestOfType(item, "ClearingRequested")
-    if (!clearing) continue
-    const resolvedAt = requestResolvedAt(item, clearing)
-    if (!inPeriod(resolvedAt, period)) continue
+    return !!clearing && inPeriod(requestResolvedAt(item, clearing), period)
+  })
+  const rows: AtqRow[] = []
+  const filled = await fillMissingKeys(items, "removals-fetch")
+  for (const u of filled.unresolved) console.warn(`[removals-fetch] ATQ item ${u.id} listed without its metadata: ${u.why}`)
+  for (const item of filled.items) {
+    const clearing = latestRequestOfType(item, "ClearingRequested") as ItemRequest
     rows.push({
       itemID: item.itemID ?? item.id,
       submissionTime: Number(clearing.submissionTime ?? 0),

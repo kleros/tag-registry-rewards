@@ -57,7 +57,7 @@ describe("Solana holders", () => {
     assert.equal(chain.calls.getProgramAccounts || 0, 0, "no on-chain scan needed")
   })
 
-  it("counts distinct owners on-chain (any balance) when Jupiter's count is low or missing", async () => {
+  it("counts distinct owners on-chain when Jupiter's count is low or missing", async () => {
     const low = addMint("Low", 40)
     const unknown = addMint("Unlisted", 7)
     chain.jupiter[low] = { holderCount: 12, tokenProgram: TOKEN_PROGRAM }
@@ -65,6 +65,25 @@ describe("Solana holders", () => {
     assert.deepEqual(out[low], { holders: 40, source: "onchain", createdAt: undefined })
     assert.equal(out[unknown].holders, 7)
     assert.ok(logs.has("[solana-holders] 2 mint(s): 0 passed on Jupiter's holder count, 2 checked on-chain, 2 below 5000 holders"))
+  })
+
+  it("does not count empty token accounts: only owners holding a balance are holders", async () => {
+    const mint = addMint("Dumped", 30)
+    // 20 wallets sold everything and kept their accounts open, one of them also
+    // holding a second, funded account; 5 more own nothing but empty accounts
+    chain.tokenAccounts.filter((a) => a.mint === mint && a.owner[3] >= 10 && a.owner[3] < 30).forEach((a) => (a.amount = 0))
+    chain.tokenAccounts.push({ mint, owner: owner(12), amount: 5 })
+    for (let i = 100; i < 105; i++) chain.tokenAccounts.push({ mint, owner: owner(i), amount: 0 })
+    assert.deepEqual(await countDistinctOwners(pool(), mint, TOKEN_PROGRAM, 5000), { owners: 11, complete: true })
+    const out = await checkHolders(pool(), [mint], 5000)
+    assert.equal(out[mint].holders, 11)
+  })
+
+  it("does not count empty token accounts in owner buckets either", async () => {
+    const mint = addMint("HugeDumped", 600)
+    chain.tokenAccounts.filter((a) => a.mint === mint && a.owner[3] % 2 === 1).forEach((a) => (a.amount = 0))
+    for (const f of chain.faults) f.programAccountsTooLarge = true
+    assert.deepEqual(await countDistinctOwners(pool(), mint, TOKEN_PROGRAM, 100000), { owners: 300, complete: true })
   })
 
   it("gives 0 holders to an address that is not a token mint, or does not exist", async () => {

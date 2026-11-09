@@ -16,6 +16,7 @@ import { acquireTxCountCacheLock, txCountCacheDir, txCountCacheEnabled } from ".
 import { writeFetchOutputs } from "./utils/fetch-output"
 import { applyTagFilters } from "./utils/tag-filters"
 import { writeExplorerCheck } from "./utils/filter-check-output"
+import { assertIndexerComplete } from "./utils/indexer-checks"
 import conf from "./config"
 import { BudgetExceededError, isBudgetExceeded, startTimeBudget } from "./utils/runtime-helpers"
 
@@ -182,6 +183,7 @@ export const enrichTags = async (
 export const tagsRoutine = async (period: Period): Promise<FetchManifest> => {
   console.log("Period:", period)
   preflight(true, true) // before the slow fetch + filter steps
+  await assertIndexerComplete(period, [conf.XDAI_REGISTRY_ADDRESS_TAGS, conf.XDAI_REGISTRY_TOKENS, conf.XDAI_REGISTRY_DOMAINS])
   const tags = await fetchTags(period)
   console.log("Fetched tags:", tags.length)
 

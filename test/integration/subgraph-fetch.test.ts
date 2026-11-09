@@ -6,6 +6,9 @@ import { captureConsole, CapturedConsole } from "../support/console"
 import { setEnv } from "../support/env"
 import { evmAddress, REGISTRY, SOLANA_CHAIN, unix } from "../support/fixtures"
 import { MockItem, MockSubgraph, subgraphItem } from "../support/subgraph"
+import { MockServer, startMockServer } from "../support/http"
+import { ipfsPath, keysFromItemFile } from "../../src/utils/item-data"
+import { unlinkSync, writeFileSync } from "fs"
 
 const PERIOD = { start: new Date("2026-09-01T00:00:00Z"), end: new Date("2026-10-01T00:00:00Z") }
 const IN = unix("2026-09-15T00:00:00Z")
@@ -108,14 +111,30 @@ describe("fetchTags", () => {
     assert.deepEqual(tags.map((t) => t.isTokenOnAddressTags), [true, true, false, false])
   })
 
-  it("skips items without key0 or without a registration request, with a warning", async () => {
-    subgraph.add(
-      subgraphItem("addressTags", { requests: [registration(evmAddress(1), IN)], key0: "" }),
-      subgraphItem("addressTags", { requests: [clearing(evmAddress(1), IN)] })
+  it("stops on an item it cannot read or without a registration request, unless exclusions.json names it", async () => {
+    const blank = subgraphItem("addressTags", { requests: [registration(evmAddress(1), IN)], key0: "" })
+    const unrequested = subgraphItem("addressTags", { requests: [clearing(evmAddress(1), IN)] })
+    subgraph.add(blank, unrequested)
+    await assert.rejects(fetchTags(PERIOD), (err: Error) => {
+      assert.match(err.message, /2 registered item\(s\) of the period cannot be read/)
+      assert.ok(err.message.includes(`${blank.id}: its data names no IPFS file`))
+      assert.ok(err.message.includes(`${unrequested.id}: the indexer has no registration request for it`))
+      return true
+    })
+    writeFileSync(
+      "exclusions.json",
+      JSON.stringify([
+        { itemID: blank.id, scope: "submissions", reason: "no data at all" },
+        { itemID: unrequested.itemID, reason: "indexer gap, checked by hand" },
+      ])
     )
-    assert.deepEqual(await fetchTags(PERIOD), [])
-    assert.ok(logs.has("missing key0"))
-    assert.ok(logs.has("no registration request found"))
+    try {
+      assert.deepEqual(await fetchTags(PERIOD), [])
+      assert.ok(logs.has(`${blank.id} left out: its data names no IPFS file`))
+      assert.ok(logs.has(`${unrequested.id} left out`))
+    } finally {
+      unlinkSync("exclusions.json")
+    }
   })
 
   it("drops Domains entries whose address is live in the Tokens registry", async () => {
@@ -176,6 +195,133 @@ describe("fetchTags", () => {
   it("rejects an item key that is not a CAIP-10 address", async () => {
     subgraph.add(subgraphItem("tokens", { requests: [registration(evmAddress(1), IN)], key0: "0xnocaip" }))
     await assert.rejects(fetchTags(PERIOD), /Invalid CAIP string received: "0xnocaip"/)
+  })
+})
+
+// The indexer leaves an item's keys empty when its one IPFS fetch failed
+// (gtcr-indexer PR #11): October 2026's USD1 and ALLO went unpaid that way.
+describe("items the indexer left blank", () => {
+  const tokenFile = (address: string, name = "USD1") => ({
+    columns: [
+      { label: "Address", type: "rich address", isIdentifier: true },
+      { label: "Name", type: "text", isIdentifier: true },
+      { label: "Symbol", type: "text", isIdentifier: true },
+      { label: "Decimals", type: "number" },
+      { label: "Logo", type: "image", isIdentifier: false },
+    ],
+    values: { Address: address, Name: name, Symbol: name, Decimals: "6", Logo: "/ipfs/QmLogo" },
+  })
+  let ipfs: MockServer
+  let files: { [path: string]: { status?: number; body?: unknown } }
+  let restoreGateways: () => void
+  beforeEach(async () => {
+    files = {}
+    ipfs = await startMockServer((req) => files[req.path] || { status: 404, body: { error: "not found" } })
+    restoreGateways = setEnv({ IPFS_READ_GATEWAYS: `${ipfs.url}/ipfs` })
+  })
+  afterEach(async () => {
+    restoreGateways()
+    await ipfs.close()
+  })
+
+  it("reads a blank item's address from its IPFS file, so it is rewarded like the others", async () => {
+    const usd1 = `solana:${SOLANA_CHAIN}:USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB`
+    files["/ipfs/QmUsd1/item.json"] = { body: tokenFile(usd1) }
+    subgraph.add(subgraphItem("tokens", { requests: [registration(evmAddress(9), IN)], key0: "", key1: "", data: "/ipfs/QmUsd1/item.json" }))
+    const [tag] = await fetchTags(PERIOD)
+    assert.equal(tag.tagAddress, "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB")
+    assert.equal(tag.chain, SOLANA_CHAIN)
+    assert.equal(tag.submitter, evmAddress(9))
+    assert.ok(logs.has("1 item(s) without key0 in the indexer"))
+  })
+
+  it("flags a blank Address Tags entry whose name tag ends with 'token', like any other", async () => {
+    files["/ipfs/QmTag"] = {
+      body: {
+        columns: [
+          { label: "Contract Address", isIdentifier: true },
+          { label: "Public Name Tag", isIdentifier: true },
+          { label: "Project Name", isIdentifier: true },
+        ],
+        values: { "Contract Address": "eip155:1:0x00000000000000000000000000000000000000aa", "Public Name Tag": "Some Token", "Project Name": "Some" },
+      },
+    }
+    subgraph.add(subgraphItem("addressTags", { requests: [registration(evmAddress(1), IN)], key0: "", key1: "", data: "/ipfs/QmTag" }))
+    const [tag] = await fetchTags(PERIOD)
+    assert.equal(tag.isTokenOnAddressTags, true)
+    assert.equal(tag.addressTagName, "some token")
+  })
+
+  it("stops the fetch when a blank item's file cannot be read, rather than leave it unpaid", async () => {
+    subgraph.add(subgraphItem("tokens", { requests: [registration(evmAddress(1), IN)], key0: "", data: "/ipfs/QmGone" }))
+    await assert.rejects(fetchTags(PERIOD), /its IPFS file \/ipfs\/QmGone could not be read \(http:\/\/127\.0\.0\.1:\d+\/ipfs: HTTP 404\)/)
+  })
+
+  it("stops on a blank item whose file names no address or is no JSON, unless exclusions.json names it", async () => {
+    files["/ipfs/QmEmpty"] = { body: { columns: [{ label: "Address", isIdentifier: true }], values: {} } }
+    files["/ipfs/QmGarbled"] = { body: "{ not json" }
+    const empty = subgraphItem("tokens", { requests: [registration(evmAddress(1), IN)], key0: "", data: "/ipfs/QmEmpty" })
+    const garbled = subgraphItem("tokens", { requests: [registration(evmAddress(2), IN)], key0: "", data: "/ipfs/QmGarbled" })
+    subgraph.add(empty, garbled)
+    await assert.rejects(fetchTags(PERIOD), /\/ipfs\/QmEmpty names no address[\s\S]*\/ipfs\/QmGarbled names no address/)
+    writeFileSync("exclusions.json", JSON.stringify([empty, garbled].map((i) => ({ itemID: i.itemID, scope: "all", reason: "malformed submission" }))))
+    try {
+      assert.deepEqual(await fetchTags(PERIOD), [])
+    } finally {
+      unlinkSync("exclusions.json")
+    }
+  })
+
+  it("reads an item's data however its IPFS file is written", () => {
+    const cid = "QmYkRTauLAQftN27i6EDZGWNgKHLCHYYqCPw8qPenaBNi5"
+    assert.equal(ipfsPath(`/ipfs/${cid}`), cid)
+    assert.equal(ipfsPath(`ipfs://${cid}/item.json`), `${cid}/item.json`)
+    assert.equal(ipfsPath(`https://cdn.kleros.link/ipfs/${cid}`), cid)
+    assert.equal(ipfsPath(cid), cid)
+    assert.equal(ipfsPath("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"), "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+    assert.equal(ipfsPath('{"Contract Address":"eip155:10:0x9ff3"}'), null, "data written inline names no file")
+  })
+
+  it("keeps a live token the indexer left blank from paying its CDN entry", async () => {
+    const key0 = "eip155:1:0x93ed3fbe21207ec2e8f2d3c3de6e058cb73bc04d"
+    files["/ipfs/QmToken"] = { body: tokenFile(key0, "PNK") }
+    subgraph.add(
+      subgraphItem("tokens", { requests: [registration(evmAddress(1), BEFORE)], key0: "", data: "/ipfs/QmToken" }),
+      subgraphItem("domains", { requests: [registration(evmAddress(2), IN)], key0 })
+    )
+    assert.deepEqual(await fetchTags(PERIOD), [])
+  })
+
+  it("pays the removal of an item the indexer left blank, with its address", async () => {
+    files["/ipfs/QmRemoved"] = { body: tokenFile("eip155:100:0x0000000000000000000000000000000000000abc", "GNO") }
+    subgraph.add(
+      subgraphItem("tokens", {
+        status: "Absent",
+        requests: [registration(evmAddress(1), BEFORE), clearing(evmAddress(2), IN)],
+        key0: "",
+        data: "/ipfs/QmRemoved",
+      })
+    )
+    const [removal] = await fetchRemovals(PERIOD)
+    assert.equal(removal.tagAddress, "0x0000000000000000000000000000000000000abc")
+    assert.equal(removal.chain, "100")
+    assert.equal(removal.submitter, evmAddress(2))
+  })
+
+  it("derives the keys as the indexer does: identifier columns in order, values as text", () => {
+    const keys = keysFromItemFile({
+      columns: [
+        { label: "A", isIdentifier: true },
+        { label: "Skipped" },
+        { label: "B", isIdentifier: true },
+        { label: "C", isIdentifier: true },
+        { label: "D", isIdentifier: true },
+      ],
+      values: { A: "eip155:1:0xabc", B: 6, C: true, Skipped: "x" },
+    })
+    assert.deepEqual(keys, { key0: "eip155:1:0xabc", key1: "6", key2: "true", key3: "-" })
+    assert.equal(keysFromItemFile({ columns: [{ label: "A" }], values: { A: "x" } }), null)
+    assert.equal(keysFromItemFile("not an item"), null)
   })
 })
 

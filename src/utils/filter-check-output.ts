@@ -12,6 +12,8 @@ const REASON_SUMMARY_ORDER: { [reason in FilterCheckReason]: true } = {
   "not a contract (getCode == 0x)": true,
   "eip-1167 minimal proxy": true,
   "erc-721 contract": true,
+  "erc-20 contract": true,
+  "solana token mint": true,
 }
 const REASON_ORDER = Object.keys(REASON_SUMMARY_ORDER) as FilterCheckReason[]
 

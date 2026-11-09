@@ -1,6 +1,8 @@
 import { Item, Period, Tag } from "./types"
 import fetch from "node-fetch"
 import conf from "./config"
+import { assertAllResolved, fillMissingKeys, UnresolvedItem } from "./utils/item-data"
+import { loadExclusions } from "./utils/exclusions"
 
 const PAGE_SIZE = 1000
 
@@ -36,6 +38,7 @@ const fetchTagsBatchByRegistry = async (
             props {
               value
             }
+            data
             key0
             key1
             key2
@@ -88,6 +91,7 @@ const itemToTag = async (
 ): Promise<Tag | null> => {
   const caip = item?.key0
   if (!caip) {
+    // only an item exclusions.json names gets here (fetchTags stops otherwise)
     console.warn(`Skipping item ${item.id} – missing key0`)
     return null
   }
@@ -145,6 +149,8 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
             registry_id: { _eq: "${conf.XDAI_REGISTRY_TOKENS}"},
             status: {_in: ["Registered", "ClearingRequested"]},
           }, limit: ${PAGE_SIZE}, offset: ${offset}, order_by: {id: asc}) {
+            id
+            data
             key0
             status
           }
@@ -178,12 +184,19 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
     offset += PAGE_SIZE
   }
 
-  const tokenAddresses = new Set(allTokenItems.filter((item) => !!item.key0).map((item) => caipAddressKey(item.key0)))
+  // A live token the indexer left blank still excludes its CDN entries. One
+  // whose file cannot be read might be any address: the run stops (unless
+  // exclusions.json names it). One whose file names no address matches none.
+  const { items: tokenItems, unresolved } = await fillMissingKeys(allTokenItems, "fetch")
+  const unreadable = unresolved.filter((u) => /could not be read/.test(u.why))
+  assertAllResolved(unreadable, loadExclusions(), "fetch")
+  for (const u of unresolved) if (!unreadable.includes(u)) console.warn(`[fetch] live token ${u.id}: ${u.why}`)
+  const tokenAddresses = new Set(tokenItems.filter((item) => !!item.key0).map((item) => caipAddressKey(item.key0)))
 
-  // A domain is kept only if its address is NOT a live token (one without
-  // key0 is kept here, and skipped with a warning when read)
+  // A domain is kept only if its address is NOT a live token (one still
+  // without key0 is one exclusions.json names, skipped when read)
   const kept = domainItems.filter((item) => !item.key0 || !tokenAddresses.has(caipAddressKey(item.key0)))
-  const exact = new Set(allTokenItems.map((item) => item.key0))
+  const exact = new Set(tokenItems.map((item) => item.key0))
   const caseOnly = domainItems.filter(
     (item) => !!item.key0 && !exact.has(item.key0) && tokenAddresses.has(caipAddressKey(item.key0))
   ).length
@@ -203,13 +216,31 @@ const EXCLUDED_SUBMITTERS = new Set([
   "0xbf45d3c81f587833635b3a1907f5a26c208532e7",
 ])
 
+// Every registered item of the period becomes a tag, or the run stops: one
+// the indexer left blank is read from its IPFS file, and one that cannot be
+// read at all, or has no registration request, is left out only when
+// exclusions.json names it. Nothing registered is dropped silently.
 export const fetchTags = async (period: Period): Promise<Tag[]> => {
   // Fetch all 3 registries in parallel
-  const [addressTagsItems, tokensItems, domainsItems] = await Promise.all([
+  const raw = await Promise.all([
     fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_REGISTRY_ADDRESS_TAGS),
     fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_REGISTRY_TOKENS),
     fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_REGISTRY_DOMAINS),
   ])
+  const unresolved: UnresolvedItem[] = []
+  const filled: Item[][] = []
+  for (const items of raw) {
+    const result = await fillMissingKeys(items, "fetch")
+    unresolved.push(...result.unresolved)
+    filled.push(result.items)
+  }
+  for (const item of filled.flat()) {
+    if (item.key0 && !(item.requests || []).some((req) => req.requestType === "RegistrationRequested")) {
+      unresolved.push({ id: item.id, why: "the indexer has no registration request for it" })
+    }
+  }
+  assertAllResolved(unresolved, loadExclusions(), "fetch")
+  const [addressTagsItems, tokensItems, domainsItems] = filled
 
   console.log("Filtering Tokens away from Domains for rewards")
   const nonTokenDomainsItems = await nonTokensFromDomains(domainsItems)

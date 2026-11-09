@@ -22,6 +22,7 @@ export interface MockItem {
   numberOfRequests: number
   requests: MockRequest[]
   props: { value: string }[]
+  data?: string // the item's IPFS file
   key0: string
   key1: string
   key2: string
@@ -86,6 +87,8 @@ const parseWhere = (query: string): Where => {
 
 export class MockSubgraph {
   items: MockItem[] = []
+  // the last Gnosis block the indexer reports having processed (_meta)
+  progressBlock = 1000000
   queries: Where[] = []
   // Fail every request with this HTTP status, or with GraphQL errors, from the n-th on.
   fault?: { status?: number; graphqlErrors?: boolean; fromRequest?: number }
@@ -108,6 +111,9 @@ export class MockSubgraph {
       if (this.fault && this.requestCount >= (this.fault.fromRequest || 1)) {
         if (this.fault.status) return { status: this.fault.status, raw: "upstream error" }
         if (this.fault.graphqlErrors) return { body: { errors: [{ message: "field 'LItem' not found" }] } }
+      }
+      if (/_meta\s*\{/.test(query)) {
+        return { body: { data: { _meta: [{ chainId: 1, progressBlock: 999 }, { chainId: 100, progressBlock: this.progressBlock }] } } }
       }
       const where = parseWhere(query)
       this.queries.push(where)

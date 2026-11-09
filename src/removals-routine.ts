@@ -7,6 +7,8 @@ import {
 import { buildRemovalRewards } from "./removal-reward-builder"
 import { buildAtqRewards } from "./atq-reward-builder"
 import { writeRemovalsOutputs } from "./utils/removals-output"
+import { assertIndexerComplete } from "./utils/indexer-checks"
+import conf from "./config"
 import {
   applyAtqExclusions,
   applyRemovalExclusions,
@@ -23,6 +25,12 @@ export const removalsRoutine = async (
 ): Promise<RemovalsManifest> => {
   console.log("Removals period:", period)
   const exclusions = sharedExclusions ?? loadExclusions()
+  await assertIndexerComplete(period, [
+    conf.XDAI_REGISTRY_ADDRESS_TAGS,
+    conf.XDAI_REGISTRY_TOKENS,
+    conf.XDAI_REGISTRY_DOMAINS,
+    conf.XDAI_REGISTRY_ATQ,
+  ])
 
   // Exclusions apply BEFORE dedupe: if the kept (latest) removal of a
   // duplicated item is excluded, an earlier legitimate removal still counts.
