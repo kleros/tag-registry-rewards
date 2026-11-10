@@ -399,7 +399,7 @@ const main = async () => {
     applyTimeBudget()
     let fetchManifest: FetchManifest
     try {
-      fetchManifest = await tagsRoutine({ start, end })
+      fetchManifest = await tagsRoutine({ start, end }, exclusions)
     } catch (err) {
       if (!isBudgetExceeded(err)) throw err
       console.log(

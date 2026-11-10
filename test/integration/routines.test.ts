@@ -9,6 +9,10 @@ import { MockDune } from "../support/dune"
 import { freshWorkdir, readCsv, readJson, writeJson } from "../support/files"
 import { evmAddress, SOLANA_CHAIN, solanaAddress, unix } from "../support/fixtures"
 import { MockSubgraph, subgraphItem } from "../support/subgraph"
+import { MockChain, newChain } from "../support/solana"
+
+const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+let chain: MockChain
 
 // Routines over the subgraph and Dune mocks. dune-client reads its settings
 // when loaded, so the modules are required once the mocks are up.
@@ -40,7 +44,14 @@ const originals: { [k: string]: unknown } = {}
 before(async () => {
   logs = captureConsole()
   dune = await new MockDune().start()
+  // Solana holders: Jupiter, then the token accounts, on the Dune lane too
+  chain = await newChain(1)
+  for (const program of [TOKEN_PROGRAM, "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]) {
+    chain.accounts[program] = { owner: "BPFLoaderUpgradeab1e11111111111111111111111", executable: true }
+  }
   setEnv({
+    SOLANA_RPC_URLS: chain.urls().join(","),
+    JUPITER_TOKENS_API_URL: chain.jupiterUrl,
     EVM_TX_PROVIDER: "dune",
     SOLANA_TX_PROVIDER: "dune",
     DUNE_API_KEY: "k",
@@ -78,6 +89,7 @@ after(async () => {
   pm.detectPredictionMarketTokens = originals.pm
   logs.restore()
   await dune.stop()
+  await chain.stop()
 })
 let restoreSubgraph: () => void
 beforeEach(async () => {
@@ -105,7 +117,10 @@ describe("tagsRoutine (fetch)", () => {
     )
     dune.evmCounts = { "1": { [evmAddress(0xc1)]: 1234 } }
     dune.solanaCounts = { [popular]: 99999, [fewHolders]: 50 }
-    dune.solanaHolders = { [popular]: 12000, [fewHolders]: 40 }
+    chain.jupiter[popular] = { holderCount: 12000, tokenProgram: TOKEN_PROGRAM }
+    chain.jupiter[fewHolders] = { holderCount: 40, tokenProgram: TOKEN_PROGRAM }
+    chain.accounts[fewHolders] = { owner: TOKEN_PROGRAM }
+    for (let i = 0; i < 40; i++) chain.tokenAccounts.push({ mint: fewHolders, owner: Buffer.alloc(32, i + 1) })
 
     const manifest = await routines.tagsRoutine(PERIOD)
     assert.equal(manifest.includedCount, 2)

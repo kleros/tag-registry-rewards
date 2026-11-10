@@ -132,6 +132,28 @@ const applyScoped = <T>(
   return kept
 }
 
+// The entry naming this item (by itemID) for submissions, if any: an item that
+// fetch cannot read at all (no address anywhere) is left out only when an
+// entry names it, so that leaving it unpaid is a decision with a reason.
+export const itemExclusionFor = (list: ExclusionList, scope: ExclusionScope, id: string): Exclusion | undefined => {
+  const entry = list.entries.find((e) => scopeApplies(e, scope) && itemIdMatches(e, id))
+  if (entry) entry.hits++
+  return entry
+}
+
+export const submissionExclusionFor = (list: ExclusionList, id: string): Exclusion | undefined =>
+  itemExclusionFor(list, "submissions", id)
+
+// The entry naming this item by itemID with scope "all": an item the indexer
+// gets wrong is left to a by-hand decision once an entry leaves it out of
+// every payout. A narrower entry (a submission excluded for another reason)
+// does not cover a removal of it the indexer lost.
+export const namedByItemId = (list: ExclusionList, id: string): Exclusion | undefined => {
+  const entry = list.entries.find((e) => (e.scope ?? "all") === "all" && itemIdMatches(e, id))
+  if (entry) entry.hits++
+  return entry
+}
+
 export const applyTagExclusions = (list: ExclusionList, tags: Tag[]): Tag[] =>
   applyScoped(
     list,

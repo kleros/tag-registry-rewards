@@ -28,12 +28,14 @@ import { readCacheFile, ThrottledWriter, txCountCacheDir, txCountCacheEnabled } 
 export const SOLANA_RPC_DEFINITION =
   "successful signatures (err == null) from getSignaturesForAddress, all-time, finalized"
 export const SOLANA_HOLDERS_DEFINITION =
-  "distinct owners of the mint's open token accounts, any balance (Jupiter holderCount, which only counts non-zero balances, is accepted when already >= threshold)"
+  "distinct owners of the mint's token accounts holding a non-zero balance, as Jupiter and Solscan count holders (Jupiter holderCount is accepted when already >= threshold)"
 
 const SOLANA_CHAIN_ID = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 const TOKEN_PROGRAMS = [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]
+// the SPL token programs (public program ids), for the Address Tags mint check
+export { TOKEN_PROGRAM, TOKEN_2022_PROGRAM }
 const JUPITER_DEFAULT_URL = "https://api.jup.ag/tokens/v2/search"
 const PAGE_SIZE = 1000
 const CACHE_FILE = "solana-rpc.json"
@@ -499,6 +501,25 @@ const isTooBig = (err: unknown): boolean =>
   err instanceof SolanaRpcError &&
   (err.kind === "too-large" || err.kind === "timeout" || err.code === -32012 || err.httpStatus === 413)
 
+// A token account (either program) holds its owner at bytes 32-63 and its
+// balance at 64-71 (u64, little-endian): the scans read those 40 bytes.
+const OWNER_AND_AMOUNT = { offset: 32, length: 40 }
+
+// The owners of the scanned accounts that hold a non-zero balance. An empty
+// account (a wallet that sold everything and never closed it) holds nothing:
+// Jupiter and Solscan do not count it, and neither does the holder rule.
+const holdingOwners = (slices: string[]): string[] =>
+  slices
+    .map((slice) => Buffer.from(slice, "base64"))
+    .map((bytes) => {
+      if (bytes.length !== OWNER_AND_AMOUNT.length) {
+        throw new Error(`[solana-holders] getProgramAccounts returned ${bytes.length} bytes per account, not the ${OWNER_AND_AMOUNT.length} asked for`)
+      }
+      return bytes
+    })
+    .filter((bytes) => bytes.subarray(32, 40).some((byte) => byte !== 0))
+    .map((bytes) => bytes.subarray(0, 32).toString("base64"))
+
 // Holder scans go to one URL at a time, the public RPC first: it is the only
 // endpoint verified for these filters, and providers refuse them in their own
 // ways (-32010 index exclusions, Helius's "use getProgramAccountsV2", HTTP
@@ -509,7 +530,7 @@ const fetchOwners = async (rpc: SolanaRpcPool, program: string, filters: unknown
     const call = (f: unknown[]) =>
       rpc.call<{ account: { data: [string, string] } }[]>(
         "getProgramAccounts",
-        [program, { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 32, length: 32 }, filters: f }],
+        [program, { encoding: "base64", commitment: "confirmed", dataSlice: OWNER_AND_AMOUNT, filters: f }],
         { timeoutMs: 180000, maxBytes: 500 * 1024 * 1024, failFastOnTimeout: true, only: endpoint, maxAttempts: 3 }
       )
     try {
@@ -526,7 +547,7 @@ const fetchOwners = async (rpc: SolanaRpcPool, program: string, filters: unknown
         }
       }
       if (!Array.isArray(accounts)) throw new Error("[solana-holders] unexpected getProgramAccounts response")
-      return accounts.map((a) => a.account.data[0])
+      return holdingOwners(accounts.map((a) => a.account.data[0]))
     } catch (err) {
       if (isTooBig(err) || !(err instanceof SolanaRpcError)) throw err
       lastError = err
@@ -536,9 +557,11 @@ const fetchOwners = async (rpc: SolanaRpcPool, program: string, filters: unknown
   throw lastError || new Error("[solana-holders] no RPC URL served getProgramAccounts")
 }
 
-// Distinct owners of the mint's open token accounts (no balance filter, like
-// Dune). Very large mints are counted by owner byte, stopping once `stopAt` is
-// reached: only the threshold matters for them.
+// Distinct owners of the mint's token accounts that hold a non-zero balance.
+// Until November 2026 every open account counted, empty ones too (like Dune's
+// count): that passed tokens with a few thousand real holders and tens of
+// thousands of emptied accounts. Very large mints are counted by owner byte,
+// stopping once `stopAt` is reached: only the threshold matters for them.
 export const countDistinctOwners = async (
   rpc: SolanaRpcPool,
   mint: string,

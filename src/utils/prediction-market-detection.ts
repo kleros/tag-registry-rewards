@@ -259,10 +259,13 @@ const TRANSPORT_ERROR_CODES = new Set<string>([
   ethers.errors.NETWORK_ERROR,
   "EMPTY_RESULT",
 ])
-const REVERT_MESSAGE = /revert|invalid opcode|invalid jump|stack (under|over)flow|vm execution error/i
+// "EVM error: …": how reth reports a call that halted (InvalidFEOpcode, an
+// unknown function in a contract with no fallback, StackUnderflow…)
+const REVERT_MESSAGE = /revert|invalid opcode|invalid jump|stack (under|over)flow|vm execution error|evm error/i
 // Gas exhaustion is rpc-dependent (each public node caps eth_call gas
 // differently), so it is first retried elsewhere, like an empty result.
-const GAS_CAP_MESSAGE = /out of gas|gas required exceeds|intrinsic gas|gas limit/i
+// Checked first: reth words it "EVM error: OutOfGas(…)".
+const GAS_CAP_MESSAGE = /out ?of ?gas|gas required exceeds|intrinsic gas|gas limit/i
 // JSON-RPC error codes that only ever mean "the EVM call failed": 3 (geth /
 // erigon / nethermind "execution reverted") and -32015 (nethermind "VM
 // execution error."). -32000 is generic and is judged by its message.

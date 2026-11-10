@@ -4,7 +4,8 @@ import { getAddressTagExclusionReason } from "../../src/utils/address-tag-valida
 import { ChainConfig, Tag } from "../../src/types"
 import { captureConsole, CapturedConsole } from "../support/console"
 import { MockEvm } from "../support/evm"
-import { withEnv } from "../support/env"
+import { setEnv, withEnv } from "../support/env"
+import { newChain } from "../support/solana"
 import { evmAddress, makeTag, SOLANA_CHAIN, solanaAddress } from "../support/fixtures"
 
 // applyTagFilters' collaborators are swapped through their modules' exports
@@ -60,10 +61,158 @@ describe("address tag validation (eth_getCode, EIP-1167, ERC-165)", () => {
     assert.equal(await reason(plain), null, "supportsInterface reverting is normal")
   })
 
-  it("never checks Solana addresses by bytecode", async () => {
-    const solana: ChainConfig = { id: SOLANA_CHAIN, namespaceId: "solana", name: "Solana", label: "SOL", explorer: "solscan.io", rpc: evm.url }
-    assert.equal(await getAddressTagExclusionReason(makeTag({ chain: SOLANA_CHAIN, tagAddress: solanaAddress("X") }), solana), null)
-    assert.equal(evm.calls.eth_getCode || 0, 0)
+  it("excludes ERC-20 contracts by the functions every ERC-20 has, whatever their name tag", async () => {
+    const { utils } = require("ethers") as typeof import("ethers")
+    const iface = new utils.Interface([
+      "function totalSupply() view returns (uint256)",
+      "function balanceOf(address) view returns (uint256)",
+      "function allowance(address,address) view returns (uint256)",
+      "function decimals() view returns (uint8)",
+    ])
+    // a stub answering the given functions, reverting on anything else
+    const stub = (answers: { [fn: string]: string }) => (data: string) => {
+      const fn = Object.keys(answers).find((f) => data.startsWith(iface.getSighash(f)))
+      if (!fn) throw { code: 3, message: "execution reverted" }
+      return answers[fn]
+    }
+    const full: { [fn: string]: string } = {
+      totalSupply: iface.encodeFunctionResult("totalSupply", [1000]),
+      balanceOf: iface.encodeFunctionResult("balanceOf", [0]),
+      allowance: iface.encodeFunctionResult("allowance", [0]),
+    }
+    const token = evmAddress(0x2001)
+    const withDecimals = evmAddress(0x2002)
+    const noAllowance = evmAddress(0x2003)
+    const fallback = evmAddress(0x2004)
+    const catchAll = evmAddress(0x2005)
+    for (const a of [token, withDecimals, noAllowance, fallback, catchAll]) evm.code.set(a, "0x6080")
+    evm.contracts.set(token, stub(full)) // no decimals() nor symbol(): both optional in EIP-20
+    evm.contracts.set(withDecimals, stub({ ...full, decimals: iface.encodeFunctionResult("decimals", [18]) }))
+    const { allowance, ...rest } = full
+    evm.contracts.set(noAllowance, stub(rest))
+    evm.contracts.set(fallback, () => "0x") // a fallback function answering everything with nothing
+    evm.contracts.set(catchAll, () => full.totalSupply) // answering everything with a number
+    assert.equal(await reason(token), "erc-20 contract")
+    assert.equal(await reason(withDecimals), "erc-20 contract")
+    assert.equal(await reason(noAllowance), null)
+    assert.equal(await reason(fallback), null)
+    assert.equal(await reason(catchAll), "answers any call (catch-all)", "its answers prove nothing either way: excluded, for a look by hand")
+  })
+
+  it("takes a revert's data, which ethers hands back as the call's result, for no answer", async () => {
+    const { utils } = require("ethers") as typeof import("ethers")
+    const errorString = new utils.Interface(["function Error(string)"]).encodeFunctionData("Error", ["not supported"]) // 4 + 96 bytes
+    const customError = new utils.Interface(["function Unauthorized(uint256)"]).encodeFunctionData("Unauthorized", [3]) // 4 + 32 bytes
+    const oracle = evmAddress(0x2301)
+    const messenger = evmAddress(0x2302)
+    for (const a of [oracle, messenger]) evm.code.set(a, "0x6080")
+    evm.contracts.set(oracle, () => errorString) // a fallback reverting with a reason, for every call
+    evm.contracts.set(messenger, () => customError)
+    assert.equal(await reason(oracle), null, "neither a catch-all nor an ERC-20")
+    assert.equal(await reason(messenger), null)
+  })
+
+  it("asks the chain's other RPCs before keeping a contract on empty answers: an NFT, or no code at all, from a node that has not synced it", async () => {
+    const nft = evmAddress(0x2401)
+    const fresh = evmAddress(0x2402)
+    const synced = await new MockEvm({ chainId: 31337 }).start()
+    pm.FALLBACK_RPCS["31337"] = [synced.url]
+    try {
+      evm.code.set(nft, "0x6080")
+      evm.contracts.set(nft, () => "0x") // the lagging node: every call empty
+      synced.code.set(nft, "0x6080")
+      synced.interfaces.set(nft, true)
+      assert.equal(await reason(nft), "erc-721 contract")
+      synced.code.set(fresh, "0x6080") // no code yet on the chain's own RPC
+      assert.equal(await reason(fresh), null, "a contract, kept")
+      assert.equal(await reason(evmAddress(0x2403)), "not a contract (getCode == 0x)", "no code anywhere: an EOA")
+    } finally {
+      delete pm.FALLBACK_RPCS["31337"]
+      await synced.stop()
+    }
+  })
+
+  it("takes reth's wording of a halted call (an unknown function, no fallback) for a revert, not for a failure", async () => {
+    const old = evmAddress(0x2501)
+    evm.code.set(old, "0x6080")
+    const realHandle = evm["handle"].bind(evm)
+    evm["handle"] = (method: string, params: { to?: string }[]) => {
+      if (method === "eth_call" && String(params[0].to).toLowerCase() === old) throw { code: -32003, message: "EVM error: InvalidFEOpcode" }
+      return realHandle(method, params)
+    }
+    assert.equal(await reason(old), null)
+    assert.equal(evm.calls.eth_call, 3, "each answered at once, not retried")
+  })
+
+  it("excludes a token or an NFT given a fallback that answers any call, which would otherwise pass both interface checks", async () => {
+    const { utils } = require("ethers") as typeof import("ethers")
+    const iface = new utils.Interface(["function totalSupply() view returns (uint256)"])
+    const word = iface.encodeFunctionResult("totalSupply", [0]) // what such a fallback returns for anything
+    const token = evmAddress(0x2101)
+    const nft = evmAddress(0x2102)
+    for (const a of [token, nft]) evm.code.set(a, "0x6080")
+    evm.contracts.set(token, () => word)
+    evm.interfaces.set(nft, true) // a real supportsInterface…
+    evm.contracts.set(nft, () => word) // …and a fallback answering the rest
+    assert.equal(await reason(token), "answers any call (catch-all)")
+    assert.equal(await reason(nft), "answers any call (catch-all)")
+  })
+
+  it("asks the chain's other RPCs before taking an empty answer for 'not a token': a node may not have synced the contract", async () => {
+    const { utils } = require("ethers") as typeof import("ethers")
+    const iface = new utils.Interface(["function totalSupply() view returns (uint256)"])
+    const token = evmAddress(0x2201)
+    const synced = await new MockEvm({ chainId: 31337 }).start()
+    pm.FALLBACK_RPCS["31337"] = [synced.url]
+    try {
+      evm.code.set(token, "0x6080")
+      evm.contracts.set(token, () => "0x") // the lagging node: no contract there yet
+      synced.code.set(token, "0x6080")
+      // a token there: totalSupply, balanceOf and allowance answer, anything else reverts
+      synced.contracts.set(token, (data: string) => {
+        if (!/^0x(18160ddd|70a08231|dd62ed3e)/.test(data)) throw { code: 3, message: "execution reverted" }
+        return iface.encodeFunctionResult("totalSupply", [5])
+      })
+      assert.equal(await reason(token), "erc-20 contract")
+      evm.contracts.set(token, () => "0x")
+      synced.contracts.set(token, () => "0x")
+      assert.equal(await reason(token), null, "empty everywhere: not a token")
+    } finally {
+      delete pm.FALLBACK_RPCS["31337"]
+      await synced.stop()
+    }
+  })
+
+  it("excludes a Solana token mint, Solana's ERC-20, and keeps programs, wallets and token accounts", async () => {
+    const TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+    const sol = await newChain(1)
+    const restore = setEnv({ SOLANA_RPC_URLS: sol.urls().join(",") })
+    try {
+      const mint = solanaAddress("Mint")
+      const mint2022 = solanaAddress("Mint2022")
+      const program = solanaAddress("Program")
+      const tokenAccount = solanaAddress("Holder")
+      const wallet = solanaAddress("Wallet")
+      sol.accounts[mint] = { owner: TOKEN, data: Buffer.alloc(82) }
+      const extended = Buffer.alloc(234)
+      extended[165] = 1 // account type: mint, then its extensions
+      sol.accounts[mint2022] = { owner: TOKEN_2022, data: extended }
+      sol.accounts[program] = { owner: "BPFLoaderUpgradeab1e11111111111111111111111", executable: true, data: Buffer.alloc(36) }
+      sol.accounts[tokenAccount] = { owner: TOKEN, data: Buffer.alloc(165) }
+      const solana: ChainConfig = { id: SOLANA_CHAIN, namespaceId: "solana", name: "Solana", label: "SOL", explorer: "solscan.io", rpc: evm.url }
+      const check = (address: string) => getAddressTagExclusionReason(makeTag({ chain: SOLANA_CHAIN, tagAddress: address }), solana)
+      assert.equal(await check(mint), "solana token mint")
+      assert.equal(await check(mint2022), "solana token mint", "a Token-2022 mint with extensions")
+      assert.equal(await check(program), null)
+      assert.equal(await check(tokenAccount), null, "a holder's token account is no token")
+      assert.equal(await check(wallet), null, "an account that does not exist")
+      assert.equal(await check("not-base58-0OIl"), null)
+      assert.equal(evm.calls.eth_getCode || 0, 0, "no EVM call for a Solana address")
+    } finally {
+      restore()
+      await sol.stop()
+    }
   })
 
   it("stops, naming the chain's RPC, when it does not answer: an unchecked tag is never rewarded", async () => {
@@ -130,7 +279,7 @@ describe("address tag validation (eth_getCode, EIP-1167, ERC-165)", () => {
     }
   })
 
-  it("retries an ERC-165 call that failed in transit, never taking the failure for an answer", async () => {
+  it("retries an interface check that failed in transit, never taking the failure for an answer", async () => {
     const realSleep = sender.sleep
     sender.sleep = async () => undefined
     try {
@@ -140,7 +289,7 @@ describe("address tag validation (eth_getCode, EIP-1167, ERC-165)", () => {
       evm.faults.failNext = { eth_call: 1 }
       assert.equal(await reason(nft), "erc-721 contract", "an NFT is not rewarded because of one HTTP 500")
       evm.faults.failNext = { eth_call: 10 }
-      await assert.rejects(reason(nft), /no RPC answered supportsInterface for 0x[0-9a-f]{40}/)
+      await assert.rejects(reason(nft), /no RPC answered the interface checks of 0x[0-9a-f]{40}/, "the interface checks")
     } finally {
       sender.sleep = realSleep
     }
@@ -161,7 +310,7 @@ describe("address tag validation (eth_getCode, EIP-1167, ERC-165)", () => {
         return realHandle(method, params)
       }
       assert.equal(await reason(nft), "erc-721 contract")
-      assert.equal(fallback.calls.eth_call, 1)
+      assert.equal(fallback.calls.eth_call, 2, "the no-function control, then supportsInterface")
     } finally {
       delete pm.FALLBACK_RPCS["31337"]
       sender.sleep = realSleep
@@ -178,7 +327,7 @@ describe("address tag validation (eth_getCode, EIP-1167, ERC-165)", () => {
       return realHandle(method, params)
     }
     assert.equal(await reason(greedy), null)
-    assert.equal(evm.calls.eth_call, 1, "answered at once, not retried")
+    assert.equal(evm.calls.eth_call, 3, "the no-function control, ERC-165, then the ERC-20 check's first call: each answered at once, not retried")
   })
 
   it("checks the address whatever the letter case it was registered in, and holds no contract at a non-address", async () => {

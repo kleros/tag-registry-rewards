@@ -6,6 +6,9 @@ import { captureConsole, CapturedConsole } from "../support/console"
 import { setEnv } from "../support/env"
 import { evmAddress, REGISTRY, SOLANA_CHAIN, unix } from "../support/fixtures"
 import { MockItem, MockSubgraph, subgraphItem } from "../support/subgraph"
+import { MockServer, startMockServer } from "../support/http"
+import { ipfsPath, keysFromItemFile } from "../../src/utils/item-data"
+import { unlinkSync, writeFileSync } from "fs"
 
 const PERIOD = { start: new Date("2026-09-01T00:00:00Z"), end: new Date("2026-10-01T00:00:00Z") }
 const IN = unix("2026-09-15T00:00:00Z")
@@ -45,7 +48,13 @@ afterEach(async () => {
 describe("fetchTags", () => {
   it("returns the live items of the three registries registered in the period", async () => {
     const tag = subgraphItem("addressTags", { requests: [registration(evmAddress(1), IN)], key0: "eip155:8453:0xAbC0000000000000000000000000000000000001", key1: "Uniswap Router" })
-    const token = subgraphItem("tokens", { requests: [registration(evmAddress(2), IN)], status: "ClearingRequested", key0: `solana:${SOLANA_CHAIN}:So11111111111111111111111111111111111111112` })
+    // challenged since: its removal request is pending, which resets the
+    // indexer's latestRequestResolutionTime to 0
+    const token = subgraphItem("tokens", {
+      requests: [registration(evmAddress(2), IN), clearing(evmAddress(8), 0)],
+      status: "ClearingRequested",
+      key0: `solana:${SOLANA_CHAIN}:So11111111111111111111111111111111111111112`,
+    })
     const domain = subgraphItem("domains", { requests: [registration(evmAddress(3), IN)] })
     subgraph.add(
       tag,
@@ -78,13 +87,14 @@ describe("fetchTags", () => {
   })
 
   it("pages through registries of more than 1,000 items", async () => {
-    for (let i = 0; i < 2345; i++) subgraph.add(subgraphItem("tokens", { requests: [registration(evmAddress(i + 10), IN)] }))
+    const items = Array.from({ length: 2345 }, (_, i) => subgraphItem("tokens", { requests: [registration(evmAddress(i + 10), IN)] }))
+    subgraph.add(...items)
     const tags = await fetchTags(PERIOD)
     assert.equal(tags.length, 2345)
-    assert.deepEqual(
-      subgraph.queries.filter((q) => q.registry === REGISTRY.tokens).map((q) => q.offset),
-      [0, 1000, 2000]
-    )
+    // by id (keyset), not by offset: an item changing between pages hides none
+    const ids = items.map((i) => i.id).sort()
+    const periodPages = subgraph.queries.filter((q) => q.registry === REGISTRY.tokens && q.either)
+    assert.deepEqual(periodPages.map((q) => q.idGt), ["", ids[999], ids[1999]])
   })
 
   it("rewards the latest registration's requester (an item can be removed and registered again)", async () => {
@@ -95,6 +105,19 @@ describe("fetchTags", () => {
     )
     const [tag] = await fetchTags(PERIOD)
     assert.equal(tag.submitter, evmAddress(0x03))
+  })
+
+  it("pays an item once, in the period its registration resolved, whatever the requests after it", async () => {
+    const challengedLater = subgraphItem("tokens", { requests: [registration(evmAddress(1), IN), clearing(evmAddress(9), AFTER)] }) // removal rejected after the period
+    const paidBefore = subgraphItem("tokens", { requests: [registration(evmAddress(2), BEFORE), clearing(evmAddress(9), IN)] }) // removal rejected in it
+    const registeredAgain = subgraphItem("tokens", {
+      requests: [registration(evmAddress(3), IN - 86400), clearing(evmAddress(9), IN), registration(evmAddress(4), AFTER)],
+    }) // removed in the period, registered again after it
+    subgraph.add(challengedLater, paidBefore, registeredAgain)
+    const tags = await fetchTags(PERIOD)
+    assert.deepEqual(tags.map((t) => [t.id, t.submitter, t.latestRequestResolutionTime]), [[challengedLater.id, evmAddress(1), IN]])
+    assert.ok(logs.has(`${paidBefore.id}: registered before the period`))
+    assert.ok(logs.has(`${registeredAgain.id}: registered again after the period`))
   })
 
   it("flags address tags whose name ends with 'token'", async () => {
@@ -108,14 +131,30 @@ describe("fetchTags", () => {
     assert.deepEqual(tags.map((t) => t.isTokenOnAddressTags), [true, true, false, false])
   })
 
-  it("skips items without key0 or without a registration request, with a warning", async () => {
-    subgraph.add(
-      subgraphItem("addressTags", { requests: [registration(evmAddress(1), IN)], key0: "" }),
-      subgraphItem("addressTags", { requests: [clearing(evmAddress(1), IN)] })
+  it("stops on an item it cannot read or without a registration request, unless exclusions.json names it", async () => {
+    const blank = subgraphItem("addressTags", { requests: [registration(evmAddress(1), IN)], key0: "" })
+    const unrequested = subgraphItem("addressTags", { requests: [clearing(evmAddress(1), IN)] })
+    subgraph.add(blank, unrequested)
+    await assert.rejects(fetchTags(PERIOD), (err: Error) => {
+      assert.match(err.message, /2 item\(s\) of the period cannot be read in full/)
+      assert.ok(err.message.includes(`${blank.id}: its data names no IPFS file`))
+      assert.ok(err.message.includes(`${unrequested.id}: the indexer has no registration request for it`))
+      return true
+    })
+    writeFileSync(
+      "exclusions.json",
+      JSON.stringify([
+        { itemID: blank.id, scope: "submissions", reason: "no data at all" },
+        { itemID: unrequested.itemID, reason: "indexer gap, checked by hand" },
+      ])
     )
-    assert.deepEqual(await fetchTags(PERIOD), [])
-    assert.ok(logs.has("missing key0"))
-    assert.ok(logs.has("no registration request found"))
+    try {
+      assert.deepEqual(await fetchTags(PERIOD), [])
+      assert.ok(logs.has(`${blank.id} left out: its data names no IPFS file`))
+      assert.ok(logs.has(`${unrequested.id} left out`))
+    } finally {
+      unlinkSync("exclusions.json")
+    }
   })
 
   it("drops Domains entries whose address is live in the Tokens registry", async () => {
@@ -155,14 +194,26 @@ describe("fetchTags", () => {
     assert.deepEqual(tags.map((t) => t.submitter), [evmAddress(9)])
   })
 
-  it("keeps an item whose registration lost its requester instead of failing the fetch", async () => {
+  it("stops on an item whose registration lost its requester (the indexer's failed read), unless exclusions.json names it", async () => {
+    const none = subgraphItem("tokens", { requests: [registration((null as unknown) as string, IN)] })
+    const zero = subgraphItem("tokens", { requests: [registration("0x0000000000000000000000000000000000000000", IN)] })
     subgraph.add(
-      subgraphItem("tokens", { requests: [registration((null as unknown) as string, IN)] }),
+      none,
+      zero,
       subgraphItem("tokens", { requests: [registration("0xf313d85c7fef79118fcd70498c71bf94e75fc2f6", IN)] }),
       subgraphItem("tokens", { requests: [registration(evmAddress(9), IN)] })
     )
-    const tags = await fetchTags(PERIOD)
-    assert.deepEqual(tags.map((t) => t.submitter), [null, evmAddress(9)])
+    await assert.rejects(fetchTags(PERIOD), (err: Error) => {
+      assert.ok(err.message.includes(`${none.id}: the indexer has no requester for its registration (empty)`))
+      assert.ok(err.message.includes(`${zero.id}: the indexer has no requester for its registration (0x0000000000000000000000000000000000000000)`))
+      return true
+    })
+    writeFileSync("exclusions.json", JSON.stringify([none, zero].map((i) => ({ itemID: i.itemID, scope: "submissions", reason: "requester unknown, paid by hand" }))))
+    try {
+      assert.deepEqual((await fetchTags(PERIOD)).map((t) => t.submitter), [evmAddress(9)], "never the zero address")
+    } finally {
+      unlinkSync("exclusions.json")
+    }
   })
 
   it("aborts on an indexer error instead of paying on a partial list", async () => {
@@ -173,9 +224,162 @@ describe("fetchTags", () => {
     await assert.rejects(fetchTags(PERIOD), /Subgraph HTTP 503/)
   })
 
-  it("rejects an item key that is not a CAIP-10 address", async () => {
-    subgraph.add(subgraphItem("tokens", { requests: [registration(evmAddress(1), IN)], key0: "0xnocaip" }))
-    await assert.rejects(fetchTags(PERIOD), /Invalid CAIP string received: "0xnocaip"/)
+  it("stops on an item key that is not a CAIP-10 address, naming it, unless exclusions.json names it", async () => {
+    const bad = subgraphItem("tokens", { requests: [registration(evmAddress(1), IN)], key0: "0xnocaip" })
+    subgraph.add(bad, subgraphItem("tokens", { requests: [registration(evmAddress(2), IN)] }))
+    await assert.rejects(fetchTags(PERIOD), new RegExp(`${bad.id}: its key0 is not a CAIP-10 address \\("0xnocaip"\\)`))
+    writeFileSync("exclusions.json", JSON.stringify([{ itemID: bad.itemID, scope: "submissions", reason: "malformed key" }]))
+    try {
+      assert.deepEqual((await fetchTags(PERIOD)).map((t) => t.submitter), [evmAddress(2)])
+    } finally {
+      unlinkSync("exclusions.json")
+    }
+  })
+})
+
+// The indexer leaves an item's keys empty when its one IPFS fetch failed
+// (gtcr-indexer PR #11): October 2026's USD1 and ALLO went unpaid that way.
+describe("items the indexer left blank", () => {
+  const tokenFile = (address: string, name = "USD1") => ({
+    columns: [
+      { label: "Address", type: "rich address", isIdentifier: true },
+      { label: "Name", type: "text", isIdentifier: true },
+      { label: "Symbol", type: "text", isIdentifier: true },
+      { label: "Decimals", type: "number" },
+      { label: "Logo", type: "image", isIdentifier: false },
+    ],
+    values: { Address: address, Name: name, Symbol: name, Decimals: "6", Logo: "/ipfs/QmLogo" },
+  })
+  let ipfs: MockServer
+  let files: { [path: string]: { status?: number; body?: unknown; raw?: string } }
+  let restoreGateways: () => void
+  beforeEach(async () => {
+    files = {}
+    ipfs = await startMockServer((req) => files[req.path] || { status: 404, body: { error: "not found" } })
+    restoreGateways = setEnv({ IPFS_READ_GATEWAYS: `${ipfs.url}/ipfs` })
+  })
+  afterEach(async () => {
+    restoreGateways()
+    await ipfs.close()
+  })
+
+  it("reads a blank item's address from its IPFS file, so it is rewarded like the others", async () => {
+    const usd1 = `solana:${SOLANA_CHAIN}:USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB`
+    files["/ipfs/QmUsd1/item.json"] = { body: tokenFile(usd1) }
+    subgraph.add(subgraphItem("tokens", { requests: [registration(evmAddress(9), IN)], key0: "", key1: "", data: "/ipfs/QmUsd1/item.json" }))
+    const [tag] = await fetchTags(PERIOD)
+    assert.equal(tag.tagAddress, "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB")
+    assert.equal(tag.chain, SOLANA_CHAIN)
+    assert.equal(tag.submitter, evmAddress(9))
+    assert.ok(logs.has("1 item(s) without key0 in the indexer"))
+  })
+
+  it("flags a blank Address Tags entry whose name tag ends with 'token', like any other", async () => {
+    files["/ipfs/QmTag"] = {
+      body: {
+        columns: [
+          { label: "Contract Address", isIdentifier: true },
+          { label: "Public Name Tag", isIdentifier: true },
+          { label: "Project Name", isIdentifier: true },
+        ],
+        values: { "Contract Address": "eip155:1:0x00000000000000000000000000000000000000aa", "Public Name Tag": "Some Token", "Project Name": "Some" },
+      },
+    }
+    subgraph.add(subgraphItem("addressTags", { requests: [registration(evmAddress(1), IN)], key0: "", key1: "", data: "/ipfs/QmTag" }))
+    const [tag] = await fetchTags(PERIOD)
+    assert.equal(tag.isTokenOnAddressTags, true)
+    assert.equal(tag.addressTagName, "some token")
+  })
+
+  it("stops the fetch when a blank item's file cannot be read, rather than leave it unpaid", async () => {
+    subgraph.add(subgraphItem("tokens", { requests: [registration(evmAddress(1), IN)], key0: "", data: "/ipfs/QmGone" }))
+    await assert.rejects(fetchTags(PERIOD), /its IPFS file \/ipfs\/QmGone could not be read \(http:\/\/127\.0\.0\.1:\d+\/ipfs: HTTP 404\)/)
+  })
+
+  it("stops on a blank item whose file names no address or is no JSON, unless exclusions.json names it", async () => {
+    files["/ipfs/QmEmpty"] = { body: { columns: [{ label: "Address", isIdentifier: true }], values: {} } }
+    files["/ipfs/QmGarbled"] = { raw: "{ not json" }
+    const empty = subgraphItem("tokens", { requests: [registration(evmAddress(1), IN)], key0: "", data: "/ipfs/QmEmpty" })
+    const garbled = subgraphItem("tokens", { requests: [registration(evmAddress(2), IN)], key0: "", data: "/ipfs/QmGarbled" })
+    subgraph.add(empty, garbled)
+    await assert.rejects(fetchTags(PERIOD), /\/ipfs\/QmEmpty names no address[\s\S]*\/ipfs\/QmGarbled could not be read \(http:\/\/127\.0\.0\.1:\d+\/ipfs: not JSON\)/)
+    writeFileSync("exclusions.json", JSON.stringify([empty, garbled].map((i) => ({ itemID: i.itemID, scope: "all", reason: "malformed submission" }))))
+    try {
+      assert.deepEqual(await fetchTags(PERIOD), [])
+    } finally {
+      unlinkSync("exclusions.json")
+    }
+  })
+
+  it("takes only an item file for an answer: a gateway's error page or own JSON sends it to the next gateway", async () => {
+    const usd1 = `solana:${SOLANA_CHAIN}:USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB`
+    restoreGateways()
+    restoreGateways = setEnv({ IPFS_READ_GATEWAYS: `${ipfs.url}/html/ipfs,${ipfs.url}/own/ipfs,${ipfs.url}/ipfs` })
+    files["/html/ipfs/QmUsd1"] = { raw: "<html>rate limited</html>" }
+    files["/own/ipfs/QmUsd1"] = { body: { error: "context deadline exceeded" } }
+    files["/ipfs/QmUsd1"] = { body: tokenFile(usd1) }
+    const item = subgraphItem("tokens", { requests: [registration(evmAddress(9), IN)], key0: "", data: "/ipfs/QmUsd1" })
+    subgraph.add(item)
+    assert.equal((await fetchTags(PERIOD))[0].tagAddress, "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB")
+    delete files["/ipfs/QmUsd1"]
+    await assert.rejects(fetchTags(PERIOD), /could not be read \([^)]*\/html\/ipfs: not JSON; [^;]*\/own\/ipfs: not an item file; [^;]*\/ipfs: HTTP 404\)/)
+  })
+
+  it("reads an item's data however its IPFS file is written", () => {
+    const cid = "QmYkRTauLAQftN27i6EDZGWNgKHLCHYYqCPw8qPenaBNi5"
+    assert.equal(ipfsPath(`/ipfs/${cid}`), cid)
+    assert.equal(ipfsPath(`ipfs://${cid}/item.json`), `${cid}/item.json`)
+    assert.equal(ipfsPath(`https://cdn.kleros.link/ipfs/${cid}`), cid)
+    assert.equal(ipfsPath(cid), cid)
+    assert.equal(ipfsPath("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"), "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+    assert.equal(ipfsPath('{"Contract Address":"eip155:10:0x9ff3"}'), null, "data written inline names no file")
+    // the indexer's own forms (its extractPath)
+    assert.equal(ipfsPath(`ipfs/${cid}/item.json`), `${cid}/item.json`)
+    assert.equal(ipfsPath(`/${cid}/item.json`), `${cid}/item.json`)
+    assert.equal(ipfsPath(`ipfs::/${cid}`), cid)
+    assert.equal(ipfsPath("/ipfs/"), null)
+  })
+
+  it("keeps a live token the indexer left blank from paying its CDN entry", async () => {
+    const key0 = "eip155:1:0x93ed3fbe21207ec2e8f2d3c3de6e058cb73bc04d"
+    files["/ipfs/QmToken"] = { body: tokenFile(key0, "PNK") }
+    subgraph.add(
+      subgraphItem("tokens", { requests: [registration(evmAddress(1), BEFORE)], key0: "", data: "/ipfs/QmToken" }),
+      subgraphItem("domains", { requests: [registration(evmAddress(2), IN)], key0 })
+    )
+    assert.deepEqual(await fetchTags(PERIOD), [])
+  })
+
+  it("pays the removal of an item the indexer left blank, with its address", async () => {
+    files["/ipfs/QmRemoved"] = { body: tokenFile("eip155:100:0x0000000000000000000000000000000000000abc", "GNO") }
+    subgraph.add(
+      subgraphItem("tokens", {
+        status: "Absent",
+        requests: [registration(evmAddress(1), BEFORE), clearing(evmAddress(2), IN)],
+        key0: "",
+        data: "/ipfs/QmRemoved",
+      })
+    )
+    const [removal] = await fetchRemovals(PERIOD)
+    assert.equal(removal.tagAddress, "0x0000000000000000000000000000000000000abc")
+    assert.equal(removal.chain, "100")
+    assert.equal(removal.submitter, evmAddress(2))
+  })
+
+  it("derives the keys as the indexer does: identifier columns in order, values as text", () => {
+    const keys = keysFromItemFile({
+      columns: [
+        { label: "A", isIdentifier: true },
+        { label: "Skipped" },
+        { label: "B", isIdentifier: true },
+        { label: "C", isIdentifier: true },
+        { label: "D", isIdentifier: true },
+      ],
+      values: { A: "eip155:1:0xabc", B: 6, C: true, Skipped: "x" },
+    })
+    assert.deepEqual(keys, { key0: "eip155:1:0xabc", key1: "6", key2: "true", key3: "-" })
+    assert.equal(keysFromItemFile({ columns: [{ label: "A" }], values: { A: "x" } }), null)
+    assert.equal(keysFromItemFile("not an item"), null)
   })
 })
 
@@ -210,6 +414,20 @@ describe("fetchRemovals", () => {
     assert.deepEqual(removals.map((r) => r.submitter), [evmAddress(2)])
   })
 
+  it("pays a removal accepted in the period whatever the item's status at run time, and never a rejected one", async () => {
+    subgraph.add(
+      // removed in the period, submitted again before the run: no longer Absent
+      subgraphItem("tokens", { status: "RegistrationRequested", requests: [registration(evmAddress(1), BEFORE), clearing(evmAddress(2), IN), registration(evmAddress(3), 0)] }),
+      // ...and registered again before the run
+      subgraphItem("tokens", { status: "Registered", requests: [registration(evmAddress(1), BEFORE), clearing(evmAddress(4), IN), registration(evmAddress(5), IN + 3600)] }),
+      // a removal rejected in the period: the item is still registered
+      subgraphItem("tokens", { status: "Registered", requests: [registration(evmAddress(1), BEFORE), clearing(evmAddress(6), IN)] }),
+      // rejected, then challenged again (pending): not a removal either
+      subgraphItem("tokens", { status: "ClearingRequested", requests: [registration(evmAddress(1), BEFORE), clearing(evmAddress(7), IN), clearing(evmAddress(8), 0)] })
+    )
+    assert.deepEqual((await fetchRemovals(PERIOD)).map((r) => r.submitter).sort(), [evmAddress(2), evmAddress(4)].sort())
+  })
+
   it("ignores rejected registrations and items without a removal", async () => {
     subgraph.add(
       removed("addressTags", [registration(evmAddress(1), IN)]),
@@ -224,10 +442,17 @@ describe("fetchRemovals", () => {
     assert.equal(removal.chainName, "Binance Smart Chain")
   })
 
-  it("skips, loudly, a removal whose requester the indexer lost", async () => {
-    subgraph.add(removed("tokens", [registration(evmAddress(1), BEFORE), clearing("", IN)]))
-    assert.deepEqual(await fetchRemovals(PERIOD), [])
-    assert.ok(logs.has(/has no requester on its ClearingRequested/))
+  it("stops on a removal whose requester the indexer lost (none, or the zero address), unless exclusions.json names it", async () => {
+    const none = removed("tokens", [registration(evmAddress(1), BEFORE), clearing("", IN)])
+    const zero = removed("domains", [registration(evmAddress(1), BEFORE), clearing("0x0000000000000000000000000000000000000000", IN)])
+    subgraph.add(none, zero, removed("tokens", [registration(evmAddress(1), BEFORE), clearing(evmAddress(7), IN)]))
+    await assert.rejects(fetchRemovals(PERIOD), /\[removals-fetch\] 1 item\(s\) of the period cannot be read in full[\s\S]*the indexer has no requester for its removal \(empty\)/)
+    writeFileSync("exclusions.json", JSON.stringify([none, zero].map((i) => ({ itemID: i.itemID, scope: "removals", reason: "remover unknown" }))))
+    try {
+      assert.deepEqual((await fetchRemovals(PERIOD)).map((r) => r.submitter), [evmAddress(7)])
+    } finally {
+      unlinkSync("exclusions.json")
+    }
   })
 
   it("aborts on an indexer error", async () => {
@@ -256,5 +481,27 @@ describe("ATQ registrations and removals", () => {
     )
     const rows = await fetchAtqAbsent(PERIOD)
     assert.deepEqual(rows.map((r) => r.requester), [evmAddress(7)])
+  })
+
+  it("lists an ATQ removal accepted in the period even when the item was submitted again before the run", async () => {
+    subgraph.add(subgraphItem("atq", { status: "RegistrationRequested", requests: [registration(evmAddress(1), BEFORE), clearing(evmAddress(7), IN), registration(evmAddress(8), 0)] }))
+    assert.deepEqual((await fetchAtqAbsent(PERIOD)).map((r) => r.requester), [evmAddress(7)])
+  })
+
+  it("lists an ATQ registration challenged since (its removal still pending)", async () => {
+    subgraph.add(subgraphItem("atq", { status: "ClearingRequested", requests: [registration(evmAddress(1), IN), clearing(evmAddress(7), 0)] }))
+    assert.deepEqual((await fetchAtqRegistered(PERIOD)).map((r) => r.requester), [evmAddress(1)])
+  })
+
+  it("stops on an ATQ row whose requester the indexer lost, unless exclusions.json names it", async () => {
+    const zero = subgraphItem("atq", { requests: [registration("0x0000000000000000000000000000000000000000", IN)] })
+    subgraph.add(zero, subgraphItem("atq", { requests: [registration(evmAddress(2), IN)] }))
+    await assert.rejects(fetchAtqRegistered(PERIOD), /no requester for its registration \(0x0{40}\)[\s\S]*"scope": "atq"/)
+    writeFileSync("exclusions.json", JSON.stringify([{ itemID: zero.itemID, scope: "atq", reason: "requester unknown" }]))
+    try {
+      assert.deepEqual((await fetchAtqRegistered(PERIOD)).map((r) => r.requester), [evmAddress(2)])
+    } finally {
+      unlinkSync("exclusions.json")
+    }
   })
 })

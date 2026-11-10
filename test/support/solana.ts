@@ -41,10 +41,23 @@ export interface Fault {
   rejectTokenAccountState?: boolean
 }
 
-// An SPL token account: its mint and its owner (32 bytes).
+// An SPL token account: its mint, its owner (32 bytes) and its balance (an
+// emptied account keeps existing with 0 until its owner closes it).
 export interface TokenAccount {
   mint: string
   owner: Buffer
+  amount?: number // default 1; up to 2^53, written as the u64 it is
+}
+
+// The account's bytes from offset 32 as getProgramAccounts' dataSlice reads
+// them: the owner (32-63), then the balance (64-71, u64 little-endian).
+const accountSlice = (account: TokenAccount, slice: { offset: number; length: number }): Buffer => {
+  const value = account.amount === undefined ? 1 : account.amount
+  const amount = Buffer.alloc(8)
+  amount.writeUInt32LE(value % 2 ** 32, 0)
+  amount.writeUInt32LE(Math.floor(value / 2 ** 32), 4)
+  const bytes = Buffer.concat([Buffer.alloc(32), account.owner, amount, Buffer.alloc(93)])
+  return bytes.subarray(slice.offset, slice.offset + slice.length)
 }
 
 export class MockChain {
@@ -56,7 +69,7 @@ export class MockChain {
   getSlots = 0
   onGetSlot?: (n: number) => void // called after answering the n-th getSlot
   // holders: account owners (by program id), token accounts and Jupiter's view
-  accounts: { [address: string]: { owner: string; executable?: boolean } } = {}
+  accounts: { [address: string]: { owner: string; executable?: boolean; data?: Buffer } } = {}
   tokenAccounts: TokenAccount[] = []
   jupiter: { [mint: string]: { holderCount?: number; createdAt?: string; tokenProgram?: string } } = {}
   jupiterStatus = 200
@@ -224,7 +237,12 @@ export class MockChain {
     }
     if (method === "getMultipleAccounts") {
       const keys: string[] = params[0]
-      return { context: { slot: this.tip }, value: keys.map((k) => (this.accounts[k] ? { owner: this.accounts[k].owner, executable: !!this.accounts[k].executable, data: ["", "base64"], lamports: 1 } : null)) }
+      const slice: { offset: number; length: number } | undefined = params[1] && params[1].dataSlice
+      const dataOf = (k: string): string => {
+        const data = this.accounts[k].data || Buffer.alloc(0)
+        return (slice ? data.subarray(slice.offset, slice.offset + slice.length) : data).toString("base64")
+      }
+      return { context: { slot: this.tip }, value: keys.map((k) => (this.accounts[k] ? { owner: this.accounts[k].owner, executable: !!this.accounts[k].executable, data: [dataOf(k), "base64"], lamports: 1 } : null)) }
     }
     if (method === "getProgramAccounts") {
       const [, config] = params
@@ -240,7 +258,7 @@ export class MockChain {
       return this.tokenAccounts
         .filter((a) => a.mint === mintFilter.memcmp.bytes)
         .filter((a) => byte === undefined || a.owner[31] === byte)
-        .map((a) => ({ pubkey: "acct", account: { data: [a.owner.toString("base64"), "base64"] } }))
+        .map((a) => ({ pubkey: "acct", account: { data: [accountSlice(a, config.dataSlice || { offset: 0, length: 165 }).toString("base64"), "base64"] } }))
     }
     throw { code: -32601, message: `method ${method} not mocked` }
   }

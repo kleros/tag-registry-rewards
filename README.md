@@ -84,7 +84,7 @@ transactions sent to it**, counted up to the run. The counts are free:
 | Provider (default) | Envio HyperSync, `EVM_TX_PROVIDER=hypersync` | JSON-RPC, `SOLANA_TX_PROVIDER=rpc` |
 | What is counted | top-level txs with `to` = address and `status = 1` (pre-Byzantium Ethereum, which has no status: `gasUsed < gas` or the receipt has logs, see below); on HyperEVM, user-signed txs only (see below) | signatures from `getSignaturesForAddress` with `err == null`; histories above 1.5M signatures estimated by sampling (below) |
 | Key | `ENVIO_API_TOKEN` (free, required) | none; `SOLANA_RPC_URLS` to add free Helius/Alchemy URLs |
-| Holders (Tokens) | — | distinct owners of open token accounts, any balance (Jupiter's count when it already shows ≥ 5,000); an entry that is not a token mint gets 0 |
+| Holders (Tokens) | — | distinct owners of token accounts holding a non-zero balance, as Jupiter and Solscan count holders (Jupiter's count when it already shows ≥ 5,000); an entry that is not a token mint gets 0 |
 
 Ethereum receipts before Byzantium (block 4,370,000, October 2017) have no
 status. A failed transaction then burnt all its gas and kept no logs, so one
@@ -270,7 +270,62 @@ yarn start --mode fetch [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 
 What it does:
 
+- first checks the indexer against Gnosis, and stops when it could leave a
+  registered item out (each such item would be unpaid, its share going to the
+  others):
+  - it must have processed the whole period (`_meta.progressBlock` past the
+    period's end): an indexer behind still has the last days' items as
+    requested, not registered;
+  - every item each registry ever created on-chain (its `NewItem` events, read
+    with HyperSync) must be in it, and nothing else;
+  - every item must be in the registry's own state: its status and number of
+    requests as `getItemInfo` returns them on Gnosis (Multicall3, at the block
+    the indexer reached). The indexer reads them from the registry when an
+    event comes in and caches the answer, a failed read included (zeros),
+    after which an item stays "requested" for good, never selected;
+  - every request of an item must be there (indices 0 to n-1), typed as a
+    registration or a removal, with a requester, and resolved unless it is
+    the item's pending one. The same failed read stores a request under index
+    -1, typed "Absent", with no requester, or never writes its resolution,
+    while the item's own state can be right again: a removal or registration
+    missing from its requests is never paid.
+  A problem on an item that an event of its registry names since the period
+  started stops the run, unless `exclusions.json` names the item by `itemID`
+  with `"scope": "all"` (it is then left out of every payout, to be paid by
+  hand); one on an item untouched since
+  cannot change the period's payout and is only a warning, so that an old
+  glitch does not block every month. Items an event names while the indexer
+  is read are not compared; HyperSync or the RPC trailing the indexer by a few
+  blocks is waited for. About 80 s for the 25,000 items of the four registries
+  (HyperSync's free-tier rate limit included). The indexer is read by id
+  (keyset paging), here and in fetch: an item changing between two pages
+  cannot shift them and hide another. `INDEXER_CHECK=off` skips this (the
+  tests do); `removals` checks the same, with the ATQ registry too
 - fetches from Address Tags, Tokens, Domains registries
+  - an item the indexer left blank (no `key0`: its one IPFS fetch failed and
+    was cached as empty, gtcr-indexer PR #11) has its keys read from its own
+    IPFS file, derived as the indexer derives them (`IPFS_READ_GATEWAYS` sets
+    the gateways). Until November 2026 such items were skipped: Tokens entries
+    in July, September and October 2026 went unpaid. Removals and ATQ read
+    them the same way
+  - an item is the period's when its latest registration request resolved in
+    it, whatever came after: one challenged since (a removal request pending,
+    status `ClearingRequested`) is paid, and so is one whose removal was
+    rejected after the period. Selecting by the item's
+    `latestRequestResolutionTime` alone, as until November 2026, missed both
+    (the indexer resets it to 0 on a new request, and moves it to the
+    rejection), and paid an item again when a removal of it was rejected
+    months after its registration
+  - only an item file (`{ columns, values }`) is an answer from a gateway: an
+    error page or a gateway's own JSON sends the read to the next gateway
+  - nothing registered is dropped silently: an item that still has no address
+    (no IPFS file, a file that cannot be read or names none), that has no
+    registration request, or whose requester the indexer lost (none, or the
+    zero address it stores when its read failed) stops the run, naming it,
+    unless `exclusions.json` names it by `itemID` (`"scope": "submissions"` or
+    `"all"`), with the reason it is left out. `removals` stops the same way on
+    a removal or an ATQ row without a requester (`"scope": "removals"` /
+    `"atq"`), and on a `key0` that is not a CAIP-10 address
 - drops Domains entries whose chain + address is registered in the Tokens
   registry (an EVM address in any letter case: `0xAbC…` is `0xabc…`)
 - applies exclusion filters:
@@ -280,7 +335,28 @@ What it does:
   - Address Tags: skip EOA (`getCode == 0x`)
   - Address Tags: skip EIP-1167 proxy when implementation has code
   - Address Tags: skip ERC-721 (`supportsInterface(0x80ac58cd)`)
-  - Solana Address Tags skip bytecode checks
+  - Address Tags: skip ERC-20 (`totalSupply()`, `balanceOf()` and
+    `allowance()`, the functions every ERC-20 has, all answer; `decimals()`
+    and `symbol()` are optional); before November 2026 only a name tag ending
+    in "token" was caught
+  - Address Tags: skip a contract that answers a function it cannot have (a
+    fallback returning data): it answers anything, so neither interface check
+    can judge it, and a token or an NFT given such a fallback would pass both.
+    Excluded as "answers any call (catch-all)", for a look by hand (none of
+    October 2026's 260 entries is one). A revert carrying data (`Error(string)`,
+    a custom error), which ethers hands back as the call's result, is no
+    answer, and neither is a halted call in reth's wording ("EVM error: …").
+    A verdict resting on an empty answer (`0x`, or no code at all) is asked
+    again of the chain's other RPCs, as a node that has not synced the
+    contract answers that: if any of them sees a contract, a token, an NFT or
+    a catch-all, it is one
+  - not detected (no rule covers them yet): ERC-1155 contracts, ERC-721s from
+    before the standard (CryptoKitties), tokens without `allowance()`, EOAs
+    delegated to code (EIP-7702, code `0xef0100…`), Solana wallets, and any
+    contract built to dodge these calls: check those by hand
+  - Address Tags: skip Solana token mints (an SPL Token or Token-2022 mint
+    account, Solana's ERC-20)
+  - Solana Address Tags skip the bytecode checks (no EVM code there)
 - looks up the Address Tags and Tokens entries (not Domains) on their chain's
   reference explorer and lists, for review, those tagged there or whose
   explorer cannot be read in `<runId>_explorer_check.csv`; nothing is excluded
@@ -292,7 +368,13 @@ What it does:
 - enriches EVM and Solana rows (see [Transaction counts](#transaction-counts)):
   - `txn count`
   - Solana holders (tokens only)
-- filters out Solana token rows with holders `< 5000`
+- filters out Solana token rows with holders `< 5000`: owners holding a
+  non-zero balance. Until November 2026 every open token account counted,
+  empty ones too, which passed tokens with 1,100–4,800 real holders on 5,800–24,000
+  emptied accounts (29 of them in October 2026). The Dune lane
+  (`SOLANA_TX_PROVIDER=dune`) counts holders the same way (Jupiter, then the
+  token accounts on-chain), never from Dune's table of every account a mint
+  ever had
 - stops with an error, writing nothing, if any count is missing: counts drive
   the payout split, so they never default to 0. Rerun to resume.
 
@@ -339,6 +421,9 @@ What it does:
   - Address Tags: not a contract (`getCode == 0x`)
   - Address Tags: EIP-1167 proxy
   - Address Tags: ERC-721 contract
+  - Address Tags: ERC-20 contract
+  - Address Tags: answers any call (catch-all)
+  - Address Tags: Solana token mint
 - writes a standalone CSV report and does not touch fetch manifest files
 
 Files written under `files/`:
@@ -397,7 +482,7 @@ yarn start --mode removals [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 
 What it does:
 
-- detects items **removed** within the period (status `Absent`, `numberOfRequests > 1`, whose latest `ClearingRequested` resolved in range) across Address Tags, Tokens, Domains
+- detects items **removed** within the period (a `ClearingRequested` resolved in range and accepted: the item's last request with the item `Absent`, or followed by a new registration request) across Address Tags, Tokens, Domains
 - rewards the **remover** (the requester of the winning removal) with a flat, capped, per-registry amount:
   - `min(REMOVAL_REWARD_POOL_<registry> / removals_in_period, REMOVAL_MAX_PER_REMOVAL_<registry>)`
   - one-pass cap, no recursive redistribution (unlike submissions)
@@ -409,15 +494,19 @@ What it does:
   - rewards the ATQ requester (submitter for registrations, remover for removals)
   - produces its own send file, so removals and ATQ are disbursed separately from submissions
 
-> ⚠️ **Detection reads *current* statuses — run soon after the period ends.**
-> Removals are found by looking at items whose status is `Absent` (ATQ
-> registrations: `Registered`) *at run time*. An item removed in the period
-> but re-registered before the run is missed — and because rewards are
-> pool-based, one missed removal changes *everyone's* amounts in that
-> registry. Re-running a few days later (e.g. for exclusions) is fine;
-> re-running a months-old period is lossy and will not reproduce the original
-> amounts. Also note an ATQ item registered **and** removed within the same
-> period only earns the removal reward.
+> ⚠️ **Registrations are read from *current* statuses — run soon after the period ends.**
+> Removals are found from the requests themselves: a removal request resolved
+> in the period, after which the item left the list (its last request with
+> the item `Absent`, or one followed by a new registration request), whatever
+> the item's status at run time. Until November 2026 they were found among
+> items `Absent` at run time, which missed an item removed in the period and
+> submitted again before the run (none ever was). Registrations (submissions
+> and ATQ: `Registered` or `ClearingRequested`) still are read at run time: an
+> item removed before the run is not paid for its registration. Re-running a
+> few days later (e.g. for exclusions) is fine; re-running a months-old period
+> is lossy and will not reproduce the original amounts. Also note an ATQ item
+> registered **and** removed within the same period only earns the removal
+> reward.
 
 Files written under `files/`:
 
@@ -704,7 +793,7 @@ MetaDAO…; the 54 Solana tokens of September 2026 have none as mint authority),
 Overtime/Thales positions of markets their manager has expired, Thales ranged
 IN/OUT positions, Context Markets on Base, and Polymarket ERC-20 wrappers that
 have no `multiToken()`. Seer outcome tokens submitted to **Address Tags** are
-not this rule's business either: they pass the address checks as contracts.
+not this rule's business either: they are ERC-20s, excluded there as such.
 
 Validated on Aug–Sep 2026 (250/250 Seer tokens detected, 0 false positives on
 the other 277 tokens, 28 s), on Jun 2025–Jul 2026 (2,084 tokens, 0 false
@@ -906,7 +995,7 @@ What is covered:
   every output file and manifest, the IPFS document and index, the tx-count
   cache and its lock, the ledger, the time budget, and the helpers.
 - `test/integration`: fetching tags, removals and ATQ from the indexer; the
-  address-tag checks (EOA, EIP-1167, ERC-721); HyperSync counting (cutoffs,
+  address-tag checks (EOA, EIP-1167, ERC-721, ERC-20, Solana mints); the indexer checks; HyperSync counting (cutoffs,
   cache top-ups, resume, splits, pre-Byzantium Ethereum); the Solana RPC pool,
   holders and enrichment; the Dune lanes; the routines; `send` against the mock
   node (refusals, crashes and resumes at every step, fee replacement, reverts);

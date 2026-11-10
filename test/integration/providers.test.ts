@@ -5,6 +5,9 @@ import { setEnv, withEnv } from "../support/env"
 import { MockDune } from "../support/dune"
 import { evmAddress, makeTag, SOLANA_CHAIN, solanaAddress } from "../support/fixtures"
 import { chains } from "../../src/utils/chains"
+import { MockChain, newChain } from "../support/solana"
+
+const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
 // dune-client reads its settings when loaded: the modules are required after
 // the mock is up and the environment set.
@@ -18,10 +21,19 @@ let evm: EvmEnrichment
 let solana: SolanaEnrichment
 let logs: CapturedConsole
 
+// Holders come from Solana itself on the Dune lane too (Jupiter, then the
+// token accounts), never from Dune's table of every account a mint ever had.
+let chain: MockChain
 before(async () => {
   logs = captureConsole()
   dune = await new MockDune().start()
+  chain = await newChain(1)
+  for (const program of [TOKEN_PROGRAM, "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]) {
+    chain.accounts[program] = { owner: "BPFLoaderUpgradeab1e11111111111111111111111", executable: true }
+  }
   setEnv({
+    SOLANA_RPC_URLS: chain.urls().join(","),
+    JUPITER_TOKENS_API_URL: chain.jupiterUrl,
     DUNE_API_KEY: "test-dune-key",
     DUNE_BASE_URL: dune.url + "/",
     DUNE_POLL_INTERVAL_SECONDS: "0",
@@ -37,6 +49,7 @@ before(async () => {
 after(async () => {
   logs.restore()
   await dune.stop()
+  await chain.stop()
 })
 beforeEach(() => {
   dune.sqls = []
@@ -103,7 +116,8 @@ describe("Solana counts and holders from Dune (SOLANA_TX_PROVIDER=dune)", () => 
     const program = solanaAddress("Prog")
     const unknownMint = solanaAddress("NoHolders")
     dune.solanaCounts = { [mint]: 70000, [program]: 3 }
-    dune.solanaHolders = { [mint]: 6000 }
+    dune.solanaHolders = { [mint]: 6000, [unknownMint]: 9000 } // what Dune's table says: not used
+    chain.jupiter[mint] = { holderCount: 6000, tokenProgram: TOKEN_PROGRAM }
     const tags = [
       makeTag({ registry: "tokens", chain: SOLANA_CHAIN, tagAddress: mint }),
       makeTag({ registry: "addressTags", chain: SOLANA_CHAIN, tagAddress: program }),
@@ -113,8 +127,10 @@ describe("Solana counts and holders from Dune (SOLANA_TX_PROVIDER=dune)", () => 
     assert.deepEqual(res.byKey[`${SOLANA_CHAIN}:tokens:${mint}`], { txCount: 70000, totalHolders: 6000 })
     assert.deepEqual(res.byKey[`${SOLANA_CHAIN}:addressTags:${program}`], { txCount: 3, totalHolders: null })
     assert.deepEqual(res.byKey[`${SOLANA_CHAIN}:tokens:${unknownMint}`], { txCount: 0, totalHolders: 0 })
-    assert.ok(logs.has(`No holder data returned by Dune for token mint ${unknownMint}`))
+    assert.ok(logs.has(`Mint ${unknownMint} does not exist on-chain: 0 holders`))
+    assert.ok(!dune.sqls.some((sql) => sql.includes("token_accounts")), "no holder query to Dune")
     assert.equal(res.provenance.provider, "dune")
+    assert.match(String(res.provenance.holdersDefinition), /non-zero balance/)
   })
 
   it("queries 25 addresses at a time, all-time unless a lookback is set", async () => {
@@ -131,6 +147,6 @@ describe("Solana counts and holders from Dune (SOLANA_TX_PROVIDER=dune)", () => 
   it("checks its settings before a run", async () => {
     await withEnv({ SOLANA_TX_LOOKBACK_DAYS: "-2" }, () => assert.throws(() => solana.assertSolanaDuneSettings(), /Invalid SOLANA_TX_LOOKBACK_DAYS/))
     await withEnv({ SOLANA_TX_PROVIDER: "helius" }, () => assert.throws(() => solana.getSolanaTxProvider(), /Invalid SOLANA_TX_PROVIDER/))
-    assert.deepEqual(await solana.enrichSolanaTagsBatch([]), { byKey: {}, provenance: { provider: "dune", definition: (await solana.enrichSolanaTagsBatch([])).provenance.definition } })
+    assert.deepEqual(await solana.enrichSolanaTagsBatch([]), { byKey: {}, provenance: { provider: "dune", definition: (await solana.enrichSolanaTagsBatch([])).provenance.definition, holdersDefinition: (await solana.enrichSolanaTagsBatch([])).provenance.holdersDefinition } })
   })
 })

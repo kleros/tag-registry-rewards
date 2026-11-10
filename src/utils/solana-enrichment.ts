@@ -3,19 +3,22 @@ import { executeDuneSql, getDuneApiKey } from "./dune-client"
 import conf from "../config"
 import { SolanaEnrichment } from "./solana-common"
 import {
+  checkHolders,
+  defaultSolanaRpcPool,
   enrichSolanaTagsWithRpc,
+  isSolanaAddress,
   SolanaRpcAddressReport,
   SOLANA_HOLDERS_DEFINITION,
   SOLANA_RPC_DEFINITION,
 } from "./solana-rpc-enrichment"
 
-// Solana tx counts and Tokens-registry holder counts. Provider:
-// SOLANA_TX_PROVIDER=rpc (default, plain JSON-RPC + Jupiter) or dune.
+// Solana tx counts and Tokens-registry holder counts. Tx counts:
+// SOLANA_TX_PROVIDER=rpc (default, plain JSON-RPC + Jupiter) or dune. Holders
+// are always counted on-chain (Jupiter, then getProgramAccounts).
 
 export type { SolanaEnrichment } from "./solana-common"
 
 const SOLANA_TX_CHUNK_SIZE = 25
-const SOLANA_HOLDERS_CHUNK_SIZE = 50
 const SOLANA_DUNE_CONCURRENCY = 1
 
 const getSolanaTxLookbackDays = (): number | null => {
@@ -113,40 +116,6 @@ GROUP BY address
   return result
 }
 
-const getBatchTotalHolders = async (
-  apiKey: string,
-  mintAddresses: string[]
-): Promise<{ [address: string]: number }> => {
-  if (mintAddresses.length === 0) return {}
-
-  const result: { [address: string]: number } = {}
-  const chunks = splitChunks(mintAddresses, SOLANA_HOLDERS_CHUNK_SIZE)
-
-  const tasks = chunks.map((chunk, idx) => async () => {
-    console.log(
-      `[solana-holders] chunk ${idx + 1}/${chunks.length} mints=${chunk.length}`
-    )
-    const inList = chunk.map((a) => `'${a}'`).join(", ")
-    const sql = `
-SELECT token_mint_address, COUNT(DISTINCT token_balance_owner) AS total_holders
-FROM solana_utils.token_accounts
-WHERE token_mint_address IN (${inList})
-GROUP BY token_mint_address
-`
-    return executeDuneSql(apiKey, sql, `solana-holders-${idx + 1}`)
-  })
-
-  const allRows = await runWithConcurrency(tasks, SOLANA_DUNE_CONCURRENCY)
-  for (const rows of allRows) {
-    for (const row of rows) {
-      result[String(row.token_mint_address || "")] = Number(
-        row.total_holders || 0
-      )
-    }
-  }
-  return result
-}
-
 const enrichSolanaTagsWithDune = async (
   tags: Tag[]
 ): Promise<{ [cacheKey: string]: SolanaEnrichment }> => {
@@ -169,24 +138,19 @@ const enrichSolanaTagsWithDune = async (
   )
 
   const txCountMap = await getBatchTotalTxns(duneApiKey, allAddresses)
-  const holderCountMap =
-    tokenMints.length > 0
-      ? await getBatchTotalHolders(duneApiKey, tokenMints)
-      : {}
+  // Holders are counted as on the RPC lane (owners holding a non-zero
+  // balance), never from Dune: its token_accounts table keeps every account a
+  // mint ever had, emptied ones included, which passed tokens with a few
+  // thousand real holders (October 2026).
+  const validMints = tokenMints.filter(isSolanaAddress)
+  const holderCounts = validMints.length > 0 ? await checkHolders(defaultSolanaRpcPool(), validMints) : {}
 
   for (const tag of tags) {
     const cacheKey = `${tag.chain}:${tag.registry}:${tag.tagAddress}`
     let totalHolders: number | null = null
     if (tag.registry === "tokens") {
-      const holders = holderCountMap[tag.tagAddress]
-      if (holders === undefined) {
-        console.warn(
-          `[solana-batch] No holder data returned by Dune for token mint ${tag.tagAddress} — defaulting to 0 (will be dropped by holder threshold)`
-        )
-        totalHolders = 0
-      } else {
-        totalHolders = holders
-      }
+      const counted = holderCounts[tag.tagAddress]
+      totalHolders = counted ? counted.holders : 0
     }
     result[cacheKey] = {
       txCount: txCountMap[tag.tagAddress] || 0,
@@ -197,8 +161,7 @@ const enrichSolanaTagsWithDune = async (
   return result
 }
 
-const DUNE_DEFINITION =
-  "Dune solana.account_activity: approx_distinct(tx_id) with tx_success = true; holders: COUNT(DISTINCT token_balance_owner) from solana_utils.token_accounts"
+const DUNE_DEFINITION = "Dune solana.account_activity: approx_distinct(tx_id) with tx_success = true"
 
 export interface SolanaProvenance {
   provider: "rpc" | "dune"
@@ -227,7 +190,7 @@ export const enrichSolanaTagsBatch = async (tags: Tag[]): Promise<SolanaEnrichme
   if (provider === "dune") {
     return {
       byKey: tags.length > 0 ? await enrichSolanaTagsWithDune(tags) : {},
-      provenance: { provider, definition: DUNE_DEFINITION },
+      provenance: { provider, definition: DUNE_DEFINITION, holdersDefinition: SOLANA_HOLDERS_DEFINITION },
     }
   }
   const provenance: SolanaProvenance = {

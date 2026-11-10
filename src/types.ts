@@ -14,6 +14,8 @@ export interface Item {
   status?: string
   requests: ItemRequest[]
   props: Prop[]
+  // The item's IPFS file ("/ipfs/<cid>/item.json"), its keys' source.
+  data?: string
   key0: string
   key1: string
   key2: string
@@ -21,6 +23,8 @@ export interface Item {
 }
 
 export interface ItemRequest {
+  // the indexer's "<item id>-<index>"
+  id?: string
   requester: string
   requestType: "RegistrationRequested" | "ClearingRequested"
   resolutionTime: number
@@ -130,6 +134,9 @@ export type FilterCheckReason =
   | "not a contract (getCode == 0x)"
   | "eip-1167 minimal proxy"
   | "erc-721 contract"
+  | "erc-20 contract"
+  | "answers any call (catch-all)"
+  | "solana token mint"
 
 export interface FilterCheckRow {
   id: string
