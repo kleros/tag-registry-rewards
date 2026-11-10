@@ -523,7 +523,7 @@ describe("send: interrupted runs never pay twice", () => {
     const other = Wallet.createRandom()
     const restore = setEnv({ WALLET_PRIVATE_KEY: other.privateKey })
     try {
-      await assert.rejects(send("1790000000001.json"), /was started from 0x[0-9a-fA-F]{40}, and WALLET_PRIVATE_KEY is now/)
+      await assert.rejects(send("1790000000001.json"), /was started from 0x[0-9a-fA-F]{40}, and the account sending now is 0x[0-9a-fA-F]{40}/)
     } finally {
       restore()
     }
@@ -950,10 +950,18 @@ describe("send: checks before anything is signed", () => {
       evm.setTokenBalance(unpaid, PNK(5000))
       evm.setNativeBalance(unpaid, PNK(1))
       lines.length = 0
-      const result = await send("1790000000001.json", { dryRun: true, from: unpaid })
+      // the payout was paid, from the other wallet: its recipients received it
+      await assert.rejects(
+        send("1790000000001.json", { dryRun: true, from: unpaid }),
+        /3 of the 3 transfers to send were already received by their recipients since 2026-10-01, from another wallet/
+      )
+      // a payout nobody paid
+      writePayout("1790000000002.json", [{ recipient: evmAddress(0x777), amount: PNK(3) }])
+      lines.length = 0
+      const result = await send("1790000000002.json", { dryRun: true, from: unpaid })
       assert.equal(result.sent, 0)
-      assert.ok(output().includes("Dry run: would send 3 transfer(s)"))
-      await assert.rejects(send("1790000000001.json", { from: unpaid }), /--from only works with --dry-run/)
+      assert.ok(output().includes("Dry run: would send 1 transfer(s)"))
+      await assert.rejects(send("1790000000002.json", { from: unpaid }), /--from only works with --dry-run/)
       await assert.rejects(send("1790000000001.json", { dryRun: true, from: "0xnope" }), /--from "0xnope" is not an address/)
     } finally {
       restore()

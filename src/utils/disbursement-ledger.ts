@@ -18,7 +18,10 @@ export type DisbursementKind = "submissions" | "removals" | "atq" | "unknown"
 // pending: nothing signed yet. signed: a transaction is signed and saved, maybe
 // broadcast. sent: a node accepted it. confirmed: mined with status 1.
 // failed: its transaction reverted (nothing was paid by it); a rerun signs a new one.
-export type TransferStatus = "pending" | "signed" | "sent" | "confirmed" | "failed"
+// requested: handed to a browser wallet (`--mode disburse-page`), which signs
+// and broadcasts in one step: whether it sent it is not known yet. Nothing
+// sends it again until the disburse page has settled it from the chain.
+export type TransferStatus = "pending" | "signed" | "sent" | "confirmed" | "failed" | "requested"
 
 export interface LedgerTransfer {
   recipient: string
@@ -35,10 +38,36 @@ export interface LedgerTransfer {
   blockNumber?: number
   confirmedAt?: string
   foundOnChain?: boolean // paid before this ledger knew of it (found on-chain)
+  paidBy?: string // the wallet that paid it, when another than the payout's (found on-chain)
+  // Sent through a browser wallet (`--mode disburse-page`): no signed bytes
+  // were saved, so its transaction is waited for, never rebroadcast.
+  viaWallet?: boolean
+  // When it was handed to the wallet (status "requested"), the wallet's next
+  // nonce then and the chain's latest block: what settles it if the wallet's
+  // answer was lost.
+  requestedAt?: string
+  requestedNonce?: number
+  requestedBlock?: number
+  // Which hand-out of the transfer the wallet's answer belongs to: an answer
+  // for an earlier one (a request approved late) is never taken for it.
+  requestId?: string
+  // The hash the wallet answered, before it was checked against the chain.
+  reportedTxHash?: string
+  // Hashes a browser wallet answered for it that are not its payment, kept as
+  // evidence: a transaction other than the transfer it was asked for, or an
+  // answer that came after the transfer was settled (a request approved late:
+  // if that one was mined, the recipient was paid twice).
+  strayTxs?: string[]
+  // Transactions of the account found paying it again (same recipient, same
+  // amount, after it was handed to the wallet), once it was paid: the
+  // recipient was paid twice, and the excess is to be recovered by hand.
+  paidTwiceBy?: string[]
 }
 
 export interface DisbursementRecord {
-  version: 1
+  // 2: it holds transfers sent through a browser wallet (the disburse page);
+  // code older than the page refuses it instead of signing those anew.
+  version: 1 | 2
   id: string // the payout: its content, kind and period
   contentId: string // what is paid: chain, token and the (recipient, amount) list
   file: string
@@ -150,7 +179,7 @@ export const listDisbursements = (): DisbursementRecord[] => {
     } catch (err) {
       throw new Error(`[disbursements] ${path} is not valid JSON (${err}). Restore it from git before sending.`)
     }
-    if (!record || record.version !== 1 || !record.id || !Array.isArray(record.transfers)) {
+    if (!record || (record.version !== 1 && record.version !== 2) || !record.id || !Array.isArray(record.transfers)) {
       throw new Error(`[disbursements] ${path} is not a disbursement record. Restore it from git before sending.`)
     }
     let consistent = false

@@ -14,6 +14,7 @@ import { removalsRoutine } from "./removals-routine"
 import { documentRoutine } from "./document-routine"
 import { verifyTxCounts } from "./verify-tx-counts"
 import { listDisbursementsRoutine, sendRoutine } from "./send-routine"
+import { disbursePageRoutine } from "./disburse/routine"
 import { redactSecrets } from "./utils/solana-rpc"
 import { isBudgetExceeded, setTimeBudget } from "./utils/runtime-helpers"
 import { txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
@@ -59,6 +60,8 @@ const argv: any = yargs(hideBin(process.argv))
       $0 --mode all --period YYYY-MM
     Send rewards (refuses a file or period already paid; resumes an interrupted send):
       $0 --mode send --rewards \${filename}.json [--dry-run] [--period YYYY-MM when no manifest gives it]
+    Send rewards from a browser wallet, through a page on this machine (same checks and ledger as send):
+      $0 --mode disburse-page
     List what was sent (the disbursement ledger):
       $0 --mode disbursements
     Check the tx-count providers (HyperSync, Solana RPC) against known values:
@@ -69,7 +72,7 @@ const argv: any = yargs(hideBin(process.argv))
   )
   .option("m", {
     description:
-      "The mode of the execution. Steps: 'fetch', 'filter-check', 'removals', 'generate', 'document', 'all', 'send', 'disbursements', 'verify-counts', and 'prefetch'",
+      "The mode of the execution. Steps: 'fetch', 'filter-check', 'removals', 'generate', 'document', 'all', 'send', 'disburse-page', 'disbursements', 'verify-counts', and 'prefetch'",
     alias: "mode",
   })
   .option("max-minutes", {
@@ -311,7 +314,7 @@ const main = async () => {
   const mode = argv.mode as string | undefined
   if (mode === undefined) {
     throw new Error(
-      "You must choose a mode, 'fetch' | 'filter-check' | 'removals' | 'generate' | 'document' | 'all' | 'send' | 'disbursements' | 'verify-counts' | 'prefetch'"
+      "You must choose a mode, 'fetch' | 'filter-check' | 'removals' | 'generate' | 'document' | 'all' | 'send' | 'disburse-page' | 'disbursements' | 'verify-counts' | 'prefetch'"
     )
   }
   if (mode === "fetch") {
@@ -464,6 +467,9 @@ const main = async () => {
       from: argv.from ? String(argv.from) : undefined,
       period: argv.period ? String(argv.period) : undefined,
     })
+  } else if (mode === "disburse-page") {
+    // serves the page until Ctrl-C: the browser wallet signs each transfer
+    await disbursePageRoutine()
   } else if (mode === "disbursements") {
     listDisbursementsRoutine()
   } else if (mode === "verify-counts") {

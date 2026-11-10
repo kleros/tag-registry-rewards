@@ -622,13 +622,25 @@ same file again. `send` refuses, before signing anything:
   older latest block halfway through, makes `send` stop rather than check
   fewer transfers, or older ones: retry, use an RPC that keeps the history
   (`TX_RPC_URL`), or skip the check;
+- transfers their recipients already received from **another wallet**: the
+  paying wallet changes from month to month, and a payout started, or paid by
+  hand, from another account leaves nothing in this wallet's history. So the
+  PNK each recipient received since the period ended is read too, from any
+  sender, and one of exactly a transfer's amount that the ledger does not hold
+  (or holds for a payout this one cannot be told apart from) counts the same
+  way: `--skip-paid-on-chain` records it as paid (with the wallet that paid
+  it), `--unrelated-tx <hash>` sets it aside, `--skip-onchain-check` skips both
+  checks;
+- a payout with a transfer handed to a browser wallet by the disburse page
+  whose outcome is not known yet (the page settles it, see below);
 - a wallet without the PNK or the gas the transfers need, a base fee above
   `SEND_MAX_FEE_GWEI`, an RPC on another chain, a malformed file, or a
   `*_rewards.json` record file passed by mistake;
 - a second `send` while one is running, or while another payout on the same
-  chain still has transactions in flight (a payout merely left half-paid only
-  gets a warning). Records of another chain or token (a testnet trial) never
-  block a payout;
+  chain still has transactions in flight from the same account (a payout
+  merely left half-paid, or in flight from another account, only gets a
+  warning). Records of another chain or token (a testnet trial) never block a
+  payout;
 - a payout recorded twice, unfinished: started on two machines, its month
   given with `--period` on one and by its manifest on the other, whose ledgers
   were then merged. Check on the explorer which transfers were paid, keep the
@@ -687,6 +699,100 @@ Settings (all optional, in `.env`): `TX_RPC_URL` (default: the chain's RPC in
 (1), `SEND_GAS_LIMIT` (100000), `SEND_RECEIPT_TIMEOUT_SECONDS` (300),
 `SEND_ONCHAIN_LOOKBACK_DAYS` (45), `SEND_COUNTDOWN_SECONDS` (10, a pause before
 the first transfer in an interactive terminal).
+
+#### Disbursing from a browser wallet: the disburse page
+
+```bash
+yarn start --mode disburse-page   # prints the link to open: http://127.0.0.1:8767/#<this run's key>
+```
+
+The same payouts, checks and ledger as `send`, signed by a browser wallet
+(Rabby, MetaMask, a hardware wallet through them) instead of a key in `.env`.
+Open the link the terminal prints, whole, in the browser that has the wallet.
+The page:
+
+1. lists the folders of `files/` whose manifests name transactions files (the
+   month's generation, `october generation v3 with merged fixes/combined`,
+   …), each with its submissions, removals and ATQ payouts and whether the
+   ledger has them paid. Choose a folder and the payouts to pay (all three by
+   default, or any of them).
+2. **Check**: the wallet's selected account pays (`SEND_FROM` pins one, and
+   the page refuses any other); the page switches the wallet to Gnosis and
+   makes sure nothing of the account's is pending. Then each payout goes
+   through `send`'s own checks as that account (a dry run): everything above
+   applies, every refusal in `send`'s own words. A payout refused for any
+   reason but being paid already stops the run until it is unticked: paying
+   only the rest is a choice. The account must hold the PNK and the gas of
+   everything chosen, together. Transfers the check finds already paid
+   on-chain (from this wallet or another) are listed in the refusal; the box
+   "Transfers the check finds already on-chain" then sets aside the ones that
+   only coincide (their hashes, as `--unrelated-tx`) or records the listed
+   ones as this payout's payments (as `--skip-paid-on-chain`, saved at once;
+   a payout found paid in full is recorded as disbursed). `--skip-onchain-check`
+   is left to `send`. A payout started from another account that never sent
+   any of it (a request rejected right away) moves to the account paying now.
+   Also refused: a folder whose manifests name one file for two payouts (one
+   file is one payout), and a payout with transfers `send` signed and did not
+   settle (stop the page and finish it with `send`, which rebroadcasts them).
+3. **Disburse**: one transfer at a time, in order (submissions, removals, ATQ):
+   confirm each in the wallet and on its device, against the recipient and
+   amount on the page. Each is simulated first (`eth_call`), and recorded in
+   the ledger as handed to the wallet (status `requested`) before the wallet
+   is asked; the page builds the transaction it hands the wallet from the
+   checked plan alone. The hash the wallet answers is recorded at once, and
+   taken for the transfer only once the chain shows its transaction is
+   exactly that transfer (from the account, to PNK, `transfer(recipient,
+   amount)`, no value). It is then waited for (a receipt the node serves late
+   included), and a speed-up in the wallet is followed: the replacement pays
+   it. The run stops at a rejection, at anything else the account sends
+   meanwhile, and after the current transfer when asked to.
+
+A browser wallet signs and broadcasts in one step, so the signed bytes cannot
+be saved first as `send` saves them. Nothing is ever settled but from the
+chain: at the next Check, a transfer whose answer was lost (the page closed,
+the wallet erring) is found paid (a payment of it since it was handed out) or
+still pending (wait), and a cancelled or dropped transaction is found unable
+to pay it. What the chain cannot settle is left to you, with what you may do:
+
+- **give its hash**, from the wallet's activity: taken only if the chain shows
+  it is exactly the transfer, paying no other transfer of the ledger (with
+  another nonce than the transaction it replaces, only once that one can no
+  longer be mined);
+- **mark it as never sent**: refused while anything of the account's is
+  pending, whenever a payment of it was mined since it was handed out, while
+  its signed transaction's nonce is still free (a node or the wallet may still
+  send it: cancel it in the wallet, or send any transaction from the account
+  with that nonce, a 0-value one to itself), and while the wallet's answered
+  hash is not mined (or, unknown to the node, while the account has sent
+  nothing since). First reject any request for it still open in the wallet:
+  approving it later would pay it then.
+
+A payment of exactly the transfer from the account, mined after it was handed
+out, is taken for its payment. Every hash a wallet answered is kept on its
+transfer, and an answer is only ever taken for the request it answers: its
+transactions that never paid it as `forgottenTxs`, and as `strayTxs` a
+transaction that is not the transfer, or an answer that came late (for an
+earlier request, or after the transfer was settled). Each Check also looks,
+over the last 45 days, for a transfer paid through a wallet and then paid
+again by the account (same recipient, same amount, unknown to the ledger: a
+request approved late, a transaction marked never sent and sent after all):
+it is recorded on the transfer (`paidTwiceBy`) and reported once, the excess
+to be recovered by hand. A wallet that sends a transfer with a later nonce
+than the account's next one (other transactions came first) stops the run.
+Requests of another account only stop that account's payouts.
+`send` refuses a payout with a transfer in that state, and waits for, rather
+than rebroadcasts, a transfer a browser wallet sent. A ledger record holding
+browser-wallet transfers is `version: 2`, which `send` from before the page
+refuses rather than sign those anew.
+
+The page is served on `127.0.0.1` only (`DISBURSE_PAGE_PORT`, default 8767;
+the PoH airdrop's page uses 8766, pnk-merkle-drop's 8765), loads nothing from
+the internet, answers only requests addressed to this machine by name (no DNS
+rebinding), takes API calls only from itself (its origin, and this run's key
+in a custom header: the key is the part of the link after `#`, which the
+browser never sends to a server, and the page served holds no secret), and
+cannot be framed. While it runs it holds the ledger's lock: no `send`
+meanwhile. Commit `disbursements/` once done.
 
 ### 6) Document (publish to IPFS)
 
@@ -999,6 +1105,12 @@ What is covered:
   cache top-ups, resume, splits, pre-Byzantium Ethereum); the Solana RPC pool,
   holders and enrichment; the Dune lanes; the routines; `send` against the mock
   node (refusals, crashes and resumes at every step, fee replacement, reverts);
+  the disburse page (its own script against its server and a stand-in browser
+  wallet: a folder paid in one run, rejections, answers lost or late (for an
+  earlier request too), speed-ups and cancels, late receipts, dropped
+  transactions, second payments, a transaction that is not the transfer, one
+  file named for two payouts, `send`'s unsettled transfers, the on-chain
+  options, the server's guards);
   and the **September 2026 golden test**: `generate` and `document` on that
   period's inputs must reproduce the published payout to the wei
   (`test/fixtures/september-2026/`, change it only when a payout rule changes

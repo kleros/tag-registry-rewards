@@ -42,6 +42,7 @@ interface PendingTx {
   nonce: number
   to: string
   data: string
+  value?: BigNumber
   maxFeePerGas: BigNumber
   maxPriorityFeePerGas?: BigNumber
   gasLimit?: BigNumber
@@ -304,6 +305,16 @@ export class MockEvm {
           const [owner] = erc20.decodeFunctionData("balanceOf", data)
           return erc20.encodeFunctionResult("balanceOf", [this.tokenBalance(owner).toString()])
         }
+        // transfer(to, amount) simulated as `from`: true, or a revert without the balance
+        if (String(to).toLowerCase() === this.token.toLowerCase() && selector === erc20.getSighash("transfer")) {
+          const [recipient, amount] = erc20.decodeFunctionData("transfer", data)
+          const sender = String(params[0].from || "0x0000000000000000000000000000000000000000")
+          const blocked = this.faults.revertTo && this.faults.revertTo.has(String(recipient).toLowerCase())
+          if (this.tokenBalance(sender) < BigInt(amount.toString()) || blocked) {
+            throw { code: 3, message: "execution reverted: ERC20: transfer amount exceeds balance" }
+          }
+          return erc20.encodeFunctionResult("transfer", [true])
+        }
         if (selector === erc20.getSighash("supportsInterface")) {
           const answer = this.interfaces.get(String(to).toLowerCase())
           if (answer === undefined) throw { code: 3, message: "execution reverted" }
@@ -343,7 +354,17 @@ export class MockEvm {
         const hash = String(params[0])
         const tx = this.mined.get(hash) || this.mempool.find((p) => p.hash === hash)
         if (!tx) return null
-        return { hash: tx.hash, from: tx.from, nonce: hex(tx.nonce), blockNumber: "blockNumber" in tx ? hex((tx as MinedTx).blockNumber) : null }
+        return {
+          hash: tx.hash,
+          from: tx.from,
+          nonce: hex(tx.nonce),
+          blockNumber: "blockNumber" in tx ? hex((tx as MinedTx).blockNumber) : null,
+          to: tx.to,
+          input: tx.data,
+          value: hex(tx.value || 0),
+          ...(tx.chainId !== undefined ? { chainId: hex(tx.chainId) } : {}),
+          type: hex(tx.type || 0),
+        }
       }
       case "eth_getLogs": {
         const filter = params[0]
@@ -352,11 +373,14 @@ export class MockEvm {
         if (this.faults.getLogsMaxBlocks && to - from + 1 > this.faults.getLogsMaxBlocks) {
           throw { code: -32005, message: `query exceeds max block range ${this.faults.getLogsMaxBlocks}` }
         }
-        const topics: (string | null)[] = filter.topics || []
+        // a position holds one topic, any of a list, or null for any
+        const topics: (string | string[] | null)[] = filter.topics || []
+        const matches = (t: string | string[] | null, topic: string) =>
+          t === null || (Array.isArray(t) ? t : [t]).some((one) => String(one).toLowerCase() === topic.toLowerCase())
         return this.logs
           .filter((l) => !filter.address || l.address.toLowerCase() === String(filter.address).toLowerCase())
           .filter((l) => l.blockNumber >= from && l.blockNumber <= to)
-          .filter((l) => topics.every((t, i) => t === null || (l.topics[i] || "").toLowerCase() === String(t).toLowerCase()))
+          .filter((l) => topics.every((t, i) => matches(t, l.topics[i] || "")))
           .map((l) => this.formatLog(l))
       }
       case "eth_gasPrice":
@@ -408,6 +432,7 @@ export class MockEvm {
       nonce: tx.nonce,
       to: tx.to || "",
       data: tx.data,
+      value: tx.value,
       maxFeePerGas: tx.maxFeePerGas || tx.gasPrice || BigNumber.from(0),
       maxPriorityFeePerGas: tx.maxPriorityFeePerGas || undefined,
       gasLimit: tx.gasLimit,

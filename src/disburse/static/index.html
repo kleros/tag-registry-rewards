@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Disburse Curate rewards</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <h1>Disburse Curate rewards</h1>
+    <p class="lead">
+      Served by <code>yarn start --mode disburse-page</code> on this machine only; the page loads nothing from the internet.
+      Every payout is checked with the rules of <code>yarn start --mode send</code> and recorded in
+      <code>disbursements/</code>. The browser wallet signs each transfer: hold every screen of the device against the
+      recipient and amount shown here.
+    </p>
+    <section id="setup">
+      <p><label>Folder <select id="folder"></select></label></p>
+      <div id="kinds"></div>
+      <p id="payer"></p>
+      <details id="options">
+        <summary>Transfers the check finds already on-chain</summary>
+        <p class="note">
+          A check refuses a payout whose transfers it finds already paid on-chain (same recipient, same amount, since the
+          period ended), from this wallet or any other. Look each transaction it lists up on the explorer, then either:
+        </p>
+        <p>
+          <label>set aside the ones that only coincide with this payout (their hashes):<br />
+            <input id="unrelated" class="mono hash" placeholder="0x… 0x…" /></label>
+        </p>
+        <p>
+          <label><input type="checkbox" id="record-found" /> or record the ones listed as this payout's payments (it was
+            paid, in part, from elsewhere), and pay the rest</label>
+        </p>
+      </details>
+      <p>
+        <button id="check" disabled>Check</button>
+        <button id="disburse" disabled>Disburse</button>
+        <button id="stop" disabled>Stop after this transfer</button>
+      </p>
+    </section>
+    <section id="summary"></section>
+    <section id="unsettled"></section>
+    <section id="payouts"></section>
+    <h2>Log</h2>
+    <ol id="log"></ol>
+    <script src="/page.js"></script>
+    <script src="/main.js"></script>
+  </body>
+</html>

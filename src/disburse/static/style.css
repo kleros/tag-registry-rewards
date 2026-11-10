@@ -1,0 +1,79 @@
+body {
+  font: 15px/1.5 system-ui, sans-serif;
+  max-width: 980px;
+  margin: 24px auto;
+  padding: 0 16px;
+  color: #1b1b1b;
+  background: #fff;
+}
+code,
+.mono {
+  font-family: ui-monospace, Menlo, monospace;
+}
+.mono {
+  word-break: break-all;
+}
+.small {
+  font-size: 12px;
+}
+.lead {
+  color: #444;
+}
+label.kind {
+  display: block;
+  margin: 2px 0;
+}
+select {
+  font-size: 14px;
+  max-width: 100%;
+}
+button {
+  font-size: 15px;
+  padding: 6px 16px;
+  margin-right: 8px;
+}
+table {
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+td,
+th {
+  padding: 2px 14px 2px 0;
+  vertical-align: top;
+  text-align: left;
+}
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+table.facts td:first-child {
+  white-space: nowrap;
+  color: #555;
+}
+section.payout {
+  border-top: 1px solid #ddd;
+  margin-top: 16px;
+}
+pre {
+  white-space: pre-wrap;
+}
+.ok,
+#log li.ok {
+  color: #0a6b2c;
+}
+.bad,
+#log li.bad {
+  color: #b00020;
+  font-weight: 600;
+}
+.note {
+  color: #555;
+}
+.busy {
+  color: #8a5a00;
+}
+input.hash {
+  width: 36em;
+  max-width: 100%;
+  margin-right: 8px;
+}
