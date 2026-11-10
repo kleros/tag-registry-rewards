@@ -70,10 +70,13 @@ const WINDOW_SLOT = 400000000
 const HYPEREVM_SYSTEM_SENDERS = ["0x2222222222222222222222222222222222222222", "0x2000000000000000000000000000000000000000"]
 const HYPEREVM_SAMPLE_FROM = 47479240
 const HYPEREVM_SAMPLE_TO = 47479540 // exclusive
-// Distinct owners on 2026-10-02 (any balance): one below, one above 5,000.
+// Owners holding a non-zero balance on 2026-11-10 (Jupiter's count, matched
+// on-chain): one below, one above 5,000. Kirkiversary had 8,011 owners of an
+// account on 2026-10-02, empty ones included (the count until November 2026):
+// a holder check that passes it counts emptied accounts again.
 const HOLDER_SAMPLES = [
-  { symbol: "Stunk", mint: "FLk6FKAN26m1FT4ucguwy3uHBMzLKcEu8KMTYD2Zpump", owners: 1543 },
-  { symbol: "Kirkiversary", mint: "915YcCbtupYLTz3RwfKjYngzBG2Bk2RX8We4D2HSpump", owners: 8011 },
+  { symbol: "Kirkiversary", mint: "915YcCbtupYLTz3RwfKjYngzBG2Bk2RX8We4D2HSpump", owners: 3099 },
+  { symbol: "MASK", mint: "HuAXPyDWDaMYFKuwQHpqL1oPnj93zdzWmtvFGzCeCUa7", owners: 15730 },
 ]
 
 export const verifyTxCounts = async (): Promise<boolean> => {
@@ -338,8 +341,8 @@ export const verifyTxCounts = async (): Promise<boolean> => {
       "Solana: holder check (Jupiter, then getProgramAccounts)",
       changed.length === 0 ? "PASS" : "INFO",
       HOLDER_SAMPLES.map(
-        (h) => `${h.symbol} ${holders[h.mint].holders} via ${holders[h.mint].source} (2026-10-02: ${h.owners} owners)`
-      ).join("; ") + (changed.length ? " — verdict changed since 2026-10-02, check manually" : "")
+        (h) => `${h.symbol} ${holders[h.mint].holders} via ${holders[h.mint].source} (2026-11-10: ${h.owners} holders)`
+      ).join("; ") + (changed.length ? " — verdict changed since 2026-11-10, check manually" : "")
     )
   })
 

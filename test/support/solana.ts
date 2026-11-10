@@ -46,14 +46,16 @@ export interface Fault {
 export interface TokenAccount {
   mint: string
   owner: Buffer
-  amount?: number // default 1
+  amount?: number // default 1; up to 2^53, written as the u64 it is
 }
 
 // The account's bytes from offset 32 as getProgramAccounts' dataSlice reads
 // them: the owner (32-63), then the balance (64-71, u64 little-endian).
 const accountSlice = (account: TokenAccount, slice: { offset: number; length: number }): Buffer => {
+  const value = account.amount === undefined ? 1 : account.amount
   const amount = Buffer.alloc(8)
-  amount.writeUInt32LE(account.amount === undefined ? 1 : account.amount, 0)
+  amount.writeUInt32LE(value % 2 ** 32, 0)
+  amount.writeUInt32LE(Math.floor(value / 2 ** 32), 4)
   const bytes = Buffer.concat([Buffer.alloc(32), account.owner, amount, Buffer.alloc(93)])
   return bytes.subarray(slice.offset, slice.offset + slice.length)
 }

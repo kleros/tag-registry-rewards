@@ -1,6 +1,6 @@
 import { Item } from "../types"
 import { sleep } from "../transaction-sender"
-import { ExclusionList, submissionExclusionFor } from "./exclusions"
+import { ExclusionList, ExclusionScope, itemExclusionFor } from "./exclusions"
 import { httpFetch } from "./http"
 import { errorMessage } from "./runtime-helpers"
 
@@ -12,24 +12,39 @@ import { errorMessage } from "./runtime-helpers"
 // are read here from the same file, derived the way the indexer derives them:
 // the values of the identifier columns, in column order.
 
+const withoutTrailingSlashes = (url: string): string => {
+  let end = url.length
+  while (end > 0 && url[end - 1] === "/") end--
+  return url.slice(0, end)
+}
+
 // IPFS_READ_GATEWAYS (comma-separated, each ending in /ipfs) is tried in order.
 export const ipfsReadGateways = (): string[] => {
   const listed = String(process.env.IPFS_READ_GATEWAYS || "")
     .split(",")
-    .map((url) => url.trim().replace(/\/+$/, ""))
+    .map((url) => withoutTrailingSlashes(url.trim()))
     .filter(Boolean)
   if (listed.length > 0) return listed
-  return [String(process.env.IPFS_GATEWAY || "https://cdn.kleros.link/ipfs").replace(/\/+$/, ""), "https://ipfs.io/ipfs"]
+  return [withoutTrailingSlashes(String(process.env.IPFS_GATEWAY || "https://cdn.kleros.link/ipfs")), "https://ipfs.io/ipfs"]
 }
 
-// The "<cid>/<path>" of an item's data, however it is written: "/ipfs/<cid>…",
-// "ipfs://<cid>…", a gateway URL ("https://<host>/ipfs/<cid>…") or a bare CID.
-// Null when it names no IPFS file.
+// What the indexer strips from an item's data before fetching it (its
+// extractPath), plus the URL forms: "/ipfs/<cid>…", "ipfs/<cid>…",
+// "ipfs::/<cid>…", "/<cid>…", "ipfs://<cid>…", "https://<host>/ipfs/<cid>…".
+const IPFS_PREFIXES = ["/ipfs/", "ipfs/", "ipfs::/", "ipfs://", "/"]
+const CID = /^(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{58,})(?:\/\S*)?$/
+
+// The "<cid>/<path>" of an item's data, however it is written, or null when
+// it names no IPFS file: after one of the prefixes, whatever follows (as the
+// indexer reads it); without one, only a CID (data that is the item itself,
+// inline JSON, is no file).
 export const ipfsPath = (data: string): string | null => {
   const text = data.trim()
-  const m = /^(?:\/ipfs\/|ipfs:\/\/|https?:\/\/[^/]+\/ipfs\/)(.+)$/.exec(text)
-  if (m) return m[1]
-  return /^(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{58,})(?:\/\S*)?$/.test(text) ? text : null
+  const gateway = /^https?:\/\/[^/]+\/ipfs\//.exec(text)
+  const prefix = gateway ? gateway[0] : IPFS_PREFIXES.find((p) => text.startsWith(p))
+  if (prefix === undefined) return CID.test(text) ? text : null
+  const path = text.slice(prefix.length)
+  return path && !/\s/.test(path) ? path : null
 }
 
 // A value as the indexer stores it (JSONValueToMaybeString).
@@ -57,39 +72,48 @@ export const keysFromItemFile = (file: unknown): Keys | null => {
   return { key0: keys[0], key1: keys[1] ?? "", key2: keys[2] ?? "", key3: keys[3] ?? "" }
 }
 
-// The parsed file; null when every gateway served it and none of it is JSON (a
-// malformed submission, which no retry will change).
-const readItemFile = async (path: string): Promise<unknown> => {
-  const gateways = ipfsReadGateways()
-  const failures: string[] = []
-  let unparsable = 0
-  for (const gateway of gateways) {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const res = await httpFetch(`${gateway}/${path}`, { timeout: 30000, size: 1024 * 1024 })
-        if (res.ok) {
-          const text = await res.text()
-          try {
-            return JSON.parse(text)
-          } catch {
-            unparsable++
-            failures.push(`${gateway}: not JSON`)
-            break
-          }
-        }
-        // a 4xx other than rate limiting will not change on a retry
-        if (res.status < 500 && res.status !== 429) {
-          failures.push(`${gateway}: HTTP ${res.status}`)
-          break
-        }
-        throw new Error(`HTTP ${res.status}`)
-      } catch (err) {
-        if (attempt === 3) failures.push(`${gateway}: ${errorMessage(err)}`)
-        else await sleep(attempt)
-      }
-    }
+const isItemFile = (file: unknown): boolean => {
+  const { columns, values } = (file || {}) as { columns?: unknown; values?: unknown }
+  return Array.isArray(columns) && !!values && typeof values === "object"
+}
+
+// One gateway's answer: the item file, or why not, and whether a retry there
+// could change it (a 4xx other than rate limiting will not).
+const readFrom = async (url: string): Promise<{ file?: unknown; failure?: string; retry: boolean }> => {
+  const res = await httpFetch(url, { timeout: 30000, size: 1024 * 1024 })
+  if (!res.ok) return { failure: `HTTP ${res.status}`, retry: res.status >= 500 || res.status === 429 }
+  // A gateway can answer 200 with an error page or its own JSON: only an
+  // item file ({ columns, values }) is an answer, anything else is asked of
+  // the next gateway.
+  try {
+    const file = JSON.parse(await res.text())
+    return isItemFile(file) ? { file, retry: false } : { failure: "not an item file", retry: false }
+  } catch {
+    return { failure: "not JSON", retry: false }
   }
-  if (unparsable === gateways.length) return null
+}
+
+// The item file at `path`, from the first gateway that serves one; throws,
+// naming each gateway's answer, when none does.
+const readItemFile = async (path: string): Promise<unknown> => {
+  const failures: string[] = []
+  for (const gateway of ipfsReadGateways()) {
+    let failure = ""
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      let retry = true
+      try {
+        const answer = await readFrom(`${gateway}/${path}`)
+        if (answer.file) return answer.file
+        failure = answer.failure || ""
+        retry = answer.retry
+      } catch (err) {
+        failure = errorMessage(err)
+      }
+      if (!retry || attempt === 3) break
+      await sleep(attempt)
+    }
+    failures.push(`${gateway}: ${failure}`)
+  }
   throw new Error(failures.join("; "))
 }
 
@@ -137,14 +161,23 @@ export const fillMissingKeys = async <T extends Item>(
   }
 }
 
+// A requester the indexer could not read: it stores the zero address when its
+// read of the request failed, and paying that would burn the reward.
+export const isMissingRequester = (requester?: string): boolean => !requester || /^0x0{40}$/i.test(requester.trim())
+
 // Every item that would be left out unpaid must be named in exclusions.json
-// (by itemID, for submissions), or the run stops: an item is never dropped
+// (by itemID, in `scope`), or the run stops: an item is never dropped
 // silently. Returns the ids left out on purpose.
-export const assertAllResolved = (unresolved: UnresolvedItem[], exclusions: ExclusionList, what: string): Set<string> => {
+export const assertAllResolved = (
+  unresolved: UnresolvedItem[],
+  exclusions: ExclusionList,
+  what: string,
+  scope: ExclusionScope = "submissions"
+): Set<string> => {
   const leftOut = new Set<string>()
   const unexplained: UnresolvedItem[] = []
   for (const item of unresolved) {
-    const entry = submissionExclusionFor(exclusions, item.id)
+    const entry = itemExclusionFor(exclusions, scope, item.id)
     if (entry) {
       console.warn(`[${what}] ${item.id} left out: ${item.why}; ${exclusions.path} names it (${entry.reason})`)
       leftOut.add(item.id)
@@ -153,11 +186,12 @@ export const assertAllResolved = (unresolved: UnresolvedItem[], exclusions: Excl
     }
   }
   if (unexplained.length > 0) {
+    const list = unexplained.map((u) => "  " + u.id + ": " + u.why).join("\n")
     throw new Error(
-      `[${what}] ${unexplained.length} registered item(s) of the period cannot be read, and leaving them out would ` +
-        `pay their share to the others:\n${unexplained.map((u) => `  ${u.id}: ${u.why}`).join("\n")}\n` +
+      `[${what}] ${unexplained.length} item(s) of the period cannot be read in full, and leaving them out would ` +
+        `pay their share to the others, or nobody:\n${list}\n` +
         "Rerun if a gateway or the indexer failed (IPFS_READ_GATEWAYS sets the gateways). An item that cannot be read at all " +
-        `is left out only once ${exclusions.path} names it: {"itemID": "<id>", "scope": "submissions", "reason": "…"}.`
+        `is left out only once ${exclusions.path} names it: {"itemID": "<id>", "scope": "${scope}", "reason": "…"}.`
     )
   }
   return leftOut

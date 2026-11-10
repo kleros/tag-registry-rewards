@@ -1,8 +1,8 @@
-import { Item, Period, Tag } from "./types"
+import { Item, ItemRequest, Period, Tag } from "./types"
 import fetch from "node-fetch"
 import conf from "./config"
-import { assertAllResolved, fillMissingKeys, UnresolvedItem } from "./utils/item-data"
-import { loadExclusions } from "./utils/exclusions"
+import { assertAllResolved, fillMissingKeys, isMissingRequester, UnresolvedItem } from "./utils/item-data"
+import { ExclusionList, loadExclusions } from "./utils/exclusions"
 
 const PAGE_SIZE = 1000
 
@@ -17,17 +17,29 @@ const fetchTagsBatchByRegistry = async (
   ]
 
   const allItems: Item[] = []
-  let offset = 0
+  // Paged by id (keyset): an item that changes while the pages are read
+  // cannot shift the next page and hide an item, as an offset could.
+  let afterId = ""
 
-  while (true) {
+  // Selected by the registration request resolved in the period, and by the
+  // item's latestRequestResolutionTime, which alone would not do: the indexer
+  // resets it to 0 when a removal request is submitted (an item registered in
+  // the period and challenged since would never match) and moves it to a
+  // rejected removal's resolution (fetchTags drops those: registered before).
+  // An item whose registration request the indexer lost still matches by it.
+  for (;;) {
     const subgraphQuery = {
       query: `
         {
         litems:LItem(where: {
             registryAddress: {_eq:"${registry}"},
             status: {_in: ["Registered", "ClearingRequested"]},
-            latestRequestResolutionTime: {_gte: ${start}, _lt: ${end}},
-          }, limit: ${PAGE_SIZE}, offset: ${offset}, order_by: {id: asc}) {
+            _or: [
+              {latestRequestResolutionTime: {_gte: ${start}, _lt: ${end}}},
+              {requests: {requestType: {_eq: "RegistrationRequested"}, resolutionTime: {_gte: ${start}, _lt: ${end}}}},
+            ],
+            id: {_gt: "${afterId}"},
+          }, limit: ${PAGE_SIZE}, order_by: {id: asc}) {
             id
             latestRequestResolutionTime
             requests {
@@ -71,12 +83,19 @@ const fetchTagsBatchByRegistry = async (
     allItems.push(...items)
 
     if (items.length < PAGE_SIZE) break
-    offset += PAGE_SIZE
+    afterId = items[items.length - 1].id
     console.log(`[fetchTagsBatch] Fetched ${allItems.length} items so far for registry ${registry}, fetching more...`)
   }
 
   return allItems
 }
+
+// The item's latest resolved registration request (an item can be removed and
+// registered again), or undefined.
+export const latestRegistration = (item: Item): ItemRequest | undefined =>
+  (item.requests || [])
+    .filter((req) => req.requestType === "RegistrationRequested" && Number(req.resolutionTime) > 0)
+    .sort((a, b) => Number(b.resolutionTime) - Number(a.resolutionTime))[0]
 
 const parseCaip = (caip?: string): { address: string; chain: string } => {
   if (!caip || !caip.includes(":"))
@@ -91,31 +110,26 @@ const itemToTag = async (
 ): Promise<Tag | null> => {
   const caip = item?.key0
   if (!caip) {
-    // only an item exclusions.json names gets here (fetchTags stops otherwise)
+    // unreachable: fetchTags stops on, or leaves out, an item without key0
     console.warn(`Skipping item ${item.id} – missing key0`)
     return null
   }
 
-  // Find the LATEST registration request (most recent by resolutionTime)
-  // An item can be removed and re-registered, so we reward the latest registration submitter
-  const registrationRequests = item.requests
-    .filter(req => req.requestType === "RegistrationRequested")
-    .sort((a, b) => b.resolutionTime - a.resolutionTime)
-
-  if (registrationRequests.length === 0) {
+  // An item can be removed and re-registered: the latest registration's
+  // submitter is rewarded (fetchTags checked it resolved in the period).
+  const registration = latestRegistration(item)
+  if (!registration) {
     console.warn(`Skipping item ${item.id} – no registration request found`)
     return null
   }
-
-  const latestRegistrationSubmitter = registrationRequests[0].requester
 
   const { chain, address } = parseCaip(caip)
   return {
     id: item.id,
     registry: registryType,
     chain,
-    latestRequestResolutionTime: Number(item.latestRequestResolutionTime),
-    submitter: latestRegistrationSubmitter,
+    latestRequestResolutionTime: Number(registration.resolutionTime),
+    submitter: registration.requester,
     tagAddress: address,
     isTokenOnAddressTags:
       registryType === "addressTags" && /\btoken\b\s*$/i.test(item?.key1 || ""),
@@ -135,20 +149,23 @@ export const caipAddressKey = (key0: string): string => {
 // (the Contract Domain Name rules). Compared by address, so a token registered
 // as 0xabc… also excludes the CDN entry written 0xAbC…: every live Tokens
 // entry is read (key0 only), since the indexer matches key0 letter for letter.
-const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
+const nonTokensFromDomains = async (domainItems: Item[], exclusions: ExclusionList): Promise<Item[]> => {
   if (domainItems.length === 0) return []
 
   const allTokenItems: Item[] = []
-  let offset = 0
+  // Paged by id (keyset): an item that changes while the pages are read
+  // cannot shift the next page and hide an item, as an offset could.
+  let afterId = ""
 
-  while (true) {
+  for (;;) {
     const subgraphQuery = {
       query: `
         {
           litems:LItem(where: {
             registry_id: { _eq: "${conf.XDAI_REGISTRY_TOKENS}"},
             status: {_in: ["Registered", "ClearingRequested"]},
-          }, limit: ${PAGE_SIZE}, offset: ${offset}, order_by: {id: asc}) {
+            id: {_gt: "${afterId}"},
+          }, limit: ${PAGE_SIZE}, order_by: {id: asc}) {
             id
             data
             key0
@@ -181,15 +198,16 @@ const nonTokensFromDomains = async (domainItems: Item[]): Promise<Item[]> => {
     allTokenItems.push(...items)
 
     if (items.length < PAGE_SIZE) break
-    offset += PAGE_SIZE
+    afterId = items[items.length - 1].id
   }
 
   // A live token the indexer left blank still excludes its CDN entries. One
-  // whose file cannot be read might be any address: the run stops (unless
-  // exclusions.json names it). One whose file names no address matches none.
+  // whose file cannot be read, or whose data names no file, might be any
+  // address: the run stops (unless exclusions.json names it). One whose item
+  // file names no address matches none.
   const { items: tokenItems, unresolved } = await fillMissingKeys(allTokenItems, "fetch")
-  const unreadable = unresolved.filter((u) => /could not be read/.test(u.why))
-  assertAllResolved(unreadable, loadExclusions(), "fetch")
+  const unreadable = unresolved.filter((u) => !/names no address/.test(u.why))
+  assertAllResolved(unreadable, exclusions, "fetch")
   for (const u of unresolved) if (!unreadable.includes(u)) console.warn(`[fetch] live token ${u.id}: ${u.why}`)
   const tokenAddresses = new Set(tokenItems.filter((item) => !!item.key0).map((item) => caipAddressKey(item.key0)))
 
@@ -220,30 +238,53 @@ const EXCLUDED_SUBMITTERS = new Set([
 // the indexer left blank is read from its IPFS file, and one that cannot be
 // read at all, or has no registration request, is left out only when
 // exclusions.json names it. Nothing registered is dropped silently.
-export const fetchTags = async (period: Period): Promise<Tag[]> => {
+// `exclusions`: the run's shared list, so that entries used here count as matched.
+export const fetchTags = async (period: Period, exclusions: ExclusionList = loadExclusions()): Promise<Tag[]> => {
   // Fetch all 3 registries in parallel
   const raw = await Promise.all([
     fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_REGISTRY_ADDRESS_TAGS),
     fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_REGISTRY_TOKENS),
     fetchTagsBatchByRegistry(period, conf.XDAI_GTCR_SUBGRAPH_URL, conf.XDAI_REGISTRY_DOMAINS),
   ])
+  // An item is this period's when its latest registration resolved in it: a
+  // later one (removed and registered again after the period) makes it the
+  // next period's, an earlier one means the request resolved in the period
+  // came after it (a rejected removal), already paid when it was registered.
+  const [start, end] = [Math.floor(period.start.getTime() / 1000), Math.floor(period.end.getTime() / 1000)]
+  const current = raw.map((items) =>
+    items.filter((item) => {
+      const registration = latestRegistration(item)
+      if (!registration) return true // stops below
+      const time = Number(registration.resolutionTime)
+      const at = new Date(time * 1000).toISOString()
+      if (time >= end) console.log(`[fetch] ${item.id}: registered again after the period (${at}), rewarded then`)
+      else if (time < start) console.log(`[fetch] ${item.id}: registered before the period (${at}); a later request resolved in it`)
+      return time >= start && time < end
+    })
+  )
   const unresolved: UnresolvedItem[] = []
   const filled: Item[][] = []
-  for (const items of raw) {
+  for (const items of current) {
     const result = await fillMissingKeys(items, "fetch")
     unresolved.push(...result.unresolved)
     filled.push(result.items)
   }
   for (const item of filled.flat()) {
-    if (item.key0 && !(item.requests || []).some((req) => req.requestType === "RegistrationRequested")) {
+    if (!item.key0) continue
+    const registration = latestRegistration(item)
+    if (!/^[^:\s]+:[^:\s]+:\S+$/.test(item.key0.trim())) {
+      unresolved.push({ id: item.id, why: `its key0 is not a CAIP-10 address (${JSON.stringify(item.key0).slice(0, 80)})` })
+    } else if (!registration) {
       unresolved.push({ id: item.id, why: "the indexer has no registration request for it" })
+    } else if (isMissingRequester(registration.requester)) {
+      unresolved.push({ id: item.id, why: `the indexer has no requester for its registration (${registration.requester || "empty"})` })
     }
   }
-  assertAllResolved(unresolved, loadExclusions(), "fetch")
-  const [addressTagsItems, tokensItems, domainsItems] = filled
+  const leftOut = assertAllResolved(unresolved, exclusions, "fetch")
+  const [addressTagsItems, tokensItems, domainsItems] = filled.map((items) => items.filter((item) => !leftOut.has(item.id)))
 
   console.log("Filtering Tokens away from Domains for rewards")
-  const nonTokenDomainsItems = await nonTokensFromDomains(domainsItems)
+  const nonTokenDomainsItems = await nonTokensFromDomains(domainsItems, exclusions)
 
   const [addressTags, tokens, domains] = await Promise.all([
     Promise.all(addressTagsItems.map((item) => itemToTag(item, "addressTags"))),

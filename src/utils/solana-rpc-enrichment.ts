@@ -34,6 +34,8 @@ const SOLANA_CHAIN_ID = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 const TOKEN_PROGRAMS = [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]
+// the SPL token programs (public program ids), for the Address Tags mint check
+export { TOKEN_PROGRAM, TOKEN_2022_PROGRAM }
 const JUPITER_DEFAULT_URL = "https://api.jup.ag/tokens/v2/search"
 const PAGE_SIZE = 1000
 const CACHE_FILE = "solana-rpc.json"

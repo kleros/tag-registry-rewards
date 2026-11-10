@@ -17,6 +17,7 @@ import { writeFetchOutputs } from "./utils/fetch-output"
 import { applyTagFilters } from "./utils/tag-filters"
 import { writeExplorerCheck } from "./utils/filter-check-output"
 import { assertIndexerComplete } from "./utils/indexer-checks"
+import { ExclusionList, loadExclusions } from "./utils/exclusions"
 import conf from "./config"
 import { BudgetExceededError, isBudgetExceeded, startTimeBudget } from "./utils/runtime-helpers"
 
@@ -180,11 +181,14 @@ export const enrichTags = async (
   }
 }
 
-export const tagsRoutine = async (period: Period): Promise<FetchManifest> => {
+// `sharedExclusions`: the run's list (`all`), so that entries fetch uses count
+// as matched in the run's unmatched-entry check.
+export const tagsRoutine = async (period: Period, sharedExclusions?: ExclusionList): Promise<FetchManifest> => {
   console.log("Period:", period)
   preflight(true, true) // before the slow fetch + filter steps
-  await assertIndexerComplete(period, [conf.XDAI_REGISTRY_ADDRESS_TAGS, conf.XDAI_REGISTRY_TOKENS, conf.XDAI_REGISTRY_DOMAINS])
-  const tags = await fetchTags(period)
+  const exclusions = sharedExclusions ?? loadExclusions()
+  await assertIndexerComplete(period, [conf.XDAI_REGISTRY_ADDRESS_TAGS, conf.XDAI_REGISTRY_TOKENS, conf.XDAI_REGISTRY_DOMAINS], undefined, exclusions)
+  const tags = await fetchTags(period, exclusions)
   console.log("Fetched tags:", tags.length)
 
   const { passed: filteredTags, excluded, explorerReview } = await applyTagFilters(tags, { period })

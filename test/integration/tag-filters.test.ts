@@ -96,8 +96,91 @@ describe("address tag validation (eth_getCode, EIP-1167, ERC-165)", () => {
     assert.equal(await reason(withDecimals), "erc-20 contract")
     assert.equal(await reason(noAllowance), null)
     assert.equal(await reason(fallback), null)
-    assert.equal(await reason(catchAll), null)
-    assert.ok(logs.has("answers any call"), "a contract answering anything, even supportsInterface, is named for a check by hand")
+    assert.equal(await reason(catchAll), "answers any call (catch-all)", "its answers prove nothing either way: excluded, for a look by hand")
+  })
+
+  it("takes a revert's data, which ethers hands back as the call's result, for no answer", async () => {
+    const { utils } = require("ethers") as typeof import("ethers")
+    const errorString = new utils.Interface(["function Error(string)"]).encodeFunctionData("Error", ["not supported"]) // 4 + 96 bytes
+    const customError = new utils.Interface(["function Unauthorized(uint256)"]).encodeFunctionData("Unauthorized", [3]) // 4 + 32 bytes
+    const oracle = evmAddress(0x2301)
+    const messenger = evmAddress(0x2302)
+    for (const a of [oracle, messenger]) evm.code.set(a, "0x6080")
+    evm.contracts.set(oracle, () => errorString) // a fallback reverting with a reason, for every call
+    evm.contracts.set(messenger, () => customError)
+    assert.equal(await reason(oracle), null, "neither a catch-all nor an ERC-20")
+    assert.equal(await reason(messenger), null)
+  })
+
+  it("asks the chain's other RPCs before keeping a contract on empty answers: an NFT, or no code at all, from a node that has not synced it", async () => {
+    const nft = evmAddress(0x2401)
+    const fresh = evmAddress(0x2402)
+    const synced = await new MockEvm({ chainId: 31337 }).start()
+    pm.FALLBACK_RPCS["31337"] = [synced.url]
+    try {
+      evm.code.set(nft, "0x6080")
+      evm.contracts.set(nft, () => "0x") // the lagging node: every call empty
+      synced.code.set(nft, "0x6080")
+      synced.interfaces.set(nft, true)
+      assert.equal(await reason(nft), "erc-721 contract")
+      synced.code.set(fresh, "0x6080") // no code yet on the chain's own RPC
+      assert.equal(await reason(fresh), null, "a contract, kept")
+      assert.equal(await reason(evmAddress(0x2403)), "not a contract (getCode == 0x)", "no code anywhere: an EOA")
+    } finally {
+      delete pm.FALLBACK_RPCS["31337"]
+      await synced.stop()
+    }
+  })
+
+  it("takes reth's wording of a halted call (an unknown function, no fallback) for a revert, not for a failure", async () => {
+    const old = evmAddress(0x2501)
+    evm.code.set(old, "0x6080")
+    const realHandle = evm["handle"].bind(evm)
+    evm["handle"] = (method: string, params: { to?: string }[]) => {
+      if (method === "eth_call" && String(params[0].to).toLowerCase() === old) throw { code: -32003, message: "EVM error: InvalidFEOpcode" }
+      return realHandle(method, params)
+    }
+    assert.equal(await reason(old), null)
+    assert.equal(evm.calls.eth_call, 3, "each answered at once, not retried")
+  })
+
+  it("excludes a token or an NFT given a fallback that answers any call, which would otherwise pass both interface checks", async () => {
+    const { utils } = require("ethers") as typeof import("ethers")
+    const iface = new utils.Interface(["function totalSupply() view returns (uint256)"])
+    const word = iface.encodeFunctionResult("totalSupply", [0]) // what such a fallback returns for anything
+    const token = evmAddress(0x2101)
+    const nft = evmAddress(0x2102)
+    for (const a of [token, nft]) evm.code.set(a, "0x6080")
+    evm.contracts.set(token, () => word)
+    evm.interfaces.set(nft, true) // a real supportsInterface…
+    evm.contracts.set(nft, () => word) // …and a fallback answering the rest
+    assert.equal(await reason(token), "answers any call (catch-all)")
+    assert.equal(await reason(nft), "answers any call (catch-all)")
+  })
+
+  it("asks the chain's other RPCs before taking an empty answer for 'not a token': a node may not have synced the contract", async () => {
+    const { utils } = require("ethers") as typeof import("ethers")
+    const iface = new utils.Interface(["function totalSupply() view returns (uint256)"])
+    const token = evmAddress(0x2201)
+    const synced = await new MockEvm({ chainId: 31337 }).start()
+    pm.FALLBACK_RPCS["31337"] = [synced.url]
+    try {
+      evm.code.set(token, "0x6080")
+      evm.contracts.set(token, () => "0x") // the lagging node: no contract there yet
+      synced.code.set(token, "0x6080")
+      // a token there: totalSupply, balanceOf and allowance answer, anything else reverts
+      synced.contracts.set(token, (data: string) => {
+        if (!/^0x(18160ddd|70a08231|dd62ed3e)/.test(data)) throw { code: 3, message: "execution reverted" }
+        return iface.encodeFunctionResult("totalSupply", [5])
+      })
+      assert.equal(await reason(token), "erc-20 contract")
+      evm.contracts.set(token, () => "0x")
+      synced.contracts.set(token, () => "0x")
+      assert.equal(await reason(token), null, "empty everywhere: not a token")
+    } finally {
+      delete pm.FALLBACK_RPCS["31337"]
+      await synced.stop()
+    }
   })
 
   it("excludes a Solana token mint, Solana's ERC-20, and keeps programs, wallets and token accounts", async () => {
@@ -206,7 +289,7 @@ describe("address tag validation (eth_getCode, EIP-1167, ERC-165)", () => {
       evm.faults.failNext = { eth_call: 1 }
       assert.equal(await reason(nft), "erc-721 contract", "an NFT is not rewarded because of one HTTP 500")
       evm.faults.failNext = { eth_call: 10 }
-      await assert.rejects(reason(nft), /no RPC answered a call to no function of 0x[0-9a-f]{40}/, "the first interface call")
+      await assert.rejects(reason(nft), /no RPC answered the interface checks of 0x[0-9a-f]{40}/, "the interface checks")
     } finally {
       sender.sleep = realSleep
     }

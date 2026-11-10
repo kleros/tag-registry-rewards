@@ -8,6 +8,7 @@ import { MockEvm } from "../support/evm"
 import { freshDir, listFiles, readJson } from "../support/files"
 import { evmAddress, SOLANA_CHAIN, solanaAddress, unix } from "../support/fixtures"
 import { MockSubgraph, subgraphItem } from "../support/subgraph"
+import { MockChain, newChain } from "../support/solana"
 
 // A whole month through the CLI, offline: `--mode all` (fetch, generate,
 // removals, document) over the indexer and Dune mocks, then `send` of the
@@ -20,6 +21,7 @@ const clr = (requester: string, at = IN) => ({ requester, requestType: "Clearing
 
 let subgraph: MockSubgraph
 let dune: MockDune
+let chain: MockChain
 let evm: MockEvm
 const cwd = freshDir("month-")
 const wallet = Wallet.createRandom()
@@ -43,13 +45,17 @@ before(async () => {
   )
   dune.evmCounts = { "100": { [evmAddress(0x7001)]: 900 }, "1": { [evmAddress(0xd001)]: 300 }, "8453": { [evmAddress(0xd002)]: 100 } }
   dune.solanaCounts = { [mint]: 4000000 }
-  dune.solanaHolders = { [mint]: 25000 }
+  // holders come from Jupiter (then the token accounts), on the Dune lane too
+  chain = await newChain(1)
+  chain.jupiter[mint] = { holderCount: 25000, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }
   env = {
     XDAI_GTCR_SUBGRAPH_URL: subgraph.url,
     EVM_TX_PROVIDER: "dune",
     SOLANA_TX_PROVIDER: "dune",
     DUNE_API_KEY: "k",
     DUNE_BASE_URL: dune.url,
+    JUPITER_TOKENS_API_URL: chain.jupiterUrl,
+    SOLANA_RPC_URLS: chain.urls().join(","),
     DUNE_POLL_INTERVAL_SECONDS: "0",
     TX_RPC_URL: evm.url,
     PNK: evm.token,
@@ -60,6 +66,7 @@ before(async () => {
 after(async () => {
   await subgraph.stop()
   await dune.stop()
+  await chain.stop()
   await evm.stop()
 })
 

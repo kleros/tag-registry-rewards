@@ -23,6 +23,8 @@ export interface Item {
 }
 
 export interface ItemRequest {
+  // the indexer's "<item id>-<index>"
+  id?: string
   requester: string
   requestType: "RegistrationRequested" | "ClearingRequested"
   resolutionTime: number
@@ -133,6 +135,7 @@ export type FilterCheckReason =
   | "eip-1167 minimal proxy"
   | "erc-721 contract"
   | "erc-20 contract"
+  | "answers any call (catch-all)"
   | "solana token mint"
 
 export interface FilterCheckRow {

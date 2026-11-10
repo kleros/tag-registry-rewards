@@ -79,6 +79,14 @@ describe("Solana holders", () => {
     assert.equal(out[mint].holders, 11)
   })
 
+  it("counts a balance held only in the high bytes of the u64, and skips empty Token-2022 accounts too", async () => {
+    const mint = addMint("Token22", 12, TOKEN_2022)
+    chain.tokenAccounts.filter((a) => a.mint === mint && a.owner[3] < 5).forEach((a) => (a.amount = 0)) // 5 owners emptied theirs
+    chain.tokenAccounts.push({ mint, owner: owner(200), amount: 2 ** 40 }) // 1,099,511,627,776 base units: only bytes 4-7 set
+    chain.tokenAccounts.push({ mint, owner: owner(201), amount: 0 })
+    assert.deepEqual(await countDistinctOwners(pool(), mint, TOKEN_2022, 5000), { owners: 8, complete: true })
+  })
+
   it("does not count empty token accounts in owner buckets either", async () => {
     const mint = addMint("HugeDumped", 600)
     chain.tokenAccounts.filter((a) => a.mint === mint && a.owner[3] % 2 === 1).forEach((a) => (a.amount = 0))
