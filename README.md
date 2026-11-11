@@ -615,20 +615,38 @@ same file again. `send` refuses, before signing anything:
   or partly paid, from elsewhere), `--skip-paid-on-chain` records them as paid
   and sends the rest; if they only coincide with it, `--skip-onchain-check`
   skips the check, or `--unrelated-tx <hash>` (repeatable) sets aside just the
-  transactions named, keeping the check for every other transfer. A node that
+  transactions named, keeping the check for every other transfer. A
+  transaction paying several transfers (a Disperse batch) is named one
+  transfer at a time, `--unrelated-tx <hash>:<recipient>`: named whole, it is
+  refused, as it would set aside all of them. The ledger tells a batch's
+  payments apart by payout (transaction, recipient and amount). A node that
   refuses `eth_getLogs`, no longer serves the
   blocks back to that date, lacks a block needed to find it, whose latest
   block is older than that date (it lags behind), or whose backends answer an
   older latest block halfway through, makes `send` stop rather than check
   fewer transfers, or older ones: retry, use an RPC that keeps the history
   (`TX_RPC_URL`), or skip the check;
+- transfers their recipients already received from **another wallet**: the
+  paying wallet changes from month to month, and a payout started, or paid by
+  hand, from another account leaves nothing in this wallet's history. So the
+  PNK each recipient received since the period ended is read too, from any
+  sender, and one of exactly a transfer's amount that the ledger does not hold
+  (or holds for a payout this one cannot be told apart from) counts the same
+  way. Only a payment named with `--paid-tx <hash>` (or `<hash>:<recipient>`,
+  repeatable) is recorded as paid (with the wallet that paid it): a mint or a
+  withdrawal of a round amount is not this payout's, so `--skip-paid-on-chain`
+  never takes these. `--unrelated-tx` sets one aside, `--skip-onchain-check`
+  skips both checks;
+- a payout with a transfer handed to a browser wallet by the disburse page
+  whose outcome is not known yet (the page settles it, see below);
 - a wallet without the PNK or the gas the transfers need, a base fee above
   `SEND_MAX_FEE_GWEI`, an RPC on another chain, a malformed file, or a
   `*_rewards.json` record file passed by mistake;
 - a second `send` while one is running, or while another payout on the same
-  chain still has transactions in flight (a payout merely left half-paid only
-  gets a warning). Records of another chain or token (a testnet trial) never
-  block a payout;
+  chain still has transactions in flight from the same account (a payout
+  merely left half-paid, or in flight from another account, only gets a
+  warning). Records of another chain or token (a testnet trial) never block a
+  payout;
 - a payout recorded twice, unfinished: started on two machines, its month
   given with `--period` on one and by its manifest on the other, whose ledgers
   were then merged. Check on the explorer which transfers were paid, keep the
@@ -687,6 +705,132 @@ Settings (all optional, in `.env`): `TX_RPC_URL` (default: the chain's RPC in
 (1), `SEND_GAS_LIMIT` (100000), `SEND_RECEIPT_TIMEOUT_SECONDS` (300),
 `SEND_ONCHAIN_LOOKBACK_DAYS` (45), `SEND_COUNTDOWN_SECONDS` (10, a pause before
 the first transfer in an interactive terminal).
+
+#### Disbursing from a browser wallet: the disburse page
+
+```bash
+yarn start --mode disburse-page   # prints the link to open: http://127.0.0.1:8767/#<this run's key>
+```
+
+The same payouts, checks and ledger as `send`, signed by a browser wallet
+(Rabby, MetaMask, a hardware wallet through them) instead of a key in `.env`.
+Open the link the terminal prints, whole, in the browser that has the wallet.
+The page:
+
+1. lists the folders of `files/` whose manifests name transactions files (the
+   month's generation, `october generation v3 with merged fixes/combined`,
+   …), each with its submissions, removals and ATQ payouts and whether the
+   ledger has them paid. Choose a folder and the payouts to pay (all three by
+   default, or any of them).
+2. **Check**: the wallet's selected account pays (`SEND_FROM` pins one, and
+   the page refuses any other); the page switches the wallet to Gnosis and
+   makes sure nothing of the account's is pending. Then each payout goes
+   through `send`'s own checks as that account (a dry run): everything above
+   applies, every refusal in `send`'s own words. A payout refused for any
+   reason but being paid already stops the run until it is unticked: paying
+   only the rest is a choice. The account must hold the PNK and the gas of
+   everything chosen, together. Transfers the check finds already paid
+   on-chain (from this wallet or another) are listed in the refusal; the box
+   "Transfers the check finds already on-chain" then sets aside the ones that
+   only coincide (their hashes, as `--unrelated-tx`), records this wallet's as
+   this payout's payments (as `--skip-paid-on-chain`), or records another
+   wallet's named one by one (their hashes, as `--paid-tx`); saved at once, a
+   payout found paid in full recorded as disbursed. `--skip-onchain-check` is
+   left to `send`. A payout started from another account that never sent any
+   of it (a request rejected right away) moves to the account paying now;
+   never one with a transfer handed to a wallet and marked never sent, as a
+   request still open there could pay it.
+   Also refused: a folder whose manifests name one file for two payouts (one
+   file is one payout), and a payout with transfers `send` signed and did not
+   settle (stop the page and finish it with `send`, which rebroadcasts them).
+3. **Disburse**, paying with one of:
+   - **one Disperse transaction** (the default): every transfer chosen, in
+     one transaction, through [Disperse](https://disperse.app)
+     (`0xD152f549545093347A162Dce210e7293f1452150`, the same bytes on Gnosis
+     and Ethereum; the page checks its code hash before using it). Two
+     confirmations: the approval of exactly the total, then the batch
+     (`disperseTokenSimple`, which moves each amount from the account to its
+     recipient, all or none, leaving nothing approved). One, when Disperse is
+     already allowed exactly that much; any other amount it is allowed is set
+     to exactly the total first, so that no other batch (a request still open
+     in the wallet) could spend anything after this one. An approval whose
+     amount is changed in the wallet stops the run: Check again, and approve
+     exactly the total. What is read right after the approval is mined is read
+     again for a few seconds when it does not show it yet (an RPC answering
+     from a node a block behind). The wallet shows the approval's amount and
+     spender, then one contract call: the transfers are the list on the page,
+     and Disperse can only ever move the account's tokens when the account
+     itself calls it.
+   - **one transaction per transfer**: a confirmation for each, which the
+     wallet (and its device) shows with its recipient and amount.
+
+   Either way, each transaction is simulated first (`eth_call`), and the
+   transfers it pays are recorded in the ledger as handed to the wallet
+   (status `requested`; a batch's with its size and order) before the wallet
+   is asked; the page builds what it hands the wallet from the checked plan
+   alone, and checks it against what the server built. The hash the wallet
+   answers is recorded at once, and taken for those transfers only once the
+   chain shows its transaction is exactly what was asked (from the account, to
+   PNK or Disperse, with that calldata, no value). It is then waited for (a
+   receipt the node serves late included), and a speed-up in the wallet is
+   followed: the replacement pays it. The run stops at a rejection, at
+   anything else the account sends meanwhile, and after the current
+   transaction when asked to. A batch is settled, and decided on (its hash,
+   "never sent"), as one: only its own transaction, or the wallet's
+   replacement of it (same calldata), pays it. When other transactions of the
+   account paid some of its transfers meanwhile (a request approved late),
+   marking the batch as never sent records those as paid by them, and sends
+   only the rest anew.
+
+A browser wallet signs and broadcasts in one step, so the signed bytes cannot
+be saved first as `send` saves them. Nothing is ever settled but from the
+chain: at the next Check, a transfer whose answer was lost (the page closed,
+the wallet erring) is found paid (a payment of it since it was handed out) or
+still pending (wait), and a cancelled or dropped transaction is found unable
+to pay it. What the chain cannot settle is left to you, with what you may do:
+
+- **give its hash**, from the wallet's activity: taken only if the chain shows
+  it is exactly the transfer, paying no other transfer of the ledger (with
+  another nonce than the transaction it replaces, only once that one can no
+  longer be mined);
+- **mark it as never sent**: refused while anything of the account's is
+  pending, whenever a payment of it was mined since it was handed out, while
+  its signed transaction's nonce is still free (a node or the wallet may still
+  send it: cancel it in the wallet, or send any transaction from the account
+  with that nonce, a 0-value one to itself), and while the wallet's answered
+  hash is not mined (or, unknown to the node, while the account has sent
+  nothing since). First reject any request for it still open in the wallet:
+  approving it later would pay it then.
+
+A payment of exactly the transfer from the account, mined after it was handed
+out, is taken for its payment. Every hash a wallet answered is kept on its
+transfer, and an answer is only ever taken for the request it answers: its
+transactions that never paid it as `forgottenTxs`, and as `strayTxs` a
+transaction that is not the transfer, or an answer that came late (for an
+earlier request, or after the transfer was settled). Each Check also looks,
+over the last 45 days, for a transfer paid through a wallet and then paid
+again by the account (same recipient, same amount, unknown to the ledger: a
+request approved late, a transaction marked never sent and sent after all):
+it is recorded on the transfer (`paidTwiceBy`) and reported once, the excess
+to be recovered by hand (a transaction that pays two of the ledger's
+transfers again is recorded on each). What may be the payment of a transfer
+not settled yet (sent by `send`, or handed to a wallet) is left to that
+transfer's own settling first. A wallet that sends a transfer with a later nonce
+than the account's next one (other transactions came first) stops the run.
+Requests of another account only stop that account's payouts.
+`send` refuses a payout with a transfer in that state, and waits for, rather
+than rebroadcasts, a transfer a browser wallet sent. A ledger record holding
+browser-wallet transfers is `version: 2`, which `send` from before the page
+refuses rather than sign those anew.
+
+The page is served on `127.0.0.1` only (`DISBURSE_PAGE_PORT`, default 8767;
+the PoH airdrop's page uses 8766, pnk-merkle-drop's 8765), loads nothing from
+the internet, answers only requests addressed to this machine by name (no DNS
+rebinding), takes API calls only from itself (its origin, and this run's key
+in a custom header: the key is the part of the link after `#`, which the
+browser never sends to a server, and the page served holds no secret), and
+cannot be framed. While it runs it holds the ledger's lock: no `send`
+meanwhile. Commit `disbursements/` once done.
 
 ### 6) Document (publish to IPFS)
 
@@ -999,6 +1143,14 @@ What is covered:
   cache top-ups, resume, splits, pre-Byzantium Ethereum); the Solana RPC pool,
   holders and enrichment; the Dune lanes; the routines; `send` against the mock
   node (refusals, crashes and resumes at every step, fee replacement, reverts);
+  the disburse page (its own script against its server and a stand-in browser
+  wallet: a folder paid in one run, in one Disperse transaction or one per
+  transfer (Disperse executed by the mock node, its real bytecode served at
+  its address), rejections, answers lost or late (for an earlier request
+  too), speed-ups and cancels, late receipts, dropped transactions, second
+  payments, a transaction that is not the transfer or the batch, one file
+  named for two payouts, `send`'s unsettled transfers, the on-chain options,
+  the server's guards);
   and the **September 2026 golden test**: `generate` and `document` on that
   period's inputs must reproduce the published payout to the wei
   (`test/fixtures/september-2026/`, change it only when a payout rule changes

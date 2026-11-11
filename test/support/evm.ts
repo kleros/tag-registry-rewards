@@ -1,4 +1,6 @@
 import { BigNumber, utils } from "ethers"
+import { readFileSync } from "fs"
+import { join } from "path"
 import { MockServer, startMockServer } from "./http"
 
 // A small EVM JSON-RPC node: blocks, a PNK-like ERC-20, nonces and a mempool,
@@ -8,10 +10,20 @@ import { MockServer, startMockServer } from "./http"
 const erc20 = new utils.Interface([
   "function balanceOf(address) view returns (uint256)",
   "function transfer(address to, uint256 amount) returns (bool)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
   "function supportsInterface(bytes4 id) view returns (bool)",
   "event Transfer(address indexed from, address indexed to, uint256 value)",
+  "event Approval(address indexed owner, address indexed spender, uint256 value)",
 ])
 const TRANSFER_TOPIC = erc20.getEventTopic("Transfer")
+const APPROVAL_TOPIC = erc20.getEventTopic("Approval")
+// Disperse (disperse.app), at its address on every chain, with its real code
+// (test/fixtures/disperse/): disperseTokenSimple is executed here, as
+// token.transferFrom(sender, recipient, value) for each, all or none.
+export const DISPERSE = "0xd152f549545093347a162dce210e7293f1452150"
+export const DISPERSE_RUNTIME = readFileSync(join(__dirname, "..", "fixtures", "disperse", "runtime.hex"), "utf8").trim()
+const disperseAbi = new utils.Interface(["function disperseTokenSimple(address token, address[] recipients, uint256[] values)"])
 export const MULTICALL3 = "0xca11bde05977b3631167028862be2a173976ca11"
 const multicall3 = new utils.Interface([
   "function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) view returns (tuple(bool success, bytes returnData)[] returnData)",
@@ -42,6 +54,7 @@ interface PendingTx {
   nonce: number
   to: string
   data: string
+  value?: BigNumber
   maxFeePerGas: BigNumber
   maxPriorityFeePerGas?: BigNumber
   gasLimit?: BigNumber
@@ -88,6 +101,7 @@ export class MockEvm {
   readonly token: string
   blocks: Block[] = []
   tokenBalances = new Map<string, bigint>()
+  allowances = new Map<string, bigint>() // "owner:spender", lowercase
   nativeBalances = new Map<string, bigint>()
   nonces = new Map<string, number>()
   mempool: PendingTx[] = []
@@ -110,6 +124,7 @@ export class MockEvm {
     const start = opts.startTime || Math.floor(Date.now() / 1000) - 100 * 86400
     for (let i = 0; i < (opts.startBlocks || 10); i++) this.blocks.push({ number: i, timestamp: start + i * 5, baseFeePerGas: this.baseFee })
     this.code.set(this.token.toLowerCase(), "0x6080")
+    this.code.set(DISPERSE, DISPERSE_RUNTIME)
   }
 
   get url(): string {
@@ -157,6 +172,14 @@ export class MockEvm {
     return this.tokenBalances.get(address.toLowerCase()) || BigInt(0)
   }
 
+  allowance(owner: string, spender: string): bigint {
+    return this.allowances.get(`${owner.toLowerCase()}:${spender.toLowerCase()}`) || BigInt(0)
+  }
+
+  setAllowance(owner: string, spender: string, wei: BigNumber | string): void {
+    this.allowances.set(`${owner.toLowerCase()}:${spender.toLowerCase()}`, BigInt(BigNumber.from(wei).toString()))
+  }
+
   // New empty blocks, `seconds` apart.
   advance(blocks: number, seconds = 5): void {
     for (let i = 0; i < blocks; i++) this.newBlock(seconds)
@@ -202,13 +225,51 @@ export class MockEvm {
     this.mempool = []
   }
 
+  // The wallet's token transfers, in the order they were mined: its plain
+  // transfers (reverted ones too), and each one a Disperse batch of it made.
   transfersFrom(address: string): { to: string; amount: string; hash: string; status: number }[] {
-    return Array.from(this.mined.values())
-      .filter((tx) => tx.from === address.toLowerCase() && tx.nonce >= 0 && tx.to.toLowerCase() === this.token.toLowerCase())
-      .map((tx) => {
+    const out: { to: string; amount: string; hash: string; status: number }[] = []
+    for (const tx of this.mined.values()) {
+      if (tx.from !== address.toLowerCase() || tx.nonce < 0) continue
+      const target = tx.to.toLowerCase()
+      if (target === this.token.toLowerCase() && tx.data.startsWith(erc20.getSighash("transfer"))) {
         const [to, amount] = erc20.decodeFunctionData("transfer", tx.data)
-        return { to: utils.getAddress(to), amount: amount.toString(), hash: tx.hash, status: tx.status }
-      })
+        out.push({ to: utils.getAddress(to), amount: amount.toString(), hash: tx.hash, status: tx.status })
+      } else if (target === DISPERSE && tx.status === 1) {
+        for (const log of this.logs) {
+          if (log.transactionHash !== tx.hash || log.topics[0] !== TRANSFER_TOPIC) continue
+          out.push({ to: utils.getAddress(`0x${log.topics[2].slice(26)}`), amount: BigNumber.from(log.data).toString(), hash: tx.hash, status: 1 })
+        }
+      }
+    }
+    return out
+  }
+
+  // disperseTokenSimple(token, recipients, values) from `from`: whether it
+  // succeeds (every transferFrom covered by the balance and Disperse's
+  // allowance), and, with `mined`, its transfers made.
+  private disperse(from: string, data: string, mined?: { blockNumber: number; hash: string }): boolean {
+    if (this.code.get(DISPERSE) !== DISPERSE_RUNTIME) return false
+    const [token, recipients, values] = disperseAbi.decodeFunctionData("disperseTokenSimple", data)
+    if (String(token).toLowerCase() !== this.token.toLowerCase()) return false
+    let balance = this.tokenBalance(from)
+    let allowance = this.allowance(from, DISPERSE)
+    for (let i = 0; i < recipients.length; i++) {
+      const value = BigInt(values[i].toString())
+      const blocked = this.faults.revertTo && this.faults.revertTo.has(String(recipients[i]).toLowerCase())
+      if (balance < value || allowance < value || blocked) return false
+      balance -= value
+      allowance -= value
+    }
+    if (!mined) return true
+    for (let i = 0; i < recipients.length; i++) {
+      const value = BigInt(values[i].toString())
+      this.tokenBalances.set(from.toLowerCase(), this.tokenBalance(from) - value)
+      this.tokenBalances.set(String(recipients[i]).toLowerCase(), this.tokenBalance(recipients[i]) + value)
+      this.pushTransferLog(from, recipients[i], BigNumber.from(values[i]), mined.blockNumber, mined.hash)
+    }
+    this.setAllowance(from, DISPERSE, allowance.toString())
+    return true
   }
 
   private newBlock(seconds: number, at?: number): Block {
@@ -228,10 +289,31 @@ export class MockEvm {
     })
   }
 
+  // The gas a transaction uses here, near Gnosis's for PNK (whose transfers
+  // call its controller: one to a fresh address takes ~84k): a transaction
+  // given less runs out of gas, its nonce used, nothing done.
+  gasFor(to: string, data: string): number {
+    const target = String(to || "").toLowerCase()
+    if (target === this.token.toLowerCase()) return String(data).startsWith(erc20.getSighash("approve")) ? 50000 : 85000
+    if (target === DISPERSE && String(data).startsWith(disperseAbi.getSighash("disperseTokenSimple"))) {
+      try {
+        return 30000 + 65000 * disperseAbi.decodeFunctionData("disperseTokenSimple", data)[1].length
+      } catch {
+        return 30000
+      }
+    }
+    return 21000
+  }
+
   private execute(tx: PendingTx, blockNumber: number): MinedTx {
     this.nonces.set(tx.from, tx.nonce + 1)
     let status: 0 | 1 = 1
-    if (tx.to.toLowerCase() === this.token.toLowerCase()) {
+    const target = tx.to.toLowerCase()
+    const outOfGas = !!tx.gasLimit && tx.gasLimit.lt(this.gasFor(tx.to, tx.data))
+    const valued = !!tx.value && !BigNumber.from(tx.value).isZero()
+    if (outOfGas || (valued && (target === this.token.toLowerCase() || target === DISPERSE))) {
+      status = 0 // out of gas, or native value to contracts that take none
+    } else if (target === this.token.toLowerCase() && tx.data.startsWith(erc20.getSighash("transfer"))) {
       const [to, amount] = erc20.decodeFunctionData("transfer", tx.data)
       const value = BigInt(amount.toString())
       const balance = this.tokenBalance(tx.from)
@@ -242,6 +324,23 @@ export class MockEvm {
         this.tokenBalances.set(String(to).toLowerCase(), this.tokenBalance(to) + value)
         this.pushTransferLog(tx.from, to, amount, blockNumber, tx.hash)
       }
+    } else if (target === this.token.toLowerCase() && tx.data.startsWith(erc20.getSighash("approve"))) {
+      const [spender, amount] = erc20.decodeFunctionData("approve", tx.data)
+      this.setAllowance(tx.from, spender, amount)
+      this.logs.push({
+        address: this.token,
+        topics: [APPROVAL_TOPIC, utils.hexZeroPad(tx.from, 32).toLowerCase(), utils.hexZeroPad(spender, 32).toLowerCase()],
+        data: utils.hexZeroPad(BigNumber.from(amount).toHexString(), 32),
+        blockNumber,
+        transactionHash: tx.hash,
+        logIndex: this.logs.length,
+      })
+    } else if (target === this.token.toLowerCase()) {
+      status = 0 // a function the token does not have
+    } else if (target === DISPERSE && tx.data.startsWith(disperseAbi.getSighash("disperseTokenSimple"))) {
+      if (!this.disperse(tx.from, tx.data, { blockNumber, hash: tx.hash })) status = 0
+    } else if (target === DISPERSE) {
+      status = 0 // Disperse has no fallback
     }
     const mined = { ...tx, blockNumber, status }
     this.mined.set(tx.hash, mined)
@@ -304,6 +403,28 @@ export class MockEvm {
           const [owner] = erc20.decodeFunctionData("balanceOf", data)
           return erc20.encodeFunctionResult("balanceOf", [this.tokenBalance(owner).toString()])
         }
+        // transfer(to, amount) simulated as `from`: true, or a revert without the balance
+        if (String(to).toLowerCase() === this.token.toLowerCase() && selector === erc20.getSighash("transfer")) {
+          const [recipient, amount] = erc20.decodeFunctionData("transfer", data)
+          const sender = String(params[0].from || "0x0000000000000000000000000000000000000000")
+          const blocked = this.faults.revertTo && this.faults.revertTo.has(String(recipient).toLowerCase())
+          if (this.tokenBalance(sender) < BigInt(amount.toString()) || blocked) {
+            throw { code: 3, message: "execution reverted: ERC20: transfer amount exceeds balance" }
+          }
+          return erc20.encodeFunctionResult("transfer", [true])
+        }
+        if (String(to).toLowerCase() === this.token.toLowerCase() && selector === erc20.getSighash("allowance")) {
+          const [owner, spender] = erc20.decodeFunctionData("allowance", data)
+          return erc20.encodeFunctionResult("allowance", [this.allowance(owner, spender).toString()])
+        }
+        if (String(to).toLowerCase() === this.token.toLowerCase() && selector === erc20.getSighash("approve")) {
+          return erc20.encodeFunctionResult("approve", [true])
+        }
+        if (target === DISPERSE && selector === disperseAbi.getSighash("disperseTokenSimple")) {
+          const sender = String(params[0].from || "0x0000000000000000000000000000000000000000")
+          if (!this.disperse(sender, data)) throw { code: 3, message: "execution reverted" }
+          return "0x"
+        }
         if (selector === erc20.getSighash("supportsInterface")) {
           const answer = this.interfaces.get(String(to).toLowerCase())
           if (answer === undefined) throw { code: 3, message: "execution reverted" }
@@ -340,10 +461,20 @@ export class MockEvm {
         }
       }
       case "eth_getTransactionByHash": {
-        const hash = String(params[0])
+        const hash = String(params[0]).toLowerCase()
         const tx = this.mined.get(hash) || this.mempool.find((p) => p.hash === hash)
         if (!tx) return null
-        return { hash: tx.hash, from: tx.from, nonce: hex(tx.nonce), blockNumber: "blockNumber" in tx ? hex((tx as MinedTx).blockNumber) : null }
+        return {
+          hash: tx.hash,
+          from: tx.from,
+          nonce: hex(tx.nonce),
+          blockNumber: "blockNumber" in tx ? hex((tx as MinedTx).blockNumber) : null,
+          to: tx.to,
+          input: tx.data,
+          value: hex(tx.value || 0),
+          ...(tx.chainId !== undefined ? { chainId: hex(tx.chainId) } : {}),
+          type: hex(tx.type || 0),
+        }
       }
       case "eth_getLogs": {
         const filter = params[0]
@@ -352,18 +483,26 @@ export class MockEvm {
         if (this.faults.getLogsMaxBlocks && to - from + 1 > this.faults.getLogsMaxBlocks) {
           throw { code: -32005, message: `query exceeds max block range ${this.faults.getLogsMaxBlocks}` }
         }
-        const topics: (string | null)[] = filter.topics || []
+        // a position holds one topic, any of a list, or null for any
+        const topics: (string | string[] | null)[] = filter.topics || []
+        const matches = (t: string | string[] | null, topic: string) =>
+          t === null || (Array.isArray(t) ? t : [t]).some((one) => String(one).toLowerCase() === topic.toLowerCase())
         return this.logs
           .filter((l) => !filter.address || l.address.toLowerCase() === String(filter.address).toLowerCase())
           .filter((l) => l.blockNumber >= from && l.blockNumber <= to)
-          .filter((l) => topics.every((t, i) => t === null || (l.topics[i] || "").toLowerCase() === String(t).toLowerCase()))
+          .filter((l) => topics.every((t, i) => matches(t, l.topics[i] || "")))
           .map((l) => this.formatLog(l))
       }
       case "eth_gasPrice":
       case "eth_maxPriorityFeePerGas":
         return hex(1000000000)
-      case "eth_estimateGas":
-        return hex(60000)
+      case "eth_estimateGas": {
+        // what the call would use, or its revert, as a node estimates
+        const call = params[0] || {}
+        const target = String(call.to || "").toLowerCase()
+        if (target === this.token.toLowerCase() || target === DISPERSE) this.handle("eth_call", [call, "latest"])
+        return hex(this.gasFor(call.to, call.data || "0x"))
+      }
       default:
         throw { code: -32601, message: `method ${method} not mocked` }
     }
@@ -408,6 +547,7 @@ export class MockEvm {
       nonce: tx.nonce,
       to: tx.to || "",
       data: tx.data,
+      value: tx.value,
       maxFeePerGas: tx.maxFeePerGas || tx.gasPrice || BigNumber.from(0),
       maxPriorityFeePerGas: tx.maxPriorityFeePerGas || undefined,
       gasLimit: tx.gasLimit,

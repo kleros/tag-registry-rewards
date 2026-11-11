@@ -28,6 +28,24 @@ export interface OnchainTransfer {
   blockNumber: number
 }
 
+// A token transfer of any wallet: whose it is matters.
+export interface IncomingTransfer extends OnchainTransfer {
+  from: string
+}
+
+// A transaction as the node holds it, to tell whether it is exactly the
+// transfer a browser wallet was asked for.
+export interface TransactionDetails {
+  hash: string
+  from: string
+  to: string | null
+  input: string
+  value: BigNumber
+  nonce: number
+  chainId: number | null // null: the node does not say (legacy transactions)
+  blockNumber: number | null // null: still pending
+}
+
 // accepted: the node took it. known: it already had it. nonce-too-low: the
 // nonce is used (by this transaction once mined, or by another one).
 // replacement-underpriced: another transaction with the same nonce is waiting
@@ -54,7 +72,63 @@ export interface SendChain {
   blockTimestamp(blockNumber: number): Promise<number | null>
   // Token transfers from the wallet in blocks at or after `sinceUnix`.
   outgoingTransfers(sinceUnix: number): Promise<OnchainTransfer[]>
+  // Token transfers to any of `recipients`, from any wallet, in blocks at or
+  // after `sinceUnix`: a payout paid from another wallet shows up only here.
+  incomingTransfers(recipients: string[], sinceUnix: number): Promise<IncomingTransfer[]>
+  // The transaction with this hash, or null when the node does not know it.
+  transactionDetails(hash: string): Promise<TransactionDetails | null>
+  // Whether transfer(recipient, amount) from the wallet succeeds right now
+  // (eth_call): an error names why it would not.
+  simulateTransfer(recipient: string, amount: BigNumber): Promise<void>
+  // What the wallet allows `spender` to move of the token.
+  tokenAllowance(spender: string): Promise<BigNumber>
+  // keccak256 of the code at `address`, or null when it has none.
+  codeHash(address: string): Promise<string | null>
+  // A call from the wallet, simulated (eth_call): what it returns, or an error
+  // naming why it would revert.
+  simulateCall(to: string, data: string, label: string): Promise<string>
 }
+
+// The calldata of a token transfer.
+export const transferCalldata = (recipient: string, amount: BigNumber): string =>
+  new utils.Interface(ERC20Abi).encodeFunctionData("transfer", [recipient, amount])
+
+// Disperse (disperse.app): one contract, the same bytes at the same address on
+// Ethereum and Gnosis (checked by this hash before it is used).
+// disperseTokenSimple(token, recipients, values) makes
+// token.transferFrom(msg.sender, recipient, value) for each: it only ever moves
+// the caller's own tokens, within what the caller allowed it, all or none, and
+// each payment is a Transfer from the caller to its recipient, as a plain
+// transfer would be.
+export const DISPERSE_ADDRESS = "0xD152f549545093347A162Dce210e7293f1452150"
+export const DISPERSE_CODE_HASH = "0x65660051e320731a70b9ddcd5ec9fd4f565cf85e2f6caf0eb71589fb544b9996"
+const disperseAbi = new utils.Interface(["function disperseTokenSimple(address token, address[] recipients, uint256[] values)"])
+const allowanceAbi = new utils.Interface([
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+])
+
+export const approveCalldata = (spender: string, amount: BigNumber): string =>
+  allowanceAbi.encodeFunctionData("approve", [spender, amount])
+
+// The spender and amount of approve(spender, amount) calldata, or null.
+export const decodeApproval = (data: string): { spender: string; amount: BigNumber } | null => {
+  try {
+    if (!String(data).toLowerCase().startsWith(allowanceAbi.getSighash("approve"))) return null
+    const [spender, amount] = allowanceAbi.decodeFunctionData("approve", data)
+    return { spender: utils.getAddress(spender), amount: BigNumber.from(amount) }
+  } catch {
+    return null
+  }
+}
+
+// The calldata paying these transfers through Disperse, in this order.
+export const disperseCalldata = (token: string, transfers: { recipient: string; amount: BigNumber | string }[]): string =>
+  disperseAbi.encodeFunctionData("disperseTokenSimple", [
+    token,
+    transfers.map((t) => t.recipient),
+    transfers.map((t) => BigNumber.from(t.amount)),
+  ])
 
 const erc20 = new utils.Interface(ERC20Abi)
 
@@ -160,7 +234,10 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
   // expiry, pruning), which must predate `unix`. A latest block older than
   // `unix` stops it too: the node lags behind, or `unix` is still to come
   // (a period that has not ended), and reading no history from there would
-  // pass any payout as unpaid. Returns that block and the latest one.
+  // pass any payout as unpaid. Returns that block and the latest one. The
+  // block is searched once per `unix` for this chain object (each payout of a
+  // disburse page check reads from the same date); the latest one every time.
+  const firstBlocks = new Map<number, number>()
   const firstBlockAtOrAfter = async (unix: number): Promise<{ first: number; head: number }> => {
     const head = await getBlock("latest")
     if (!head || head.number === undefined || head.number === null || head.timestamp === undefined || head.timestamp === null) {
@@ -174,6 +251,8 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
           `${new Date(unix * 1000).toISOString()} where the history to check starts: the node lags behind, or that date is still to come`
       )
     }
+    const known = firstBlocks.get(unix)
+    if (known !== undefined && known <= hi) return { first: known, head: headNumber }
     let lo = -1 // older than unix, or before genesis
     for (let step = 1024; hi > 0; step *= 2) {
       const candidate = Math.max(0, hi - step)
@@ -195,6 +274,7 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
       if (at < unix) lo = mid
       else hi = mid
     }
+    firstBlocks.set(unix, hi)
     return { first: hi, head: headNumber }
   }
 
@@ -220,7 +300,7 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
   }
 
   // eth_getLogs over [from, to], in smaller ranges when a node refuses a wide one.
-  const getLogs = async (filter: { address: string; topics: (string | null)[] }, fromBlock: number, toBlock: number) => {
+  const getLogs = async (filter: { address: string; topics: (string | string[] | null)[] }, fromBlock: number, toBlock: number) => {
     const out: { topics: string[]; data: string; transactionHash: string; blockNumber: string; removed?: boolean }[] = []
     let span = toBlock - fromBlock + 1
     for (let start = fromBlock; start <= toBlock; ) {
@@ -234,6 +314,34 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
       }
     }
     return out
+  }
+
+  // The token's Transfer logs matching `topics`, in blocks at or after `sinceUnix`.
+  const transferLogs = async (topics: (string | string[] | null)[], sinceUnix: number): Promise<IncomingTransfer[]> => {
+    const { first: firstBlock, head } = await firstBlockAtOrAfter(sinceUnix)
+    // Read after the search, so it covers every block the search saw. An
+    // answer older than the latest block the search started from means the
+    // RPC's backends disagree: reading up to it would skip the blocks
+    // between, and a payment in them would pass as unpaid. A backend a
+    // block or two behind catches up in seconds: asked again a few times.
+    let latest = toNumber(await rpc("eth_blockNumber", []))
+    for (let retry = 0; latest < head && retry < 3; retry++) {
+      await sleep(envInt("SEND_POLL_MS", 2000) || 2000)
+      latest = toNumber(await rpc("eth_blockNumber", []))
+    }
+    if (latest < head) {
+      throw new Error(`the RPC answered ${latest} as its latest block after serving block ${head} (its backends disagree)`)
+    }
+    const logs = await getLogs({ address: token, topics }, firstBlock, latest)
+    return logs
+      .filter((log) => !log.removed && log.topics.length >= 3)
+      .map((log) => ({
+        from: utils.getAddress(utils.hexDataSlice(log.topics[1], 12)),
+        to: utils.getAddress(utils.hexDataSlice(log.topics[2], 12)),
+        amount: BigNumber.from(log.data).toString(),
+        txHash: log.transactionHash,
+        blockNumber: toNumber(log.blockNumber),
+      }))
   }
 
   return {
@@ -304,30 +412,59 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
       return { from: utils.getAddress(tx.from), nonce: toNumber(tx.nonce) }
     },
     blockTimestamp: (blockNumber) => timestampOf(blockNumber),
-    outgoingTransfers: async (sinceUnix) => {
-      const { first: firstBlock, head } = await firstBlockAtOrAfter(sinceUnix)
-      // Read after the search, so it covers every block the search saw. An
-      // answer older than the latest block the search started from means the
-      // RPC's backends disagree: reading up to it would skip the blocks
-      // between, and a payment in them would pass as unpaid. A backend a
-      // block or two behind catches up in seconds: asked again a few times.
-      let latest = toNumber(await rpc("eth_blockNumber", []))
-      for (let retry = 0; latest < head && retry < 3; retry++) {
-        await sleep(envInt("SEND_POLL_MS", 2000) || 2000)
-        latest = toNumber(await rpc("eth_blockNumber", []))
+    outgoingTransfers: async (sinceUnix) =>
+      (await transferLogs([transferTopic, fromTopic], sinceUnix)).map(({ to, amount, txHash, blockNumber }) => ({ to, amount, txHash, blockNumber })),
+    incomingTransfers: async (recipients, sinceUnix) => {
+      if (recipients.length === 0) return []
+      const toTopics = Array.from(new Set(recipients.map((r) => utils.hexZeroPad(utils.getAddress(r), 32).toLowerCase())))
+      return transferLogs([transferTopic, null, toTopics], sinceUnix)
+    },
+    transactionDetails: async (hash) => {
+      const tx = await rpc("eth_getTransactionByHash", [hash])
+      if (!tx || !tx.from || tx.nonce === undefined || tx.nonce === null) return null
+      return {
+        hash: String(tx.hash || hash).toLowerCase(),
+        from: utils.getAddress(tx.from),
+        to: tx.to ? utils.getAddress(tx.to) : null,
+        input: String(tx.input || tx.data || "0x").toLowerCase(),
+        value: BigNumber.from(tx.value || 0),
+        nonce: toNumber(tx.nonce),
+        chainId: tx.chainId !== undefined && tx.chainId !== null ? toNumber(tx.chainId) : null,
+        blockNumber: tx.blockNumber !== undefined && tx.blockNumber !== null ? toNumber(tx.blockNumber) : null,
       }
-      if (latest < head) {
-        throw new Error(`the RPC answered ${latest} as its latest block after serving block ${head} (its backends disagree)`)
+    },
+    simulateTransfer: async (recipient, amount) => {
+      const data = erc20.encodeFunctionData("transfer", [recipient, amount])
+      let out: string
+      try {
+        out = await rpc("eth_call", [{ from, to: token, data, value: "0x0" }, "latest"])
+      } catch (err) {
+        throw new Error(`transfer(${recipient}, ${amount.toString()}) from ${from} would revert: ${rpcErrorText(err) || errorMessage(err)}`)
       }
-      const logs = await getLogs({ address: token, topics: [transferTopic, fromTopic] }, firstBlock, latest)
-      return logs
-        .filter((log) => !log.removed && log.topics.length >= 3)
-        .map((log) => ({
-          to: utils.getAddress(utils.hexDataSlice(log.topics[2], 12)),
-          amount: BigNumber.from(log.data).toString(),
-          txHash: log.transactionHash,
-          blockNumber: toNumber(log.blockNumber),
-        }))
+      // Tokens that return nothing are none of PNK's: it returns true.
+      const ok = (() => {
+        try {
+          return Boolean(erc20.decodeFunctionResult("transfer", out)[0])
+        } catch {
+          return false
+        }
+      })()
+      if (!ok) throw new Error(`transfer(${recipient}, ${amount.toString()}) from ${from} would not succeed: the token answered ${out}`)
+    },
+    tokenAllowance: async (spender) => {
+      const out = await rpc("eth_call", [{ to: token, data: allowanceAbi.encodeFunctionData("allowance", [from, spender]) }, "latest"])
+      return allowanceAbi.decodeFunctionResult("allowance", out)[0] as BigNumber
+    },
+    codeHash: async (address) => {
+      const code = String((await rpc("eth_getCode", [address, "latest"])) || "0x")
+      return code === "0x" ? null : utils.keccak256(code)
+    },
+    simulateCall: async (to, data, label) => {
+      try {
+        return String(await rpc("eth_call", [{ from, to, data, value: "0x0" }, "latest"]))
+      } catch (err) {
+        throw new Error(`${label} from ${from} would revert: ${rpcErrorText(err) || errorMessage(err)}`)
+      }
     },
   }
 }

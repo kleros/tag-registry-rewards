@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Disburse Curate rewards</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <h1>Disburse Curate rewards</h1>
+    <p class="lead">
+      Served by <code>yarn start --mode disburse-page</code> on this machine only; the page loads nothing from the internet.
+      Every payout is checked with the rules of <code>yarn start --mode send</code> and recorded in
+      <code>disbursements/</code>. The browser wallet signs every transaction: hold every screen of the device against what
+      this page shows for it, a transfer's recipient and amount, or with Disperse the amount approved and then the total
+      paid.
+    </p>
+    <section id="setup">
+      <p><label>Folder <select id="folder"></select></label></p>
+      <div id="kinds"></div>
+      <p id="payer"></p>
+      <fieldset id="pay-mode">
+        <legend>Pay with</legend>
+        <label><input type="radio" name="mode" value="disperse" checked /> One Disperse transaction: approve exactly the
+          total, then pay every transfer at once (2 confirmations, or 1 if Disperse is already allowed exactly that). The
+          wallet shows the approval's amount, then one contract call to Disperse: the transfers are the list below, and
+          if the wallet shows what leaves the account, it must be exactly their total.</label>
+        <label><input type="radio" name="mode" value="transfers" /> One transaction per transfer: a confirmation for each,
+          which the wallet shows with its recipient and amount.</label>
+      </fieldset>
+      <details id="options">
+        <summary>Transfers the check finds already on-chain</summary>
+        <p class="note">
+          A check refuses a payout whose transfers it finds already paid on-chain (same recipient, same amount, since the
+          period ended), from this wallet or any other. Look each transaction it lists up on the explorer, then:
+        </p>
+        <p>
+          <label>set aside the ones that only coincide with this payout (their hashes; <code>hash:recipient</code> for one
+            transfer of a transaction paying several):<br />
+            <input id="unrelated" class="mono hash" placeholder="0x… 0x…" /></label>
+        </p>
+        <p>
+          <label><input type="checkbox" id="record-found" /> record the ones from this wallet as this payout's payments,
+            and pay the rest</label>
+        </p>
+        <p>
+          <label>record these from another wallet as this payout's payments (their hashes, named one by one):<br />
+            <input id="paid-elsewhere" class="mono hash" placeholder="0x… 0x…" /></label>
+        </p>
+      </details>
+      <p>
+        <button id="check" disabled>Check</button>
+        <button id="disburse" disabled>Disburse</button>
+        <button id="stop" disabled>Stop after this transfer</button>
+      </p>
+    </section>
+    <section id="summary"></section>
+    <section id="unsettled"></section>
+    <section id="payouts"></section>
+    <h2>Log</h2>
+    <ol id="log"></ol>
+    <script src="/page.js"></script>
+    <script src="/main.js"></script>
+  </body>
+</html>
