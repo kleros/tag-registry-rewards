@@ -753,7 +753,9 @@ The page:
      recipient, all or none, leaving nothing approved). One, when Disperse is
      already allowed exactly that much; any other amount it is allowed is set
      to exactly the total first, so that no other batch (a request still open
-     in the wallet) could spend anything after this one. The wallet shows the approval's amount and
+     in the wallet) could spend anything after this one. An approval whose
+     amount is changed in the wallet stops the run: Check again, and approve
+     exactly the total. The wallet shows the approval's amount and
      spender, then one contract call: the transfers are the list on the page,
      and Disperse can only ever move the account's tokens when the account
      itself calls it.
@@ -808,7 +810,9 @@ over the last 45 days, for a transfer paid through a wallet and then paid
 again by the account (same recipient, same amount, unknown to the ledger: a
 request approved late, a transaction marked never sent and sent after all):
 it is recorded on the transfer (`paidTwiceBy`) and reported once, the excess
-to be recovered by hand. A wallet that sends a transfer with a later nonce
+to be recovered by hand. What may be the payment of a transfer not settled
+yet (sent by `send`, or handed to a wallet) is left to that transfer's own
+settling first. A wallet that sends a transfer with a later nonce
 than the account's next one (other transactions came first) stops the run.
 Requests of another account only stop that account's payouts.
 `send` refuses a payout with a transfer in that state, and waits for, rather

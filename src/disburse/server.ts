@@ -73,17 +73,16 @@ const text = (value: unknown): string => (typeof value === "string" ? value : ""
 const texts = (value: unknown): string[] => (Array.isArray(value) ? value.map(text) : [])
 const rowNumber = (value: unknown): number => (typeof value === "number" ? value : NaN)
 
-export const createDisburseServer = (session: DisburseSession, opts: { token?: string } = {}): { server: Server; token: string } => {
-  const token = opts.token || randomBytes(32).toString("hex")
-  const assets = new Map<string, { body: Buffer; type: string }>()
-  for (const [path, { file, type }] of Object.entries(ASSETS)) assets.set(path, { type, body: readFileSync(join(STATIC, file)) })
-  // A Map, not an object: a path is only ever one of these, never a name every
-  // object has ("constructor", "__proto__"…).
-  const routes = new Map<string, Handler>([
-    ["/api/overview", () => session.overview()],
-    [
-      "/api/check",
-      (b) =>
+// What each path of the API asks of the session, or nothing for any other
+// path. Written out as a switch: nothing the request brings is ever looked up
+// to find what to call, so no name every object has ("constructor",
+// "__proto__"…) can stand for a path.
+const route = (session: DisburseSession, path: string): Handler | null => {
+  switch (path) {
+    case "/api/overview":
+      return () => session.overview()
+    case "/api/check":
+      return (b) =>
         session.check({
           folder: text(b.folder),
           kinds: texts(b.kinds),
@@ -92,17 +91,32 @@ export const createDisburseServer = (session: DisburseSession, opts: { token?: s
           skipPaidOnChain: b.skipPaidOnChain === true,
           paidTxs: texts(b.paidTxs),
           mode: text(b.mode),
-        }),
-    ],
-    ["/api/next", (b) => session.next({ checkId: text(b.checkId) })],
-    ["/api/next-batch", (b) => session.nextBatch({ checkId: text(b.checkId) })],
-    ["/api/sent", (b) => session.sent({ requestId: text(b.requestId), hash: text(b.hash) })],
-    ["/api/receipt", (b) => session.receipt({ requestId: text(b.requestId) })],
-    ["/api/rejected", (b) => session.rejected({ requestId: text(b.requestId) })],
-    ["/api/failed", (b) => session.failed({ requestId: text(b.requestId), message: text(b.message) })],
-    ["/api/record-hash", (b) => session.recordHash({ recordId: text(b.recordId), index: rowNumber(b.index), hash: text(b.hash) })],
-    ["/api/forget", (b) => session.forget({ recordId: text(b.recordId), index: rowNumber(b.index) })],
-  ])
+        })
+    case "/api/next":
+      return (b) => session.next({ checkId: text(b.checkId) })
+    case "/api/next-batch":
+      return (b) => session.nextBatch({ checkId: text(b.checkId) })
+    case "/api/sent":
+      return (b) => session.sent({ requestId: text(b.requestId), hash: text(b.hash) })
+    case "/api/receipt":
+      return (b) => session.receipt({ requestId: text(b.requestId) })
+    case "/api/rejected":
+      return (b) => session.rejected({ requestId: text(b.requestId) })
+    case "/api/failed":
+      return (b) => session.failed({ requestId: text(b.requestId), message: text(b.message) })
+    case "/api/record-hash":
+      return (b) => session.recordHash({ recordId: text(b.recordId), index: rowNumber(b.index), hash: text(b.hash) })
+    case "/api/forget":
+      return (b) => session.forget({ recordId: text(b.recordId), index: rowNumber(b.index) })
+    default:
+      return null
+  }
+}
+
+export const createDisburseServer = (session: DisburseSession, opts: { token?: string } = {}): { server: Server; token: string } => {
+  const token = opts.token || randomBytes(32).toString("hex")
+  const assets = new Map<string, { body: Buffer; type: string }>()
+  for (const [path, { file, type }] of Object.entries(ASSETS)) assets.set(path, { type, body: readFileSync(join(STATIC, file)) })
   // One API call at a time: the session is a sequence, never concurrent.
   let queue: Promise<unknown> = Promise.resolve()
   const serialized = (job: () => unknown): Promise<unknown> => {
@@ -125,7 +139,7 @@ export const createDisburseServer = (session: DisburseSession, opts: { token?: s
       response.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": asset.type })
       return response.end(request.method === "HEAD" ? undefined : asset.body)
     }
-    const handler = routes.get(path)
+    const handler = route(session, path)
     if (request.method !== "POST" || !handler) return deny()
     const origin = String(request.headers.origin || "")
     if (!origins.some((o) => origin === `http://${o}`)) return deny(403)

@@ -869,13 +869,19 @@ export class DisburseSession {
   // The ledger's record by id: the very copy a run holds when it uses that
   // record (saving a fresh read would be undone by the run's next save).
   private ledgerRecord(recordId: string): DisbursementRecord | undefined {
-    const held = (this.active ? this.active.members.map((m) => m.record) : []).concat(this.plan ? this.plan.payouts.map((p) => p.record) : [])
-    return held.find((r) => r.id === recordId) || listDisbursements().find((r) => r.id === recordId)
+    return this.heldRecords().find((r) => r.id === recordId) || listDisbursements().find((r) => r.id === recordId)
   }
 
-  // Every record of the ledger, each as the one copy this call works on.
+  // The records a run holds: the wallet's transaction's, and the plan's.
+  private heldRecords(): DisbursementRecord[] {
+    return (this.active ? this.active.members.map((m) => m.record) : []).concat(this.plan ? this.plan.payouts.map((p) => p.record) : [])
+  }
+
+  // Every record of the ledger, read once, each as the one copy this call
+  // works on.
   private ledgerRecords(): DisbursementRecord[] {
-    return listDisbursements().map((r) => this.ledgerRecord(r.id) as DisbursementRecord)
+    const held = this.heldRecords()
+    return listDisbursements().map((r) => held.find((h) => h.id === r.id) || r)
   }
 
   private current(requestId: string): Active {
@@ -1475,24 +1481,23 @@ export class DisburseSession {
     }
     if (first.t.status === "sent") {
       const hash = String(first.t.txHash)
+      // One transaction for all of them, so one receipt, read once: it settles
+      // every transfer or none. (Read per transfer, a receipt that a node
+      // serves a moment later than another would settle only some of them.)
       const byReceipt = async (): Promise<BatchOutcome | null> => {
-        const outcomes: string[] = []
-        for (const m of members) outcomes.push(await settle(chain, m.t))
-        if (outcomes.every((o) => o === "pending")) return null
-        saveAll(members)
-        if (outcomes.includes("reverted")) {
+        const receipt = await chain.receipt(hash)
+        if (!receipt) return null
+        if (receipt.status !== 1) {
           for (const m of members) {
-            // one transaction for all: reverted for all
-            if (m.t.status !== "failed") {
-              m.t.revertedTxs = union(m.t.revertedTxs, [hash])
-              clearTransaction(m.t)
-              m.t.status = "failed"
-            }
+            if (m.t.status === "failed") continue
+            m.t.revertedTxs = union(m.t.revertedTxs, [hash])
+            clearTransaction(m.t)
+            m.t.status = "failed"
           }
           saveAll(members)
           return { state: "reverted", hash, message: `${hash} reverted: nothing was paid by it. Check again to send the batch anew.` }
         }
-        return { state: "confirmed", hash: String(first.t.txHash), block: Number(first.t.blockNumber), url: explorerTxUrl(chainId, String(first.t.txHash)), found: false }
+        return confirmAll({ txHash: hash, blockNumber: receipt.blockNumber, nonce: first.t.nonce === undefined ? null : first.t.nonce }, false)
       }
       const settled = await byReceipt()
       if (settled) return settled
@@ -1647,19 +1652,20 @@ export class DisburseSession {
     saveAll(members)
   }
 
-  // An approval of Disperse: mined (and Disperse allowed enough), reverted,
-  // pending, or replaced.
+  // An approval of Disperse: mined (and Disperse allowed exactly the batch's
+  // total, as the batch is only handed out then), reverted, pending, or
+  // replaced.
   private async settleApproval(chain: SendChain, a: Active): Promise<Receipt> {
     const hash = String(a.hash)
     const url = explorerTxUrl(sendChainId(), hash)
     const allowed = async (block: number): Promise<Receipt> => {
       const allowance = await chain.tokenAllowance(DISPERSE_ADDRESS)
-      if (allowance.lt(a.amount)) {
+      if (!allowance.eq(a.amount)) {
         return {
           state: "stopped",
           message:
-            `The approval ${hash} is mined, but Disperse is allowed ${pnkExact(allowance)}, less than the ${pnkExact(a.amount)} the batch ` +
-            "needs (was its amount changed in the wallet?): Check again",
+            `The approval ${hash} is mined, but Disperse is allowed ${pnkExact(allowance)}, not the ${pnkExact(a.amount)} asked ` +
+            "(was its amount changed in the wallet?). Check again: it asks to approve exactly the total",
         }
       }
       return { state: "confirmed", hash, block, url }
@@ -1675,7 +1681,8 @@ export class DisburseSession {
       await sleep(pollMs) // its nonce is used: by it, its receipt not served yet, or by its replacement
     }
     const allowance = await chain.tokenAllowance(DISPERSE_ADDRESS)
-    if (allowance.gte(a.amount)) return allowed(await chain.blockNumber())
+    // approved by the wallet's replacement of it
+    if (allowance.eq(a.amount)) return { state: "confirmed", hash, block: await chain.blockNumber(), url }
     return {
       state: "stopped",
       message: `The approval ${hash} can no longer be mined (its nonce went to another transaction), and Disperse is allowed ${pnkExact(allowance)}: Check again`,
@@ -1848,7 +1855,8 @@ export class DisburseSession {
   // handed out): a request approved late, or a transaction marked never sent
   // and sent after all. Each Transfer log pays one transfer: those the ledger
   // does not account for (an unknown transaction, or more logs of a known one
-  // than its transfers) are second payments. Recorded on the transfer
+  // than its transfers), nor may yet account for (a transfer not settled),
+  // are second payments, each of one transfer. Recorded on the transfer
   // (`paidTwiceBy`), and a problem of the check that finds them.
   private async findRepeats(chain: SendChain, account: string, problems: string[], notes: string[]): Promise<void> {
     const chainId = sendChainId()
@@ -1874,33 +1882,54 @@ export class DisburseSession {
       notes.push(`Could not look for transfers paid twice (${errorMessage(err)}): Check again to retry`)
       return
     }
+    type Log = { to: string; amount: string; txHash: string; blockNumber: number }
     const key = (hash: string, to: string, amount: string) => `${hash.toLowerCase()}|${to.toLowerCase()}|${amount}`
+    const pays = (f: Log, t: LedgerTransfer) => f.to.toLowerCase() === t.recipient.toLowerCase() && f.amount === t.amount
     // the logs each transaction of the ledger accounts for
     const accounted = new Map<string, number>()
+    // the account's transfers sent, or handed to a wallet, and not settled yet
+    const unsettled: LedgerTransfer[] = []
     for (const r of records) {
+      const ofAccount = r.chainId === chainId && String(r.token).toLowerCase() === token && r.from.toLowerCase() === account.toLowerCase()
       for (const t of r.transfers) {
-        if (t.status !== "confirmed" || !t.txHash) continue
-        const k = key(t.txHash, t.recipient, t.amount)
-        accounted.set(k, (accounted.get(k) || 0) + 1)
+        if (t.status === "confirmed" && t.txHash) {
+          const k = key(t.txHash, t.recipient, t.amount)
+          accounted.set(k, (accounted.get(k) || 0) + 1)
+        } else if (ofAccount && (t.status === "signed" || t.status === "sent" || isRequested(t))) {
+          unsettled.push(t)
+        }
       }
     }
     // what is left of each log once the ledger's transfers are accounted for
-    const extra: { to: string; amount: string; txHash: string; blockNumber: number }[] = []
+    const extra: Log[] = []
     const seen = new Map<string, number>()
     for (const f of out) {
       const k = key(f.txHash, f.to, f.amount)
       seen.set(k, (seen.get(k) || 0) + 1)
       if ((seen.get(k) as number) > (accounted.get(k) || 0)) extra.push(f)
     }
+    // What pays a transfer not settled yet may be its payment, which only its
+    // own settling tells: it is no second payment of an older transfer until
+    // then. Each keeps one log out: its own transaction's when the ledger
+    // knows one, else one to its recipient for its amount since it was handed
+    // out. A log still left over once it is settled is found by the next check.
+    const keepOut = (t: LedgerTransfer, own: boolean): boolean => {
+      const hashes = ownHashes(t)
+      const i = extra.findIndex((f) =>
+        own ? pays(f, t) && hashes.has(f.txHash.toLowerCase()) : pays(f, t) && (t.requestedBlock === undefined || f.blockNumber >= t.requestedBlock)
+      )
+      if (i >= 0) extra.splice(i, 1)
+      return i >= 0
+    }
+    for (const t of unsettled.filter((u) => !keepOut(u, true))) keepOut(t, false)
     for (const { record, t } of watched) {
       const known = new Set((t.paidTwiceBy || []).map((h) => h.toLowerCase()))
       const again: { txHash: string; blockNumber: number }[] = []
       for (let i = 0; i < extra.length; i++) {
         const f = extra[i]
-        if (f.to.toLowerCase() !== t.recipient.toLowerCase() || f.amount !== t.amount || f.blockNumber <= Number(t.requestedBlock)) continue
-        if (known.has(f.txHash.toLowerCase())) continue
-        again.push(f)
-        extra.splice(i--, 1) // one log, one second payment
+        if (!pays(f, t) || f.blockNumber <= Number(t.requestedBlock)) continue
+        extra.splice(i--, 1) // one log, one second payment, of one transfer
+        if (!known.has(f.txHash.toLowerCase())) again.push(f) // else recorded by an earlier check
       }
       if (again.length === 0) continue
       t.paidTwiceBy = union(t.paidTwiceBy, again.map((f) => f.txHash))

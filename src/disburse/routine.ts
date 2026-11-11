@@ -13,21 +13,27 @@ export const disbursePageRoutine = async (): Promise<Server> => {
   const token = sendTokenAddress()
   sendRpcUrl(chainId) // an RPC for the chain, or stop here
   const payer = pinnedPayer()
-  const release = acquireDisbursementLock()
+  // Whatever may refuse comes before the lock, and what fails once it is held
+  // gives it back: a lock left behind would stop every later run.
+  const port = disbursePagePort()
   const session = new DisburseSession()
   const { server, token: key } = createDisburseServer(session)
-  const port = disbursePagePort()
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", (error: NodeJS.ErrnoException) => {
-      release()
-      reject(
-        error.code === "EADDRINUSE"
-          ? new Error(`Port ${port} is taken: stop what holds it (another disburse page?), or set DISBURSE_PAGE_PORT`)
-          : error
-      )
+  const release = acquireDisbursementLock()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", (error: NodeJS.ErrnoException) => {
+        reject(
+          error.code === "EADDRINUSE"
+            ? new Error(`Port ${port} is taken: stop what holds it (another disburse page?), or set DISBURSE_PAGE_PORT`)
+            : error
+        )
+      })
+      server.listen(port, "127.0.0.1", () => resolve())
     })
-    server.listen(port, "127.0.0.1", () => resolve())
-  })
+  } catch (error) {
+    release()
+    throw error
+  }
   server.on("close", release)
   console.log(`Serving the disburse page until Ctrl-C. Open this link (the part after # is this run's key; share it with no one):`)
   console.log(`  http://127.0.0.1:${port}/#${key}`)
