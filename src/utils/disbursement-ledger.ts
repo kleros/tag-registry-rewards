@@ -68,7 +68,8 @@ export interface LedgerTransfer {
   strayTxs?: string[]
   // Transactions of the account found paying it again (same recipient, same
   // amount, after it was handed to the wallet), once it was paid: the
-  // recipient was paid twice, and the excess is to be recovered by hand.
+  // recipient was paid twice, and the excess is to be recovered by hand. A
+  // transaction is listed once per transfer of it that pays this one again.
   paidTwiceBy?: string[]
 }
 

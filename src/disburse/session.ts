@@ -204,6 +204,7 @@ interface Plan {
   mode: PayMode
   payouts: PlanPayout[]
   expectedNonce: number // the account's next nonce: anything else it sends voids the plan
+  approved?: string // what this run's approval allowed Disperse, once mined: the batch's total
   touchedAt: number
 }
 
@@ -683,7 +684,19 @@ export class DisburseSession {
   // transactions: another one (another tab, another app, the CLI) could be a
   // payment the check did not see. Returns the account's next nonce.
   private async assertQuiet(chain: SendChain, plan: Plan): Promise<number> {
-    const [latest, pending] = await Promise.all([chain.nonce("latest"), chain.nonce("pending")])
+    // A nonce lower than the chain already showed is no transaction of the
+    // account's: it is a node behind another.
+    const [latest, pending] = await this.onceCaughtUp(
+      () => Promise.all([chain.nonce("latest"), chain.nonce("pending")]),
+      (nonces) => nonces[0] >= plan.expectedNonce
+    )
+    if (latest < plan.expectedNonce) {
+      this.plan = null
+      throw new SendRefusedError(
+        `The RPC shows nonce ${latest} for ${plan.account}, behind the ${plan.expectedNonce} the chain showed a moment ago (a node ` +
+          "lagging behind): Check again"
+      )
+    }
     if (latest !== plan.expectedNonce || pending !== latest) {
       this.plan = null
       throw new SendRefusedError(
@@ -692,6 +705,20 @@ export class DisburseSession {
       )
     }
     return latest
+  }
+
+  // What is read right after a transaction of the run was mined, when it is
+  // not yet what that transaction leaves: read again for a moment. An RPC
+  // served by several nodes may answer from one a block behind the one that
+  // served the receipt, with what was there before.
+  private async onceCaughtUp<T>(read: () => Promise<T>, caughtUp: (value: T) => boolean): Promise<T> {
+    const pollMs = envInt("SEND_POLL_MS", 2000) || 2000
+    let value = await read()
+    for (let tries = 0; tries < 3 && !caughtUp(value); tries++) {
+      await sleep(pollMs)
+      value = await read()
+    }
+    return value
   }
 
   private finish(plan: Plan): Step {
@@ -807,10 +834,15 @@ export class DisburseSession {
     const token = members[0].record.token
     const chainId = members[0].record.chainId
     const total = sumOf(members)
+    // Right after this run's approval, the total is what Disperse is allowed.
+    const approved = plan.approved === total.toString()
     const [codeHash, balance, allowance] = await Promise.all([
       chain.codeHash(DISPERSE_ADDRESS),
       chain.tokenBalance(),
-      chain.tokenAllowance(DISPERSE_ADDRESS),
+      this.onceCaughtUp(
+        () => chain.tokenAllowance(DISPERSE_ADDRESS),
+        (value) => !approved || value.eq(total)
+      ),
     ])
     if (codeHash !== DISPERSE_CODE_HASH) {
       this.plan = null
@@ -821,6 +853,14 @@ export class DisburseSession {
       throw new SendRefusedError(`${plan.account} holds ${pnkExact(balance)}, less than the ${pnkExact(total)} to send: Check again`)
     }
     const requestId = randomId()
+    if (!allowance.eq(total) && approved) {
+      // Approved a moment ago, and not allowed that now: never a second
+      // approval in one run, which the page would refuse.
+      this.plan = null
+      throw new SendRefusedError(
+        `Disperse is allowed ${pnkExact(allowance)}, not the ${pnkExact(total)} this run's approval allowed it a moment ago: Check again`
+      )
+    }
     if (!allowance.eq(total)) {
       // Exactly the total, whatever Disperse was allowed before: what this
       // batch spends, nothing left allowed once it is paid, so that no other
@@ -846,11 +886,18 @@ export class DisburseSession {
       }
     }
     const data = disperseCalldata(token, members.map((m) => m.t))
-    try {
-      await chain.simulateCall(DISPERSE_ADDRESS, data, `Disperse of ${members.length} transfers (${pnk(total)})`)
-    } catch (err) {
+    // (a node still behind this run's approval would have the batch revert)
+    const refusal = await this.onceCaughtUp(
+      () =>
+        chain.simulateCall(DISPERSE_ADDRESS, data, `Disperse of ${members.length} transfers (${pnk(total)})`).then(
+          () => "",
+          (err) => errorMessage(err) || "it would revert"
+        ),
+      (why) => !approved || why === ""
+    )
+    if (refusal) {
       this.plan = null
-      throw new SendRefusedError(`Not sending the batch: ${errorMessage(err)}`)
+      throw new SendRefusedError(`Not sending the batch: ${refusal}`)
     }
     const block = await chain.blockNumber()
     this.handOut(members, requestId, latest, block, true) // a batch even of one: its calldata is Disperse's
@@ -1057,6 +1104,7 @@ export class DisburseSession {
           const used = a.kind === "approve" ? a.txNonce : a.members[0].t.nonce
           if (used === a.nonce) this.plan.expectedNonce = a.nonce + 1
           else this.plan = null
+          if (this.plan && a.kind === "approve") this.plan.approved = a.amount.toString()
         }
         return outcome
       }
@@ -1484,20 +1532,27 @@ export class DisburseSession {
       // One transaction for all of them, so one receipt, read once: it settles
       // every transfer or none. (Read per transfer, a receipt that a node
       // serves a moment later than another would settle only some of them.)
+      // The transaction is the wallet's, or another the operator gave for it
+      // with the same nonce (sped up): each was shown to be the batch, and
+      // only one of them can be mined.
+      const candidates = Array.from(new Set((first.t.attempts || []).concat(hash).map((h) => h.toLowerCase())))
       const byReceipt = async (): Promise<BatchOutcome | null> => {
-        const receipt = await chain.receipt(hash)
-        if (!receipt) return null
-        if (receipt.status !== 1) {
-          for (const m of members) {
-            if (m.t.status === "failed") continue
-            m.t.revertedTxs = union(m.t.revertedTxs, [hash])
-            clearTransaction(m.t)
-            m.t.status = "failed"
+        for (const h of candidates) {
+          const receipt = await chain.receipt(h)
+          if (!receipt) continue
+          if (receipt.status !== 1) {
+            for (const m of members) {
+              if (m.t.status === "confirmed") continue // paid is paid: never one to send again
+              m.t.revertedTxs = union(m.t.revertedTxs, [h])
+              clearTransaction(m.t)
+              m.t.status = "failed"
+            }
+            saveAll(members)
+            return { state: "reverted", hash: h, message: `${h} reverted: nothing was paid by it. Check again to send the batch anew.` }
           }
-          saveAll(members)
-          return { state: "reverted", hash, message: `${hash} reverted: nothing was paid by it. Check again to send the batch anew.` }
+          return confirmAll({ txHash: h, blockNumber: receipt.blockNumber, nonce: first.t.nonce === undefined ? null : first.t.nonce }, false)
         }
-        return confirmAll({ txHash: hash, blockNumber: receipt.blockNumber, nonce: first.t.nonce === undefined ? null : first.t.nonce }, false)
+        return null
       }
       const settled = await byReceipt()
       if (settled) return settled
@@ -1659,7 +1714,10 @@ export class DisburseSession {
     const hash = String(a.hash)
     const url = explorerTxUrl(sendChainId(), hash)
     const allowed = async (block: number): Promise<Receipt> => {
-      const allowance = await chain.tokenAllowance(DISPERSE_ADDRESS)
+      const allowance = await this.onceCaughtUp(
+        () => chain.tokenAllowance(DISPERSE_ADDRESS),
+        (value) => value.eq(a.amount)
+      )
       if (!allowance.eq(a.amount)) {
         return {
           state: "stopped",
@@ -1857,7 +1915,9 @@ export class DisburseSession {
   // does not account for (an unknown transaction, or more logs of a known one
   // than its transfers), nor may yet account for (a transfer not settled),
   // are second payments, each of one transfer. Recorded on the transfer
-  // (`paidTwiceBy`), and a problem of the check that finds them.
+  // (`paidTwiceBy`: the transaction, once per log of it), and a problem of the
+  // check that finds them; what a check recorded is never reported again, on
+  // that transfer or another.
   private async findRepeats(chain: SendChain, account: string, problems: string[], notes: string[]): Promise<void> {
     const chainId = sendChainId()
     const token = sendTokenAddress().toLowerCase()
@@ -1889,9 +1949,12 @@ export class DisburseSession {
     const accounted = new Map<string, number>()
     // the account's transfers sent, or handed to a wallet, and not settled yet
     const unsettled: LedgerTransfer[] = []
+    // and those an earlier check found paid a second time
+    const recorded: LedgerTransfer[] = []
     for (const r of records) {
       const ofAccount = r.chainId === chainId && String(r.token).toLowerCase() === token && r.from.toLowerCase() === account.toLowerCase()
       for (const t of r.transfers) {
+        if (ofAccount && (t.paidTwiceBy || []).length > 0) recorded.push(t)
         if (t.status === "confirmed" && t.txHash) {
           const k = key(t.txHash, t.recipient, t.amount)
           accounted.set(k, (accounted.get(k) || 0) + 1)
@@ -1908,6 +1971,16 @@ export class DisburseSession {
       seen.set(k, (seen.get(k) || 0) + 1)
       if ((seen.get(k) as number) > (accounted.get(k) || 0)) extra.push(f)
     }
+    const takeOut = (matches: (f: Log) => boolean): Log | null => {
+      const i = extra.findIndex(matches)
+      return i < 0 ? null : extra.splice(i, 1)[0]
+    }
+    // What earlier checks recorded stays where it is: every transfer of the
+    // account, watched still or not, takes back a log of each transaction it
+    // holds as a second payment, once per time it holds it.
+    for (const t of recorded) {
+      for (const h of t.paidTwiceBy || []) takeOut((f) => pays(f, t) && f.txHash.toLowerCase() === h.toLowerCase())
+    }
     // What pays a transfer not settled yet may be its payment, which only its
     // own settling tells: it is no second payment of an older transfer until
     // then. Each keeps one log out: its own transaction's when the ledger
@@ -1915,24 +1988,39 @@ export class DisburseSession {
     // out. A log still left over once it is settled is found by the next check.
     const keepOut = (t: LedgerTransfer, own: boolean): boolean => {
       const hashes = ownHashes(t)
-      const i = extra.findIndex((f) =>
+      return !!takeOut((f) =>
         own ? pays(f, t) && hashes.has(f.txHash.toLowerCase()) : pays(f, t) && (t.requestedBlock === undefined || f.blockNumber >= t.requestedBlock)
       )
-      if (i >= 0) extra.splice(i, 1)
-      return i >= 0
     }
     for (const t of unsettled.filter((u) => !keepOut(u, true))) keepOut(t, false)
-    for (const { record, t } of watched) {
-      const known = new Set((t.paidTwiceBy || []).map((h) => h.toLowerCase()))
-      const again: { txHash: string; blockNumber: number }[] = []
-      for (let i = 0; i < extra.length; i++) {
-        const f = extra[i]
-        if (!pays(f, t) || f.blockNumber <= Number(t.requestedBlock)) continue
-        extra.splice(i--, 1) // one log, one second payment, of one transfer
-        if (!known.has(f.txHash.toLowerCase())) again.push(f) // else recorded by an earlier check
+    // The rest is new: one log, one second payment, of one transfer. A
+    // transaction pays a transfer again once, so two transfers to one
+    // recipient for one amount, paid again by one transaction (a batch sent
+    // twice), are two second payments, one each. Logs left after that (more of
+    // one transaction than transfers it could pay again) go to the first
+    // transfer they pay again: none is dropped.
+    const found = new Map<LedgerTransfer, Log[]>()
+    const paysAgain = (f: Log, t: LedgerTransfer) => pays(f, t) && f.blockNumber > Number(t.requestedBlock)
+    for (const { t } of watched) {
+      const held = new Set((t.paidTwiceBy || []).map((h) => h.toLowerCase()))
+      for (;;) {
+        const f = takeOut((x) => paysAgain(x, t) && !held.has(x.txHash.toLowerCase()))
+        if (!f) break
+        held.add(f.txHash.toLowerCase())
+        found.set(t, (found.get(t) || []).concat(f))
       }
+    }
+    for (const { t } of watched) {
+      for (;;) {
+        const f = takeOut((x) => paysAgain(x, t))
+        if (!f) break
+        found.set(t, (found.get(t) || []).concat(f))
+      }
+    }
+    for (const { record, t } of watched) {
+      const again = found.get(t) || []
       if (again.length === 0) continue
-      t.paidTwiceBy = union(t.paidTwiceBy, again.map((f) => f.txHash))
+      t.paidTwiceBy = (t.paidTwiceBy || []).concat(again.map((f) => f.txHash.toLowerCase()))
       saveDisbursement(record)
       problems.push(
         `${pnk(t.amount)} to ${t.recipient} (${record.kind} ${periodLabel(record.periodStart, record.periodEnd)}) was paid ` +
