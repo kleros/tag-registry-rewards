@@ -734,18 +734,34 @@ The page:
    Also refused: a folder whose manifests name one file for two payouts (one
    file is one payout), and a payout with transfers `send` signed and did not
    settle (stop the page and finish it with `send`, which rebroadcasts them).
-3. **Disburse**: one transfer at a time, in order (submissions, removals, ATQ):
-   confirm each in the wallet and on its device, against the recipient and
-   amount on the page. Each is simulated first (`eth_call`), and recorded in
-   the ledger as handed to the wallet (status `requested`) before the wallet
-   is asked; the page builds the transaction it hands the wallet from the
-   checked plan alone. The hash the wallet answers is recorded at once, and
-   taken for the transfer only once the chain shows its transaction is
-   exactly that transfer (from the account, to PNK, `transfer(recipient,
-   amount)`, no value). It is then waited for (a receipt the node serves late
-   included), and a speed-up in the wallet is followed: the replacement pays
-   it. The run stops at a rejection, at anything else the account sends
-   meanwhile, and after the current transfer when asked to.
+3. **Disburse**, paying with one of:
+   - **one Disperse transaction** (the default): every transfer chosen, in
+     one transaction, through [Disperse](https://disperse.app)
+     (`0xD152f549545093347A162Dce210e7293f1452150`, the same bytes on Gnosis
+     and Ethereum; the page checks its code hash before using it). Two
+     confirmations: the approval of exactly the total, then the batch
+     (`disperseTokenSimple`, which moves each amount from the account to its
+     recipient, all or none, leaving nothing approved). One, when Disperse is
+     already allowed that much. The wallet shows the approval's amount and
+     spender, then one contract call: the transfers are the list on the page,
+     and Disperse can only ever move the account's tokens when the account
+     itself calls it.
+   - **one transaction per transfer**: a confirmation for each, which the
+     wallet (and its device) shows with its recipient and amount.
+
+   Either way, each transaction is simulated first (`eth_call`), and the
+   transfers it pays are recorded in the ledger as handed to the wallet
+   (status `requested`; a batch's with its size and order) before the wallet
+   is asked; the page builds what it hands the wallet from the checked plan
+   alone, and checks it against what the server built. The hash the wallet
+   answers is recorded at once, and taken for those transfers only once the
+   chain shows its transaction is exactly what was asked (from the account, to
+   PNK or Disperse, with that calldata, no value). It is then waited for (a
+   receipt the node serves late included), and a speed-up in the wallet is
+   followed: the replacement pays it. The run stops at a rejection, at
+   anything else the account sends meanwhile, and after the current
+   transaction when asked to. A batch is settled, and decided on (its hash,
+   "never sent"), as one.
 
 A browser wallet signs and broadcasts in one step, so the signed bytes cannot
 be saved first as `send` saves them. Nothing is ever settled but from the
@@ -1106,11 +1122,13 @@ What is covered:
   holders and enrichment; the Dune lanes; the routines; `send` against the mock
   node (refusals, crashes and resumes at every step, fee replacement, reverts);
   the disburse page (its own script against its server and a stand-in browser
-  wallet: a folder paid in one run, rejections, answers lost or late (for an
-  earlier request too), speed-ups and cancels, late receipts, dropped
-  transactions, second payments, a transaction that is not the transfer, one
-  file named for two payouts, `send`'s unsettled transfers, the on-chain
-  options, the server's guards);
+  wallet: a folder paid in one run, in one Disperse transaction or one per
+  transfer (Disperse executed by the mock node, its real bytecode served at
+  its address), rejections, answers lost or late (for an earlier request
+  too), speed-ups and cancels, late receipts, dropped transactions, second
+  payments, a transaction that is not the transfer or the batch, one file
+  named for two payouts, `send`'s unsettled transfers, the on-chain options,
+  the server's guards);
   and the **September 2026 golden test**: `generate` and `document` on that
   period's inputs must reproduce the published payout to the wei
   (`test/fixtures/september-2026/`, change it only when a payout rule changes

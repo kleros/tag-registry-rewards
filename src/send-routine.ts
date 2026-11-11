@@ -987,6 +987,8 @@ export const clearTransaction = (t: LedgerTransfer): void => {
   delete t.requestedNonce
   delete t.requestedBlock
   delete t.requestId
+  delete t.batch
+  delete t.batchIndex
   delete t.reportedTxHash
 }
 

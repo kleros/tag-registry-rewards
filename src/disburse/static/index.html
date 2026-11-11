@@ -18,6 +18,14 @@
       <p><label>Folder <select id="folder"></select></label></p>
       <div id="kinds"></div>
       <p id="payer"></p>
+      <fieldset id="pay-mode">
+        <legend>Pay with</legend>
+        <label><input type="radio" name="mode" value="disperse" checked /> One Disperse transaction: approve exactly the
+          total, then pay every transfer at once (2 confirmations, or 1 if Disperse is already allowed that much). The
+          wallet shows one contract call and the total: the transfers are the list below.</label>
+        <label><input type="radio" name="mode" value="transfers" /> One transaction per transfer: a confirmation for each,
+          which the wallet shows with its recipient and amount.</label>
+      </fieldset>
       <details id="options">
         <summary>Transfers the check finds already on-chain</summary>
         <p class="note">

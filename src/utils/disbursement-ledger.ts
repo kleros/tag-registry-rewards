@@ -51,6 +51,10 @@ export interface LedgerTransfer {
   // Which hand-out of the transfer the wallet's answer belongs to: an answer
   // for an earlier one (a request approved late) is never taken for it.
   requestId?: string
+  // Handed out with others in one Disperse transaction (`requestId` shared):
+  // how many there were, and its place among them. They are settled as one.
+  batch?: number
+  batchIndex?: number
   // The hash the wallet answered, before it was checked against the chain.
   reportedTxHash?: string
   // Hashes a browser wallet answered for it that are not its payment, kept as

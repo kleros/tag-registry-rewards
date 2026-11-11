@@ -6,12 +6,13 @@
  * browser loads it as window.DisbursePage, Node as a CommonJS module.
  *
  * The page decides nothing about what is paid: the server (session.ts) checks
- * every payout with send's own rules and hands out one transfer at a time. The
- * page holds each one against the plan the check showed (a row of it, not paid
- * then, not handed out before in this run), makes sure the wallet is still on
- * the paying account and chain with nothing pending, hands the wallet that
- * transaction, built here from the checked plan alone, and reports what the
- * wallet answered.
+ * every payout with send's own rules and hands out what to send: one transfer
+ * at a time, or, through Disperse, an approval of the exact total and then one
+ * batch of every transfer. The page holds each step against the plan the
+ * check showed (its rows not paid then, not handed out before in this run),
+ * makes sure the wallet is still on the paying account and chain with nothing
+ * pending, hands the wallet the transaction, built here from the checked plan
+ * alone, and reports what the wallet answered.
  */
 (function (root, factory) {
   if (typeof module === "object" && module.exports) module.exports = factory()
@@ -20,6 +21,8 @@
   "use strict"
 
   var TRANSFER = "0xa9059cbb" // transfer(address,uint256)
+  var APPROVE = "0x095ea7b3" // approve(address,uint256)
+  var DISPERSE_TOKEN_SIMPLE = "0x51ba162c" // disperseTokenSimple(address,address[],uint256[])
 
   // An amount of wei as PNK, with thousands separators and `decimals` decimals.
   function formatPnk(wei, decimals) {
@@ -43,11 +46,41 @@
     return fraction ? whole + "." + fraction : whole
   }
 
+  // ABI words: an address, and an unsigned integer.
+  function addressWord(address) {
+    var a = String(address).toLowerCase().replace(/^0x/, "")
+    if (!/^[0-9a-f]{40}$/.test(a)) throw new Error("Not an address: " + address)
+    return a.padStart(64, "0")
+  }
+  function uintWord(value) {
+    var v = BigInt(value)
+    if (v < BigInt(0) || v >= BigInt(2) ** BigInt(256)) throw new Error("Not a uint256: " + value)
+    return v.toString(16).padStart(64, "0")
+  }
+
   // The calldata of transfer(recipient, amount).
   function transferData(recipient, amount) {
-    var to = String(recipient).toLowerCase().replace(/^0x/, "")
-    if (!/^[0-9a-f]{40}$/.test(to)) throw new Error("Not an address: " + recipient)
-    return TRANSFER + to.padStart(64, "0") + BigInt(amount).toString(16).padStart(64, "0")
+    return TRANSFER + addressWord(recipient) + uintWord(amount)
+  }
+
+  // The calldata of approve(spender, amount).
+  function approveData(spender, amount) {
+    return APPROVE + addressWord(spender) + uintWord(amount)
+  }
+
+  // The calldata of Disperse's disperseTokenSimple(token, recipients, amounts).
+  function disperseData(token, recipients, amounts) {
+    if (recipients.length !== amounts.length) throw new Error("As many amounts as recipients are needed")
+    var n = recipients.length
+    var head = addressWord(token) + uintWord(96) + uintWord(96 + 32 * (n + 1))
+    return (
+      DISPERSE_TOKEN_SIMPLE +
+      head +
+      uintWord(n) +
+      recipients.map(addressWord).join("") +
+      uintWord(n) +
+      amounts.map(uintWord).join("")
+    )
   }
 
   // The server's API. `origin` is for Node, where fetch sends none by itself.
@@ -77,6 +110,7 @@
       receipt: function (body) { return call("/api/receipt", body) },
       rejected: function (body) { return call("/api/rejected", body) },
       failed: function (body) { return call("/api/failed", body) },
+      nextBatch: function (body) { return call("/api/next-batch", body) },
       recordHash: function (body) { return call("/api/record-hash", body) },
       forget: function (body) { return call("/api/forget", body) },
     }
@@ -89,8 +123,9 @@
    * Check that no change of the wallet's account or chain interrupted, and
    * hands the wallet one transfer at a time until every chosen payout is paid
    * or something stops it. `options`: wallet (EIP-1193), api, chainId, payer
-   * (SEND_FROM, or null), events ({ voided, asking, sent, unverified, waiting,
-   * confirmed, stopped, done }), sleep (for the suite).
+   * (SEND_FROM, or null), disperse (Disperse's address, from the overview),
+   * events ({ running, voided, asking, sent, unverified, waiting, confirmed,
+   * stopped, done }), sleep (for the suite).
    */
   function createController(options) {
     var wallet = options.wallet
@@ -196,6 +231,73 @@
       }
     }
 
+    // The checked plan's rows still to pay, in the order Disperse pays them.
+    function openRows(plan) {
+      var rows = []
+      plan.payouts.forEach(function (p) {
+        if (p.refusal) return
+        p.transfers.forEach(function (t) {
+          if (t.status !== "confirmed") rows.push({ kind: p.kind, index: t.index, recipient: t.recipient, amount: t.amount })
+        })
+      })
+      return rows
+    }
+
+    function sameTx(server, built) {
+      var tx = server || {}
+      if (
+        !sameAddress(tx.from, built.from) ||
+        !sameAddress(tx.to, built.to) ||
+        String(tx.data).toLowerCase() !== built.data.toLowerCase() ||
+        tx.value !== "0x0" ||
+        Number(tx.chainId) !== Number(built.chainId)
+      ) {
+        throw new Error("The server's transaction is not the one built here from the checked plan")
+      }
+    }
+
+    // A Disperse step: the approval of exactly the checked total to Disperse,
+    // or the batch of exactly the checked plan's rows still to pay, each asked
+    // once in a run. Returns the transaction to hand the wallet, built from the
+    // plan.
+    function verifyBatchStep(plan, step, handed) {
+      var spender = plan.disperse && plan.disperse.address
+      if (!spender || (options.disperse && !sameAddress(spender, options.disperse))) {
+        throw new Error("The check names no Disperse, or not the one this page knows")
+      }
+      var rows = openRows(plan)
+      var total = rows.reduce(function (sum, r) { return sum + BigInt(r.amount) }, BigInt(0))
+      var chainId = "0x" + plan.chainId.toString(16)
+      if (step.state === "approve") {
+        if (handed.approve) throw new Error("The server asked for a second approval in this run")
+        if (!sameAddress(step.spender, spender)) throw new Error("The server asked to approve " + step.spender + ", not Disperse (" + spender + ")")
+        if (BigInt(step.amount) !== total) throw new Error("The server asked to approve " + step.amount + ", not the checked total " + total)
+        var approve = { from: plan.account, to: plan.token, data: approveData(spender, total), value: "0x0", chainId: chainId }
+        sameTx(step.tx, approve)
+        handed.approve = true
+        return approve
+      }
+      if (step.state !== "disperse") throw new Error("The server asked for a " + step.state + " step, not a Disperse one")
+      if (handed.disperse) throw new Error("The server asked for a second batch in this run")
+      var listed = step.transfers || []
+      var same =
+        listed.length === rows.length &&
+        listed.every(function (t, i) {
+          var r = rows[i]
+          return t.kind === r.kind && t.index === r.index && sameAddress(t.recipient, r.recipient) && t.amount === r.amount
+        })
+      if (!same || BigInt(step.total) !== total) throw new Error("The server's batch is not the checked plan's transfers")
+      var data = disperseData(
+        plan.token,
+        rows.map(function (r) { return r.recipient }),
+        rows.map(function (r) { return r.amount })
+      )
+      var disperse = { from: plan.account, to: spender, data: data, value: "0x0", chainId: chainId }
+      sameTx(step.tx, disperse)
+      handed.disperse = true
+      return disperse
+    }
+
     // `extra`: { unrelatedTxs, skipPaidOnChain }, send's --unrelated-tx and
     // --skip-paid-on-chain for the transfers the check finds on-chain.
     async function check(folder, kinds, extra) {
@@ -212,32 +314,85 @@
         account: account,
         unrelatedTxs: options.unrelatedTxs || [],
         skipPaidOnChain: !!options.skipPaidOnChain,
+        mode: options.mode === "disperse" ? "disperse" : "transfers",
       })
       if (changes !== before) throw new Error("The wallet's account or chain changed during the check: Check again")
       if (result.checkId) checked = result
       return result
     }
 
-    // Runs the checked plan: every transfer of it, one at a time.
+    // Hands the wallet one transaction and follows it to its receipt: true
+    // once it is mined as asked, false when the run stops (told by "stopped").
+    async function runStep(step, tx) {
+      emit("asking", step)
+      var hash
+      try {
+        hash = await wallet.request({ method: "eth_sendTransaction", params: [tx] })
+      } catch (error) {
+        if (error && error.code === 4001) {
+          var rejected = await api.rejected({ requestId: step.requestId })
+          emit("stopped", rejected.message)
+          return false
+        }
+        var failed = await api.failed({ requestId: step.requestId, message: (error && error.message) || String(error) })
+        emit("stopped", failed.message)
+        return false
+      }
+      if (typeof hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+        var odd = await api.failed({ requestId: step.requestId, message: "the wallet answered " + hash + " instead of a transaction hash" })
+        emit("stopped", odd.message)
+        return false
+      }
+      var sent
+      for (var tries = 0; ; tries++) {
+        sent = await api.sent({ requestId: step.requestId, hash: hash })
+        if (sent.state === "sent") break
+        if (tries >= 90) {
+          var unseen = await api.failed({ requestId: step.requestId, message: "the RPC never showed " + hash + " (3 minutes)" })
+          emit("stopped", unseen.message)
+          return false
+        }
+        emit("unverified", step, hash)
+        await sleep(2000)
+      }
+      emit("sent", step, sent)
+      var receipt
+      var since = Date.now()
+      for (;;) {
+        receipt = await api.receipt({ requestId: step.requestId }) // the server waits a while for it
+        if (receipt.state !== "pending") break
+        emit("waiting", step, receipt, Math.floor((Date.now() - since) / 60000))
+      }
+      if (receipt.state !== "confirmed") {
+        emit("stopped", receipt.message)
+        return false
+      }
+      emit("confirmed", step, receipt)
+      return true
+    }
+
+    // Runs the checked plan: through Disperse (the approval if needed, then
+    // the batch), or every transfer of it, one at a time.
     async function disburse() {
       if (running) throw new Error("Disbursing already")
       if (!checked || !checked.checkId) throw new Error("Check first")
       var plan = checked
       checked = null // a check is used once
-      var handed = {} // the rows handed to the wallet in this run
+      var batch = plan.mode === "disperse"
+      var handed = {} // what was handed to the wallet in this run
       running = true
       stopAfter = false
       emit("running", true)
       try {
         for (;;) {
-          var step = await api.next({ checkId: plan.checkId })
+          var step = batch ? await api.nextBatch({ checkId: plan.checkId }) : await api.next({ checkId: plan.checkId })
           if (step.state === "done") {
             emit("done", step)
             return step
           }
           var tx
           try {
-            tx = verifyStep(plan, step, handed)
+            tx = batch ? verifyBatchStep(plan, step, handed) : verifyStep(plan, step, handed)
             await walletReady(plan.account)
           } catch (error) {
             // the wallet was never asked: nothing was sent
@@ -245,52 +400,9 @@
             emit("stopped", error.message + (cleared.state === "cleared" ? "" : ". " + cleared.message))
             return null
           }
-          emit("asking", step)
-          var hash
-          try {
-            hash = await wallet.request({ method: "eth_sendTransaction", params: [tx] })
-          } catch (error) {
-            if (error && error.code === 4001) {
-              var rejected = await api.rejected({ requestId: step.requestId })
-              emit("stopped", rejected.message)
-              return null
-            }
-            var failed = await api.failed({ requestId: step.requestId, message: (error && error.message) || String(error) })
-            emit("stopped", failed.message)
-            return null
-          }
-          if (typeof hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
-            var odd = await api.failed({ requestId: step.requestId, message: "the wallet answered " + hash + " instead of a transaction hash" })
-            emit("stopped", odd.message)
-            return null
-          }
-          var sent
-          for (var tries = 0; ; tries++) {
-            sent = await api.sent({ requestId: step.requestId, hash: hash })
-            if (sent.state === "sent") break
-            if (tries >= 90) {
-              var unseen = await api.failed({ requestId: step.requestId, message: "the RPC never showed " + hash + " (3 minutes)" })
-              emit("stopped", unseen.message)
-              return null
-            }
-            emit("unverified", step, hash)
-            await sleep(2000)
-          }
-          emit("sent", step, sent)
-          var receipt
-          var since = Date.now()
-          for (;;) {
-            receipt = await api.receipt({ requestId: step.requestId }) // the server waits a while for it
-            if (receipt.state !== "pending") break
-            emit("waiting", step, receipt, Math.floor((Date.now() - since) / 60000))
-          }
-          if (receipt.state !== "confirmed") {
-            emit("stopped", receipt.message)
-            return null
-          }
-          emit("confirmed", step, receipt)
-          if (stopAfter) {
-            emit("stopped", "Stopped after this transfer: Check again, then Disburse, for the rest")
+          if (!(await runStep(step, tx))) return null
+          if (stopAfter && step.state !== "approve") {
+            emit("stopped", "Stopped after this one: Check again, then Disburse, for the rest")
             return null
           }
         }
@@ -325,5 +437,7 @@
     formatPnk: formatPnk,
     formatPnkExact: formatPnkExact,
     transferData: transferData,
+    approveData: approveData,
+    disperseData: disperseData,
   }
 })

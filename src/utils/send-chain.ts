@@ -80,11 +80,55 @@ export interface SendChain {
   // Whether transfer(recipient, amount) from the wallet succeeds right now
   // (eth_call): an error names why it would not.
   simulateTransfer(recipient: string, amount: BigNumber): Promise<void>
+  // What the wallet allows `spender` to move of the token.
+  tokenAllowance(spender: string): Promise<BigNumber>
+  // keccak256 of the code at `address`, or null when it has none.
+  codeHash(address: string): Promise<string | null>
+  // A call from the wallet, simulated (eth_call): what it returns, or an error
+  // naming why it would revert.
+  simulateCall(to: string, data: string, label: string): Promise<string>
 }
 
 // The calldata of a token transfer.
 export const transferCalldata = (recipient: string, amount: BigNumber): string =>
   new utils.Interface(ERC20Abi).encodeFunctionData("transfer", [recipient, amount])
+
+// Disperse (disperse.app): one contract, the same bytes at the same address on
+// Ethereum and Gnosis (checked by this hash before it is used).
+// disperseTokenSimple(token, recipients, values) makes
+// token.transferFrom(msg.sender, recipient, value) for each: it only ever moves
+// the caller's own tokens, within what the caller allowed it, all or none, and
+// each payment is a Transfer from the caller to its recipient, as a plain
+// transfer would be.
+export const DISPERSE_ADDRESS = "0xD152f549545093347A162Dce210e7293f1452150"
+export const DISPERSE_CODE_HASH = "0x65660051e320731a70b9ddcd5ec9fd4f565cf85e2f6caf0eb71589fb544b9996"
+const disperseAbi = new utils.Interface(["function disperseTokenSimple(address token, address[] recipients, uint256[] values)"])
+const allowanceAbi = new utils.Interface([
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+])
+
+export const approveCalldata = (spender: string, amount: BigNumber): string =>
+  allowanceAbi.encodeFunctionData("approve", [spender, amount])
+
+// The spender and amount of approve(spender, amount) calldata, or null.
+export const decodeApproval = (data: string): { spender: string; amount: BigNumber } | null => {
+  try {
+    if (!String(data).toLowerCase().startsWith(allowanceAbi.getSighash("approve"))) return null
+    const [spender, amount] = allowanceAbi.decodeFunctionData("approve", data)
+    return { spender: utils.getAddress(spender), amount: BigNumber.from(amount) }
+  } catch {
+    return null
+  }
+}
+
+// The calldata paying these transfers through Disperse, in this order.
+export const disperseCalldata = (token: string, transfers: { recipient: string; amount: BigNumber | string }[]): string =>
+  disperseAbi.encodeFunctionData("disperseTokenSimple", [
+    token,
+    transfers.map((t) => t.recipient),
+    transfers.map((t) => BigNumber.from(t.amount)),
+  ])
 
 const erc20 = new utils.Interface(ERC20Abi)
 
@@ -406,6 +450,21 @@ export const createSendChain = (opts: { readOnlyFrom?: string } = {}): SendChain
         }
       })()
       if (!ok) throw new Error(`transfer(${recipient}, ${amount.toString()}) from ${from} would not succeed: the token answered ${out}`)
+    },
+    tokenAllowance: async (spender) => {
+      const out = await rpc("eth_call", [{ to: token, data: allowanceAbi.encodeFunctionData("allowance", [from, spender]) }, "latest"])
+      return allowanceAbi.decodeFunctionResult("allowance", out)[0] as BigNumber
+    },
+    codeHash: async (address) => {
+      const code = String((await rpc("eth_getCode", [address, "latest"])) || "0x")
+      return code === "0x" ? null : utils.keccak256(code)
+    },
+    simulateCall: async (to, data, label) => {
+      try {
+        return String(await rpc("eth_call", [{ from, to, data, value: "0x0" }, "latest"]))
+      } catch (err) {
+        throw new Error(`${label} from ${from} would revert: ${rpcErrorText(err) || errorMessage(err)}`)
+      }
     },
   }
 }

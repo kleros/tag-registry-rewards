@@ -44,7 +44,7 @@
     $("disburse").disabled = busy || !controller || !controller.canDisburse()
     $("stop").disabled = !running
     $("folder").disabled = busy || running
-    Array.prototype.slice.call(document.querySelectorAll("input[name=kind], .settle-action, #options input")).forEach(function (node) {
+    Array.prototype.slice.call(document.querySelectorAll("input[name=kind], input[name=mode], .settle-action, #options input")).forEach(function (node) {
       node.disabled = busy || running
     })
   }
@@ -60,9 +60,14 @@
   }
 
   function selectedFolder() { return $("folder").value }
-  // What send's --unrelated-tx and --skip-paid-on-chain say, for this check.
+  function selectedMode() {
+    var chosen = document.querySelector("input[name=mode]:checked")
+    return chosen ? chosen.value : "disperse"
+  }
+  // How to pay, and what send's --unrelated-tx and --skip-paid-on-chain say, for this check.
   function checkOptions() {
     return {
+      mode: selectedMode(),
       unrelatedTxs: $("unrelated").value.split(/[\s,]+/).filter(Boolean),
       skipPaidOnChain: $("record-found").checked,
     }
@@ -104,6 +109,16 @@
   }
 
   function rowId(kind, index) { return "row-" + kind + "-" + index }
+  // The table rows a step pays: one transfer, a batch, or none (an approval).
+  function rowsOf(step) {
+    if (!step) return []
+    if (step.state === "disperse") return step.transfers || []
+    if (step.state === "send") return [{ kind: step.kind, index: step.index }]
+    return []
+  }
+  function setRows(step, text, url, className) {
+    rowsOf(step).forEach(function (r) { setRow(r.kind, r.index, text, url, className) })
+  }
   function setRow(kind, index, text, url, className) {
     var cell = document.getElementById(rowId(kind, index))
     if (!cell) return
@@ -122,6 +137,15 @@
         el("tr", {}, [el("td", { text: "Network" }), el("td", { text: "chain " + result.chainId + ", PNK " + result.token })]),
         el("tr", {}, [el("td", { text: "Holds" }), el("td", { text: P.formatPnk(result.balance) + " PNK, " + P.formatPnk(result.native, 4) + " for gas" })]),
         el("tr", {}, [el("td", { text: "To send" }), el("td", { text: P.formatPnk(result.due) + " PNK" })]),
+        el("tr", {}, [
+          el("td", { text: "Pays with" }),
+          el("td", {
+            text: result.disperse
+              ? "one Disperse transaction (" + result.disperse.address + "): " +
+                (result.disperse.confirmations === 1 ? "1 confirmation" : "2 confirmations, the approval of exactly this total, then the batch")
+              : "one transaction per transfer: " + result.payouts.reduce(function (n, p) { return n + p.toSend }, 0) + " confirmations",
+          }),
+        ]),
       ])
     )
     result.problems.forEach(function (p) { summary.append(el("p", { className: "bad", text: p })) })
@@ -228,6 +252,7 @@
       api: api,
       chainId: overview.chainId,
       payer: overview.payer,
+      disperse: overview.disperse,
       events: {
         running: function () { refresh() },
         voided: function (event) {
@@ -237,28 +262,45 @@
         asking: function (step) {
           current = step
           refresh()
+          if (step.state === "approve") {
+            log("Asking the wallet: approve Disperse (" + step.spender + ") to spend exactly " + P.formatPnkExact(step.amount) + " PNK, no more")
+            return
+          }
+          if (step.state === "disperse") {
+            setRows(step, "in the batch: confirm in the wallet…", null, "busy")
+            log(
+              "Asking the wallet: pay all " + step.transfers.length + " transfers, " + P.formatPnkExact(step.total) + " PNK in total, " +
+                "in one Disperse transaction. The wallet shows one contract call: check its total against this one"
+            )
+            return
+          }
           setRow(step.kind, step.index, "confirm in the wallet…", null, "busy")
           log("Asking the wallet: " + P.formatPnk(step.amount) + " PNK to " + step.recipient + " (" + KIND_NAMES[step.kind] + " #" + (step.index + 1) + ")")
         },
-        unverified: function (step, hash) { setRow(step.kind, step.index, "waiting for the RPC to see " + short(hash), null, "busy") },
-        sent: function (step, sent) { setRow(step.kind, step.index, "sent " + short(sent.hash) + ", waiting for a block", sent.url, "busy") },
+        unverified: function (step, hash) { setRows(step, "waiting for the RPC to see " + short(hash), null, "busy") },
+        sent: function (step, sent) {
+          if (step.state === "approve") log("Approval sent: " + sent.hash + ", waiting for a block")
+          setRows(step, "sent " + short(sent.hash) + ", waiting for a block", sent.url, "busy")
+        },
         waiting: function (step, receipt, minutes) {
           if (minutes < 3) return
-          setRow(
-            step.kind,
-            step.index,
-            "sent " + short(receipt.hash) + ", not mined after " + minutes + " min: speed it up in the wallet if it shows it pending",
-            null,
-            "busy"
-          )
+          setRows(step, "sent " + short(receipt.hash) + ", not mined after " + minutes + " min: speed it up in the wallet if it shows it pending", null, "busy")
         },
         confirmed: function (step, receipt) {
           current = null
-          setRow(step.kind, step.index, "paid " + short(receipt.hash) + " (block " + receipt.block + ")", receipt.url, "ok")
+          if (step.state === "approve") {
+            log("Approved: Disperse may spend exactly " + P.formatPnkExact(step.amount) + " PNK (" + receipt.hash + ")", "ok")
+            return
+          }
+          setRows(step, "paid " + short(receipt.hash) + " (block " + receipt.block + ")", receipt.url, "ok")
+          if (step.state === "disperse") {
+            log("Paid all " + step.transfers.length + " transfers, " + P.formatPnk(step.total) + " PNK, in " + receipt.hash + (receipt.note ? ": " + receipt.note : ""), "ok")
+            return
+          }
           log("Paid " + P.formatPnk(step.amount) + " PNK to " + step.recipient + (receipt.note ? ": " + receipt.note : ""), "ok")
         },
         stopped: function (message) {
-          if (current) setRow(current.kind, current.index, "stopped: Check again (see the log)", null, "bad")
+          setRows(current, "stopped: Check again (see the log)", null, "bad")
           current = null
           log(message, "bad")
           refresh()
@@ -273,7 +315,13 @@
         log("Checking " + selectedFolder() + ": " + selectedKinds().join(", ") + "…")
         var result = await controller.check(selectedFolder(), selectedKinds(), checkOptions())
         renderCheck(result)
-        log(result.checkId ? "Checked: Disburse sends " + P.formatPnk(result.due) + " PNK, one transfer at a time." : "Nothing can be sent: see why above.", result.checkId ? "ok" : "bad")
+        log(
+          result.checkId
+            ? "Checked: Disburse sends " + P.formatPnk(result.due) + " PNK" +
+                (result.disperse ? " in one Disperse transaction (" + result.disperse.confirmations + " confirmation(s))." : ", one transfer at a time.")
+            : "Nothing can be sent: see why above.",
+          result.checkId ? "ok" : "bad"
+        )
       })
     }
     $("disburse").onclick = function () {
@@ -294,6 +342,7 @@
     }
     $("unrelated").oninput = invalidate
     $("record-found").onchange = invalidate
+    Array.prototype.slice.call(document.querySelectorAll("input[name=mode]")).forEach(function (box) { box.onchange = invalidate })
     refresh()
   }
 

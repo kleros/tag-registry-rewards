@@ -7,9 +7,11 @@ import { join } from "path"
 import { createDisburseServer } from "../../src/disburse/server"
 import { DisburseSession } from "../../src/disburse/session"
 import { sendRoutine } from "../../src/send-routine"
+import { approveCalldata, DISPERSE_ADDRESS, disperseCalldata } from "../../src/utils/send-chain"
 import { setEnv } from "../support/env"
 import { writeJson } from "../support/files"
 import { evmAddress } from "../support/fixtures"
+import { DISPERSE } from "../support/evm"
 import { evm, installSendHarness, ledger, log, paid, PNK, SEPTEMBER, wallet, work } from "../support/send-harness"
 
 // The disburse page (`--mode disburse-page`): its own script (static/page.js,
@@ -69,6 +71,7 @@ class FakeWallet {
   chainId = 100
   sent: string[] = []
   reject = false
+  rejectIf: ((tx: Tx) => boolean) | null = null
   fail: string | null = null
   noSwitch = false
   tamper: ((tx: Tx) => Tx) | null = null
@@ -111,7 +114,7 @@ class FakeWallet {
         for (const listener of this.listeners.chainChanged || []) listener(params[0].chainId)
         return null
       case "eth_sendTransaction": {
-        if (this.reject) throw { code: 4001, message: "User rejected the request." }
+        if (this.reject || (this.rejectIf && this.rejectIf(params[0]))) throw { code: 4001, message: "User rejected the request." }
         if (this.fail) throw { code: -32603, message: this.fail }
         const hash = await this.signAndSend(this.tamper ? this.tamper(params[0]) : params[0])
         this.sent.push(hash)
@@ -151,7 +154,7 @@ const startPage = async (): Promise<any> => {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const page = (api: any, wallet: FakeWallet, events: any = {}): any =>
-  P.createController({ wallet, api, chainId: 100, payer: null, events, sleep: async () => undefined })
+  P.createController({ wallet, api, chainId: 100, payer: null, disperse: DISPERSE_ADDRESS, events, sleep: async () => undefined })
 
 const ALL = ["submissions", "removals", "atq"]
 
@@ -313,6 +316,176 @@ describe("disburse page: paying", () => {
     await controller.check("f", ["submissions"])
     assert.equal((await controller.disburse()).state, "done")
     assert.deepEqual(paid().map((p) => p.to), SUB.map((e) => e.recipient))
+  })
+})
+
+describe("disburse page: one Disperse transaction", () => {
+  const SUB = [
+    { recipient: evmAddress(0xf01), amount: PNK(500) },
+    { recipient: evmAddress(0xf02), amount: PNK("1234.5") },
+  ]
+  const REM = [{ recipient: evmAddress(0xf03), amount: PNK(7000) }]
+  const ATQ = [{ recipient: evmAddress(0xf01), amount: PNK(3000) }]
+  const ALL_ROWS = [...SUB, ...REM, ...ATQ]
+  const TOTAL = ALL_ROWS.reduce((sum, e) => sum.add(e.amount), BigNumber.from(0))
+
+  it("builds in the page the very calldata the server builds", () => {
+    const rows = [
+      { recipient: evmAddress(0xabc), amount: "6999999999999999999992" },
+      { recipient: utils.getAddress(evmAddress(0xdef)), amount: "1" },
+      { recipient: evmAddress(0xabc), amount: PNK(500).toString() },
+    ]
+    assert.equal(
+      P.disperseData(evm.token, rows.map((r) => r.recipient), rows.map((r) => r.amount)),
+      disperseCalldata(evm.token, rows).toLowerCase()
+    )
+    assert.equal(P.disperseData(evm.token, [], []), disperseCalldata(evm.token, []).toLowerCase())
+    assert.equal(P.approveData(DISPERSE_ADDRESS, TOTAL.toString()), approveCalldata(DISPERSE_ADDRESS, TOTAL).toLowerCase())
+  })
+
+  it("pays a folder's three payouts in two confirmations: the exact total approved, then one batch", async () => {
+    writeFolder("october/combined", { submissions: SUB, removals: REM, atq: ATQ })
+    const api = await startPage()
+    const fake = new FakeWallet(wallet)
+    const asked: string[] = []
+    const controller = page(api, fake, { asking: (step: { state: string }) => asked.push(step.state) })
+    const result = await controller.check("october/combined", ALL, { mode: "disperse" })
+    assert.ok(result.checkId, JSON.stringify(result.problems))
+    assert.equal(result.mode, "disperse")
+    assert.deepEqual(result.disperse, { address: DISPERSE_ADDRESS, allowance: "0", confirmations: 2 })
+    assert.ok(result.notes.some((n: string) => /Two confirmations: approve Disperse .* for exactly 11734\.5 PNK, then pay all 4 transfers/.test(n)), JSON.stringify(result.notes))
+    assert.equal((await controller.disburse()).state, "done")
+    assert.deepEqual(asked, ["approve", "disperse"])
+    assert.equal(fake.sent.length, 2, "two confirmations")
+    assert.deepEqual(
+      paid().map((p) => [p.to.toLowerCase(), p.amount]),
+      ALL_ROWS.map((e) => [e.recipient.toLowerCase(), e.amount.toString()])
+    )
+    assert.ok(paid().every((p) => p.hash === fake.sent[1]), "every transfer in the one batch transaction")
+    assert.equal(evm.allowance(wallet.address, DISPERSE), BigInt(0), "nothing stays approved")
+    const records = ledger()
+    assert.deepEqual(records.map((r) => r.status), ["completed", "completed", "completed"])
+    const transfers = records.flatMap((r) => r.transfers)
+    for (const t of transfers) {
+      assert.equal(t.status, "confirmed")
+      assert.equal(t.txHash, fake.sent[1].toLowerCase())
+      assert.equal(t.batch, 4)
+      assert.equal(t.viaWallet, true)
+    }
+    assert.deepEqual(transfers.map((t) => t.batchIndex).sort(), [0, 1, 2, 3])
+    const again = await page(api, fake).check("october/combined", ALL, { mode: "disperse" })
+    assert.equal(again.checkId, null)
+    assert.ok(again.payouts.every((p: { refusal?: string }) => /already disbursed/.test(String(p.refusal))))
+    assert.ok(!again.problems.some((p: string) => /paid again/.test(p)), "one batch is not a second payment of its own transfers")
+  })
+
+  it("asks for one confirmation when Disperse is already allowed the total", async () => {
+    writeFolder("f", { submissions: SUB })
+    evm.setAllowance(wallet.address, DISPERSE, PNK(10000))
+    const api = await startPage()
+    const fake = new FakeWallet(wallet)
+    const controller = page(api, fake)
+    const result = await controller.check("f", ["submissions"], { mode: "disperse" })
+    assert.equal(result.disperse.confirmations, 1)
+    assert.ok(result.notes.some((n: string) => /stays allowed to Disperse after it/.test(n)), JSON.stringify(result.notes))
+    assert.equal((await controller.disburse()).state, "done")
+    assert.equal(fake.sent.length, 1)
+    assert.deepEqual(paid().map((p) => p.to.toLowerCase()), SUB.map((e) => e.recipient.toLowerCase()))
+    assert.equal(evm.allowance(wallet.address, DISPERSE), BigInt(PNK(10000).sub(PNK("1734.5")).toString()))
+  })
+
+  it("leaves every transfer to send when the batch is rejected in the wallet, and pays it all after the next Check", async () => {
+    writeFolder("f", { submissions: SUB, removals: REM })
+    const api = await startPage()
+    const fake = new FakeWallet(wallet)
+    fake.rejectIf = (tx) => tx.to.toLowerCase() === DISPERSE
+    const stopped: string[] = []
+    const controller = page(api, fake, { stopped: (m: string) => stopped.push(m) })
+    await controller.check("f", ["submissions", "removals"], { mode: "disperse" })
+    assert.equal(await controller.disburse(), null)
+    assert.match(stopped[0], /Rejected in the wallet: nothing was sent/)
+    assert.equal(paid().length, 0)
+    assert.ok(ledger().every((r) => r.transfers.every((t) => t.status === "pending" && t.batch === undefined)))
+    assert.equal(evm.allowance(wallet.address, DISPERSE), BigInt(PNK("8734.5").toString()), "the approval stays, for the next run")
+    fake.rejectIf = null
+    const next = page(api, fake)
+    assert.equal((await next.check("f", ["submissions", "removals"], { mode: "disperse" })).disperse.confirmations, 1)
+    assert.equal((await next.disburse()).state, "done")
+    assert.equal(paid().length, 3)
+    assert.equal(fake.sent.length, 2, "the approval, then the batch: nothing sent twice")
+  })
+
+  it("settles from the chain a batch the wallet sent while the page lost its answer", async () => {
+    writeFolder("f", { submissions: SUB, atq: ATQ })
+    const api = await startPage()
+    const fake = new FakeWallet(wallet)
+    const first = await page(api, fake).check("f", ["submissions", "atq"], { mode: "disperse" })
+    const approval = await api.nextBatch({ checkId: first.checkId })
+    assert.equal(approval.state, "approve")
+    assert.equal(approval.amount, PNK("4734.5").toString())
+    const approvalHash = await fake.request({ method: "eth_sendTransaction", params: [approval.tx] })
+    assert.equal((await api.sent({ requestId: approval.requestId, hash: approvalHash })).state, "sent")
+    assert.equal((await api.receipt({ requestId: approval.requestId })).state, "confirmed")
+    const batch = await api.nextBatch({ checkId: first.checkId })
+    assert.equal(batch.state, "disperse")
+    assert.equal(batch.transfers.length, 3)
+    assert.ok(ledger().every((r) => r.transfers.every((t) => t.status === "requested" && t.batch === 3)), "recorded before the wallet is asked")
+    await assert.rejects(
+      sendRoutine({ file: "1790000000001.json", filesDir: join(work, "files", "f") }, { log }),
+      /was handed to a browser wallet by the disburse page/,
+      "send leaves it to the page"
+    )
+    const hash = await fake.request({ method: "eth_sendTransaction", params: [batch.tx] }) // sent; the page closed before hearing it
+    const reloaded = await page(api, fake).check("f", ["submissions", "atq"], { mode: "disperse" })
+    assert.equal(reloaded.checkId, null)
+    assert.equal(reloaded.notes.filter((n: string) => /the Disperse batch of 3 transfers, 4734\.5 PNK .*: the wallet sent it/.test(n)).length, 1, JSON.stringify(reloaded.notes))
+    assert.ok(ledger().every((r) => r.status === "completed" && r.transfers.every((t) => t.status === "confirmed" && t.txHash === String(hash).toLowerCase())))
+    assert.equal(paid().length, 3)
+  })
+
+  it("never takes for the batch's payment a transaction that is not exactly it, and settles it as one", async () => {
+    writeFolder("f", { submissions: SUB })
+    const api = await startPage()
+    const fake = new FakeWallet(wallet)
+    const elsewhere = evmAddress(0xbad)
+    fake.tamper = (tx) =>
+      tx.to.toLowerCase() === DISPERSE ? { ...tx, data: P.disperseData(evm.token, [elsewhere], [PNK(5).toString()]) } : tx
+    const stopped: string[] = []
+    const controller = page(api, fake, { stopped: (m: string) => stopped.push(m) })
+    await controller.check("f", ["submissions"], { mode: "disperse" })
+    assert.equal(await controller.disburse(), null)
+    assert.match(stopped[0], /is not the batch of 2 transfers .* it was asked for: its data is not disperseTokenSimple of this batch's 2 transfers/)
+    const tampered = fake.sent[1].toLowerCase()
+    assert.ok(ledger()[0].transfers.every((t) => t.status === "requested" && t.reportedTxHash === tampered))
+    const again = await page(api, fake).check("f", ["submissions"], { mode: "disperse" })
+    assert.equal(again.unsettled.length, 1, "the batch is listed once")
+    assert.equal(again.unsettled[0].batch, 2)
+    assert.deepEqual(again.unsettled[0].actions, ["hash", "forget"])
+    assert.match(again.unsettled[0].why, /^the Disperse batch of 2 transfers, 1,?734\.5 PNK .*which is not this batch/)
+    assert.equal((await api.forget({ recordId: again.unsettled[0].recordId, index: again.unsettled[0].index })).state, "cleared")
+    for (const t of ledger()[0].transfers) {
+      assert.equal(t.status, "pending")
+      assert.deepEqual(t.strayTxs, [tampered])
+    }
+    fake.tamper = null
+    const retry = page(api, fake)
+    assert.ok((await retry.check("f", ["submissions"], { mode: "disperse" })).checkId)
+    assert.equal((await retry.disburse()).state, "done")
+    assert.deepEqual(
+      paid().map((p) => p.to.toLowerCase()),
+      [elsewhere, ...SUB.map((e) => e.recipient)].map((a) => a.toLowerCase()),
+      "the tampered batch paid only what it said; the batch itself, once"
+    )
+  })
+
+  it("refuses Disperse when the contract at its address is not Disperse", async () => {
+    writeFolder("f", { submissions: SUB })
+    evm.code.set(DISPERSE, "0x6080604052")
+    const api = await startPage()
+    const result = await page(api, new FakeWallet(wallet)).check("f", ["submissions"], { mode: "disperse" })
+    assert.equal(result.checkId, null)
+    assert.ok(result.problems.some((p: string) => /Disperse is not at 0xD152f549545093347A162Dce210e7293f1452150 on this chain as this page knows it/.test(p)))
+    assert.ok((await page(api, new FakeWallet(wallet)).check("f", ["submissions"], { mode: "transfers" })).checkId, "one transaction per transfer still works")
   })
 })
 
