@@ -56,8 +56,12 @@ export interface SendOptions {
   // Transactions the operator says only coincide with one of this payout's
   // transfers (same recipient, same amount): never taken for its payment, by
   // the on-chain check or by --forget-unmined. Never one that took the
-  // transfer's own nonce.
+  // transfer's own nonce. "0x<hash>", or "0x<hash>:0x<recipient>" for one
+  // transfer of a transaction paying several (a Disperse batch).
   unrelatedTxs?: string[]
+  // Transactions from another wallet the operator says are this payout's
+  // payments (found by the on-chain check): recorded as paid. Same forms.
+  paidTxs?: string[]
   // Dry run only: check as this address, without its key.
   from?: string
   // The month (YYYY-MM) the file pays, for a file no manifest gives the period of.
@@ -395,6 +399,46 @@ const sendingAccount = (opts: SendOptions, chain?: SendChain): string | null => 
   }
 }
 
+// Transactions the operator names: a whole transaction ("0x<hash>"), or one
+// transfer in it ("0x<hash>:0x<recipient>"), for one paying several.
+interface Named {
+  has: (f: { txHash: string; to: string }) => boolean
+  hashes: string[] // named whole
+}
+const namedTransfers = (values: string[] | undefined, flag: string): Named => {
+  const whole = new Set<string>()
+  const one = new Set<string>()
+  for (const raw of values || []) {
+    const value = String(raw).trim().toLowerCase()
+    const match = /^(0x[0-9a-f]{64})(?::(0x[0-9a-f]{40}))?$/.exec(value)
+    if (!match) {
+      throw new SendRefusedError(
+        `${flag} "${raw}" is not a transaction hash (0x and 64 hex digits), nor a hash and a recipient (0x<hash>:0x<recipient>).`
+      )
+    }
+    if (match[2]) one.add(`${match[1]}:${match[2]}`)
+    else whole.add(match[1])
+  }
+  return {
+    has: (f) => whole.has(f.txHash.toLowerCase()) || one.has(`${f.txHash.toLowerCase()}:${f.to.toLowerCase()}`),
+    hashes: Array.from(whole),
+  }
+}
+
+// A transaction named whole that pays more than one of these transfers (a
+// batch): naming it would set aside, or record, all of them.
+const wholeNamedTwice = (
+  named: Named,
+  logs: { txHash: string; to: string; amount: string }[],
+  open: LedgerTransfer[]
+): string | undefined =>
+  named.hashes.find(
+    (hash) =>
+      logs.filter(
+        (f) => f.txHash.toLowerCase() === hash && open.some((t) => t.recipient.toLowerCase() === f.to.toLowerCase() && t.amount === f.amount)
+      ).length > 1
+  )
+
 export const sendRoutine = async (
   opts: SendOptions,
   deps: { chain?: SendChain; log?: (line: string) => void } = {}
@@ -402,10 +446,8 @@ export const sendRoutine = async (
   const log = deps.log || ((line: string) => console.log(line))
   if (opts.from && !opts.dryRun) throw new SendRefusedError("--from only works with --dry-run: sending needs WALLET_PRIVATE_KEY")
   if (opts.walletFees && !opts.dryRun) throw new SendRefusedError("walletFees only applies to a dry run")
-  const unrelated = new Set((opts.unrelatedTxs || []).map((hash) => String(hash).trim().toLowerCase()))
-  for (const hash of unrelated) {
-    if (!/^0x[0-9a-f]{64}$/.test(hash)) throw new SendRefusedError(`--unrelated-tx "${hash}" is not a transaction hash (0x and 64 hex digits).`)
-  }
+  const unrelated = namedTransfers(opts.unrelatedTxs, "--unrelated-tx")
+  const paidElsewhere = namedTransfers(opts.paidTxs, "--paid-tx")
   const settings = sendSettings()
   const { fees } = settings
   const filesDir = opts.filesDir || conf.FILES_DIR
@@ -672,13 +714,41 @@ export const sendRoutine = async (
       const ownPast = new Set(
         current.transfers.flatMap((t) => (t.revertedTxs || []).concat(t.forgottenTxs || [])).map((h) => h.toLowerCase())
       )
-      const holder = new Map<string, DisbursementRecord>()
-      for (const r of others) for (const t of r.transfers) for (const hash of paidHashes(t)) holder.set(hash, r)
+      // The payouts holding each payment of the ledger: by transaction,
+      // recipient and amount, as one transaction (a Disperse batch) pays
+      // transfers of several payouts.
+      const holders = new Map<string, DisbursementRecord[]>()
+      const paymentKey = (hash: string, to: string, amount: string) => `${hash.toLowerCase()}|${to.toLowerCase()}|${amount}`
+      for (const r of others) {
+        for (const t of r.transfers) {
+          for (const hash of paidHashes(t)) {
+            const k = paymentKey(hash, t.recipient, t.amount)
+            holders.set(k, (holders.get(k) || []).concat(r))
+          }
+        }
+      }
+      const heldBy = (f: { txHash: string; to: string; amount: string }): DisbursementRecord[] => holders.get(paymentKey(f.txHash, f.to, f.amount)) || []
+      // a payment the ledger holds for clearly different payouts only is theirs
+      const theirs = (f: { txHash: string; to: string; amount: string }): boolean => {
+        const rs = heldBy(f)
+        return rs.length > 0 && rs.every((r) => distinctPayouts(current, r))
+      }
+      const holderText = (f: { txHash: string; to: string; amount: string }): string | null => {
+        const rs = heldBy(f)
+        return rs.length > 0 ? `paid by ${rs.map((r) => `${describePayout(r)}, ${displayPath(recordPath(r))}`).join(" and ")}` : null
+      }
+      const twice = wholeNamedTwice(unrelated, found, open)
+      if (twice) {
+        throw new SendRefusedError(
+          `Refusing to send: --unrelated-tx ${twice} names a transaction paying several of this payout's transfers (a batch): ` +
+            "setting it aside whole would set aside all of them. Name each transfer that only coincides as " +
+            `--unrelated-tx ${twice}:<recipient>. Nothing was sent.`
+        )
+      }
       const candidates = found.filter((f) => {
         const hash = f.txHash.toLowerCase()
-        if (own.has(hash) || unrelated.has(hash)) return false
-        const r = holder.get(hash)
-        return !r || !distinctPayouts(current, r)
+        if (own.has(hash) || unrelated.has(f)) return false
+        return !theirs(f)
       })
       // Read back further than the stated month's end, a transfer's own payment
       // is still the first one since that end: an older one is matched only
@@ -709,9 +779,9 @@ export const sendRoutine = async (
           matches.slice(0, 20).map(async ({ transfer, tx }) => {
             const at = await chain.blockTimestamp(tx.blockNumber)
             const date = at === null ? "date unknown" : new Date(at * 1000).toISOString().slice(0, 10)
-            const r = holder.get(tx.txHash.toLowerCase())
-            const origin = r
-              ? `paid by ${describePayout(r)}, ${displayPath(recordPath(r))}`
+            const held = holderText(tx)
+            const origin = held
+              ? held
               : ownPast.has(tx.txHash.toLowerCase())
               ? "this payout's own transaction, recorded as reverted or never mined, yet it paid"
               : "unknown to the ledger"
@@ -743,17 +813,26 @@ export const sendRoutine = async (
           if (matches.length === 0 || opts.skipPaidOnChain) {
             throw new SendRefusedError(
               "Could not read the PNK transfers to this payout's recipients to check no other wallet paid them already " +
-                `(${(err as Error).message}). Retry, use another TX_RPC_URL, or rerun with --skip-onchain-check.`
+                `(${(err as Error).message}). Retry, or use another TX_RPC_URL; --skip-onchain-check skips this wallet's ` +
+                "check too, so only as a last resort."
             )
           }
           incomingError = (err as Error).message
         }
+        for (const [named, flag] of [[unrelated, "--unrelated-tx"], [paidElsewhere, "--paid-tx"]] as [Named, string][]) {
+          const several = wholeNamedTwice(named, incoming, stillOpen)
+          if (several) {
+            throw new SendRefusedError(
+              `Refusing to send: ${flag} ${several} names a transaction paying several of this payout's transfers: name each ` +
+                `transfer of it as ${flag} ${several}:<recipient>. Nothing was sent.`
+            )
+          }
+        }
         const fromOthers = incoming.filter((f) => {
           const hash = f.txHash.toLowerCase()
           if (f.from.toLowerCase() === chain.from.toLowerCase()) return false // read above
-          if (own.has(hash) || unrelated.has(hash)) return false
-          const r = holder.get(hash)
-          return !r || !distinctPayouts(current, r)
+          if (own.has(hash) || unrelated.has(f)) return false
+          return !theirs(f)
         })
         for (const t of stillOpen) {
           const i = fromOthers.findIndex((f) => f.to.toLowerCase() === t.recipient.toLowerCase() && f.amount === t.amount)
@@ -765,8 +844,7 @@ export const sendRoutine = async (
           }
         } else {
           otherLines = elsewhere.slice(0, 20).map(({ transfer, tx }) => {
-            const r = holder.get(tx.txHash.toLowerCase())
-            const origin = r ? `paid by ${describePayout(r)}, ${displayPath(recordPath(r))}` : "unknown to the ledger"
+            const origin = holderText(tx) || "unknown to the ledger"
             return `  ${pnk(transfer.amount)} to ${transfer.recipient}: tx ${tx.txHash} from ${tx.from} (block ${tx.blockNumber}; ${origin})`
           })
           if (elsewhere.length > 20) otherLines.push(`  … and ${elsewhere.length - 20} more`)
@@ -774,8 +852,12 @@ export const sendRoutine = async (
       }
 
       // Refused either way: identical capped amounts can coincide (one address
-      // owed 500 PNK twice), so only the operator can say they are this file's.
-      if ((matches.length > 0 || elsewhere.length > 0) && !opts.skipPaidOnChain) {
+      // owed 500 PNK twice), so only the operator can say they are this file's:
+      // this wallet's with --skip-paid-on-chain, another wallet's one by one,
+      // named with --paid-tx (a mint or a withdrawal of a round amount is not
+      // a payment of this payout).
+      const unnamed = elsewhere.filter(({ tx }) => !paidElsewhere.has(tx))
+      if ((matches.length > 0 && !opts.skipPaidOnChain) || unnamed.length > 0) {
         const all =
           matches.length === open.length && current.transfers.every((t) => t.status === "confirmed" || open.includes(t))
         const found: string[] = []
@@ -790,7 +872,8 @@ export const sendRoutine = async (
         if (elsewhere.length > 0) {
           found.push(
             `${elsewhere.length} of the ${open.length} transfers to send were already received by their recipients ` +
-              `since ${sinceText}, from another wallet (same recipient, same amount):\n${otherLines.join("\n")}`
+              `since ${sinceText}, from another wallet (same recipient, same amount):\n${otherLines.join("\n")}` +
+              (unnamed.length < elsewhere.length ? `\n(${elsewhere.length - unnamed.length} of them named with --paid-tx)` : "")
           )
         }
         const advice = all
@@ -802,8 +885,10 @@ export const sendRoutine = async (
             "--skip-paid-on-chain to count those as paid and send the rest, or with --skip-onchain-check to send everything anyway; " +
             "--unrelated-tx <hash> names one that only coincides, keeping the check for the rest."
           : `This payout may have been paid, in part or in full, ${matches.length > 0 ? "from this wallet and " : ""}from ` +
-            "another account. If these are its payments, rerun with --skip-paid-on-chain to record them as paid and send the " +
-            "rest; if they only coincide, name each with --unrelated-tx <hash>, or rerun with --skip-onchain-check."
+            "another account. Name each payment from another account that is this payout's with --paid-tx <hash> (it is " +
+            `recorded as paid)${matches.length > 0 ? ", record this wallet's with --skip-paid-on-chain," : ""} and each that only ` +
+            "coincides with --unrelated-tx <hash> (<hash>:<recipient> for one transfer of a transaction paying several), or " +
+            "rerun with --skip-onchain-check."
         throw new SendRefusedError(
           `Refusing to send: ${found.join("\nAnd ")}\n${advice}` +
             (incomingError
@@ -823,7 +908,7 @@ export const sendRoutine = async (
         }
       }
       if (elsewhere.length > 0) {
-        log(`Paid from another wallet: ${elsewhere.length} transfer(s), counted as paid (--skip-paid-on-chain):\n${otherLines.join("\n")}`)
+        log(`Paid from another wallet: ${elsewhere.length} transfer(s), recorded as paid (--paid-tx):\n${otherLines.join("\n")}`)
         for (const { transfer, tx } of elsewhere) {
           transfer.status = "confirmed"
           transfer.txHash = tx.txHash
@@ -857,6 +942,9 @@ export const sendRoutine = async (
       log(`Dry run: would send ${toSend.length} transfer(s), ${pnk(due)}. Nothing was signed or recorded.`)
       return { record: current, sent: 0, path: null }
     }
+    // The refusals above keep these out; never signed anew, whatever happens.
+    const handed = toSend.find(isRequested)
+    if (handed) throw new SendRefusedError(`Refusing to send: ${handed.recipient}'s transfer ${UNSETTLED_REQUEST}`)
     if (toSend.length === 0) {
       current.status = "completed"
       current.completedAt = current.completedAt || new Date().toISOString()
@@ -892,7 +980,7 @@ export const sendRoutine = async (
       log,
       forgetUnmined: !!opts.forgetUnmined,
       skipPaidOnChain: !!opts.skipPaidOnChain,
-      unrelated,
+      unrelated: unrelated.has,
       startedAt: current.createdAt,
       startBlock: current.startBlock,
       checkFunds: async (label) => {
@@ -946,7 +1034,7 @@ interface SendContext {
   log: (line: string) => void
   forgetUnmined: boolean
   skipPaidOnChain: boolean
-  unrelated: Set<string> // --unrelated-tx, lowercase
+  unrelated: (f: { txHash: string; to: string }) => boolean // set aside with --unrelated-tx
   startedAt: string // when this payout's record was created
   startBlock?: number // the chain's latest block then (unknown for a record without it: every payment counts as later)
   checkFunds: (label: string) => Promise<void> // throws when the wallet no longer covers what is left to send
@@ -1102,7 +1190,7 @@ const nonceUsed = async (ctx: SendContext, t: LedgerTransfer, label: string, may
     const sinceStart = ctx.startBlock === undefined || f.blockNumber > ctx.startBlock
     // One whose nonce the node does not tell may be the one that took this
     // transfer's: never set aside.
-    const setAside = tx !== null && ctx.unrelated.has(f.txHash.toLowerCase())
+    const setAside = tx !== null && ctx.unrelated(f)
     if (!later && sinceStart && !setAside) later = { transfer: f, nonce: tx ? tx.nonce : null }
   }
   const lookalike = sameNonce || (later && later.transfer)

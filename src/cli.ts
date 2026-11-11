@@ -140,7 +140,15 @@ const argv: any = yargs(hideBin(process.argv))
   })
   .option("unrelated-tx", {
     description:
-      "send: a transaction that only coincides with one of the file's transfers (same recipient, same amount), never taken for its payment; repeat for several",
+      "send: a transaction that only coincides with one of the file's transfers (same recipient, same amount), never taken for its payment; " +
+      "<hash>:<recipient> for one transfer of a transaction paying several; repeat for several",
+    type: "string",
+    array: true,
+  })
+  .option("paid-tx", {
+    description:
+      "send: a transaction from another wallet that is one of this file's payments (found by the on-chain check), recorded as paid; " +
+      "<hash>:<recipient> for one transfer of a transaction paying several; repeat for several",
     type: "string",
     array: true,
   }).argv
@@ -464,6 +472,7 @@ const main = async () => {
       skipOnchainCheck: !!argv["skip-onchain-check"],
       forgetUnmined: !!argv["forget-unmined"],
       unrelatedTxs: ([] as unknown[]).concat(argv["unrelated-tx"] || []).map(String),
+      paidTxs: ([] as unknown[]).concat(argv["paid-tx"] || []).map(String),
       from: argv.from ? String(argv.from) : undefined,
       period: argv.period ? String(argv.period) : undefined,
     })

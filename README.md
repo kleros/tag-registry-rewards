@@ -615,7 +615,11 @@ same file again. `send` refuses, before signing anything:
   or partly paid, from elsewhere), `--skip-paid-on-chain` records them as paid
   and sends the rest; if they only coincide with it, `--skip-onchain-check`
   skips the check, or `--unrelated-tx <hash>` (repeatable) sets aside just the
-  transactions named, keeping the check for every other transfer. A node that
+  transactions named, keeping the check for every other transfer. A
+  transaction paying several transfers (a Disperse batch) is named one
+  transfer at a time, `--unrelated-tx <hash>:<recipient>`: named whole, it is
+  refused, as it would set aside all of them. The ledger tells a batch's
+  payments apart by payout (transaction, recipient and amount). A node that
   refuses `eth_getLogs`, no longer serves the
   blocks back to that date, lacks a block needed to find it, whose latest
   block is older than that date (it lags behind), or whose backends answer an
@@ -628,9 +632,11 @@ same file again. `send` refuses, before signing anything:
   PNK each recipient received since the period ended is read too, from any
   sender, and one of exactly a transfer's amount that the ledger does not hold
   (or holds for a payout this one cannot be told apart from) counts the same
-  way: `--skip-paid-on-chain` records it as paid (with the wallet that paid
-  it), `--unrelated-tx <hash>` sets it aside, `--skip-onchain-check` skips both
-  checks;
+  way. Only a payment named with `--paid-tx <hash>` (or `<hash>:<recipient>`,
+  repeatable) is recorded as paid (with the wallet that paid it): a mint or a
+  withdrawal of a round amount is not this payout's, so `--skip-paid-on-chain`
+  never takes these. `--unrelated-tx` sets one aside, `--skip-onchain-check`
+  skips both checks;
 - a payout with a transfer handed to a browser wallet by the disburse page
   whose outcome is not known yet (the page settles it, see below);
 - a wallet without the PNK or the gas the transfers need, a base fee above
@@ -726,11 +732,14 @@ The page:
    everything chosen, together. Transfers the check finds already paid
    on-chain (from this wallet or another) are listed in the refusal; the box
    "Transfers the check finds already on-chain" then sets aside the ones that
-   only coincide (their hashes, as `--unrelated-tx`) or records the listed
-   ones as this payout's payments (as `--skip-paid-on-chain`, saved at once;
-   a payout found paid in full is recorded as disbursed). `--skip-onchain-check`
-   is left to `send`. A payout started from another account that never sent
-   any of it (a request rejected right away) moves to the account paying now.
+   only coincide (their hashes, as `--unrelated-tx`), records this wallet's as
+   this payout's payments (as `--skip-paid-on-chain`), or records another
+   wallet's named one by one (their hashes, as `--paid-tx`); saved at once, a
+   payout found paid in full recorded as disbursed. `--skip-onchain-check` is
+   left to `send`. A payout started from another account that never sent any
+   of it (a request rejected right away) moves to the account paying now;
+   never one with a transfer handed to a wallet and marked never sent, as a
+   request still open there could pay it.
    Also refused: a folder whose manifests name one file for two payouts (one
    file is one payout), and a payout with transfers `send` signed and did not
    settle (stop the page and finish it with `send`, which rebroadcasts them).
@@ -742,7 +751,9 @@ The page:
      confirmations: the approval of exactly the total, then the batch
      (`disperseTokenSimple`, which moves each amount from the account to its
      recipient, all or none, leaving nothing approved). One, when Disperse is
-     already allowed that much. The wallet shows the approval's amount and
+     already allowed exactly that much; any other amount it is allowed is set
+     to exactly the total first, so that no other batch (a request still open
+     in the wallet) could spend anything after this one. The wallet shows the approval's amount and
      spender, then one contract call: the transfers are the list on the page,
      and Disperse can only ever move the account's tokens when the account
      itself calls it.
@@ -761,7 +772,11 @@ The page:
    followed: the replacement pays it. The run stops at a rejection, at
    anything else the account sends meanwhile, and after the current
    transaction when asked to. A batch is settled, and decided on (its hash,
-   "never sent"), as one.
+   "never sent"), as one: only its own transaction, or the wallet's
+   replacement of it (same calldata), pays it. When other transactions of the
+   account paid some of its transfers meanwhile (a request approved late),
+   marking the batch as never sent records those as paid by them, and sends
+   only the rest anew.
 
 A browser wallet signs and broadcasts in one step, so the signed bytes cannot
 be saved first as `send` saves them. Nothing is ever settled but from the

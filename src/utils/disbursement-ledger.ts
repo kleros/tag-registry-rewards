@@ -55,6 +55,10 @@ export interface LedgerTransfer {
   // how many there were, and its place among them. They are settled as one.
   batch?: number
   batchIndex?: number
+  // How many times it was handed to a wallet and then marked as never sent
+  // by the operator: its record is never moved to another account, where a
+  // request still open could pay it.
+  neverSent?: number
   // The hash the wallet answered, before it was checked against the chain.
   reportedTxHash?: string
   // Hashes a browser wallet answered for it that are not its payment, kept as

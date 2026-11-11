@@ -1,8 +1,8 @@
 import { BigNumber } from "ethers"
-import { existsSync, readdirSync, readFileSync, statSync } from "fs"
-import { join, relative, resolve, sep } from "path"
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "fs"
+import { isAbsolute, join, relative, resolve, sep } from "path"
 import conf from "../config"
-import { readTransactionsFile, resolveSource, SendRefusedError } from "../send-routine"
+import { readTransactionsFile, resolveSource, SendRefusedError, transactionsFileName } from "../send-routine"
 import { GenerateManifest, RemovalsManifest } from "../types"
 import {
   contentId,
@@ -76,9 +76,16 @@ export const folderPayouts = (dir: string, records?: DisbursementRecord[]): Fold
     const source = resolveSource(file, dir)
     const period = periodLabel(source.periodStart, source.periodEnd)
     const base = { kind, file, period, transfers: 0, total: "0", status: "not paid" as FolderPayout["status"] }
-    // One file is one payout: named for two kinds (a manifest edited by hand),
-    // paying both would pay it twice.
-    const twin = files.slice(0, i).find((f) => f.file === file)
+    // One file is one payout: named for two kinds (a manifest edited by hand,
+    // in any spelling of the name), paying both would pay it twice.
+    const canonical = (name: string): string => {
+      try {
+        return transactionsFileName(name, dir)
+      } catch {
+        return name // missing: reported below
+      }
+    }
+    const twin = files.slice(0, i).find((f) => canonical(f.file) === canonical(file))
     if (twin) return { ...base, problem: `the manifests name ${file} for ${twin.kind} too: one file is one payout` }
     if (!existsSync(join(dir, file))) return { ...base, problem: `${file} is missing from the folder` }
     let transfers: { recipient: string; amount: BigNumber }[]
@@ -104,16 +111,17 @@ export const folderPayouts = (dir: string, records?: DisbursementRecord[]): Fold
 export const listPayoutFolders = (root: string = conf.FILES_DIR): PayoutFolder[] => {
   const base = resolve(root)
   const out: PayoutFolder[] = []
-  // Read once, outside the folders' own errors: an unreadable ledger stops the
-  // listing with its own message rather than hiding every folder.
-  let records: DisbursementRecord[] = []
+  // Read once, outside the folders' own errors: a ledger that cannot be read
+  // stops the listing with its own error, rather than showing paid payouts as
+  // not paid. (Without the chain's settings, each payout says so instead.)
+  let configured = true
   try {
     sendChainId()
     sendTokenAddress()
-    records = listDisbursements()
-  } catch (err) {
-    if (/\[disbursements\]/.test(String(err && (err as Error).message))) throw err
+  } catch {
+    configured = false
   }
+  const records: DisbursementRecord[] = configured ? listDisbursements() : []
   const visit = (dir: string, depth: number): void => {
     let payouts: FolderPayout[] = []
     try {
@@ -133,7 +141,8 @@ export const listPayoutFolders = (root: string = conf.FILES_DIR): PayoutFolder[]
       if (name.startsWith(".")) continue
       const path = join(dir, name)
       try {
-        if (statSync(path).isDirectory()) visit(path, depth + 1)
+        // a link is never followed: what is paid stays inside FILES_DIR
+        if (lstatSync(path).isDirectory()) visit(path, depth + 1)
       } catch {
         // gone in the meantime
       }
@@ -149,7 +158,13 @@ export const resolvePayoutFolder = (id: string, root: string = conf.FILES_DIR): 
   const folder = listPayoutFolders(root).find((f) => f.id === id)
   if (!folder) throw new SendRefusedError(`"${id}" is not a folder of ${root}/ with payouts to disburse`)
   const path = resolve(root, folder.id)
-  const inside = relative(resolve(root), path)
-  if (inside.startsWith(`..${sep}`) || inside === "..") throw new SendRefusedError(`"${id}" is outside ${root}/`)
+  // inside FILES_DIR, as the paths read and as the disk resolves them (links)
+  for (const [from, to] of [
+    [resolve(root), path],
+    [realpathSync.native(resolve(root)), realpathSync.native(path)],
+  ]) {
+    const inside = relative(from, to)
+    if (inside.startsWith(`..${sep}`) || inside === ".." || isAbsolute(inside)) throw new SendRefusedError(`"${id}" is outside ${root}/`)
+  }
   return path
 }

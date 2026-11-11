@@ -70,6 +70,7 @@
       mode: selectedMode(),
       unrelatedTxs: $("unrelated").value.split(/[\s,]+/).filter(Boolean),
       skipPaidOnChain: $("record-found").checked,
+      paidTxs: $("paid-elsewhere").value.split(/[\s,]+/).filter(Boolean),
     }
   }
   function selectedKinds() {
@@ -214,7 +215,13 @@
           })
         }
         never.onclick = function () {
-          if (!window.confirm("The wallet shows no request or transaction for " + P.formatPnk(u.amount) + " PNK to " + u.recipient + "?")) return
+          var what = u.batch
+            ? "the Disperse batch of " + u.batch + " transfers, " + P.formatPnkExact(u.total) + " PNK in total (one contract call to Disperse)"
+            : P.formatPnkExact(u.amount) + " PNK to " + u.recipient
+          var question =
+            "The wallet shows no request and no transaction for " + what + "?\n\nReject any it still shows first: approving it " +
+            "later would pay it then, on top of what is sent anew."
+          if (!window.confirm(question)) return
           run(async function () {
             var r = await controller.forget({ recordId: u.recordId, index: u.index })
             invalidate()
@@ -251,8 +258,8 @@
       wallet: wallet,
       api: api,
       chainId: overview.chainId,
+      token: overview.token,
       payer: overview.payer,
-      disperse: overview.disperse,
       events: {
         running: function () { refresh() },
         voided: function (event) {
@@ -270,12 +277,13 @@
             setRows(step, "in the batch: confirm in the wallet…", null, "busy")
             log(
               "Asking the wallet: pay all " + step.transfers.length + " transfers, " + P.formatPnkExact(step.total) + " PNK in total, " +
-                "in one Disperse transaction. The wallet shows one contract call: check its total against this one"
+                "in one contract call to Disperse (" + overview.disperse + "). If the wallet shows what leaves the account, it " +
+                "must be exactly that total; the transfers are the list below"
             )
             return
           }
           setRow(step.kind, step.index, "confirm in the wallet…", null, "busy")
-          log("Asking the wallet: " + P.formatPnk(step.amount) + " PNK to " + step.recipient + " (" + KIND_NAMES[step.kind] + " #" + (step.index + 1) + ")")
+          log("Asking the wallet: " + P.formatPnkExact(step.amount) + " PNK to " + step.recipient + " (" + KIND_NAMES[step.kind] + " #" + (step.index + 1) + ")")
         },
         unverified: function (step, hash) { setRows(step, "waiting for the RPC to see " + short(hash), null, "busy") },
         sent: function (step, sent) {
@@ -342,6 +350,7 @@
     }
     $("unrelated").oninput = invalidate
     $("record-found").onchange = invalidate
+    $("paid-elsewhere").oninput = invalidate
     Array.prototype.slice.call(document.querySelectorAll("input[name=mode]")).forEach(function (box) { box.onchange = invalidate })
     refresh()
   }

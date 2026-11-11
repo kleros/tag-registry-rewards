@@ -289,11 +289,31 @@ export class MockEvm {
     })
   }
 
+  // The gas a transaction uses here, near Gnosis's for PNK (whose transfers
+  // call its controller: one to a fresh address takes ~84k): a transaction
+  // given less runs out of gas, its nonce used, nothing done.
+  gasFor(to: string, data: string): number {
+    const target = String(to || "").toLowerCase()
+    if (target === this.token.toLowerCase()) return String(data).startsWith(erc20.getSighash("approve")) ? 50000 : 85000
+    if (target === DISPERSE && String(data).startsWith(disperseAbi.getSighash("disperseTokenSimple"))) {
+      try {
+        return 30000 + 65000 * disperseAbi.decodeFunctionData("disperseTokenSimple", data)[1].length
+      } catch {
+        return 30000
+      }
+    }
+    return 21000
+  }
+
   private execute(tx: PendingTx, blockNumber: number): MinedTx {
     this.nonces.set(tx.from, tx.nonce + 1)
     let status: 0 | 1 = 1
     const target = tx.to.toLowerCase()
-    if (target === this.token.toLowerCase() && tx.data.startsWith(erc20.getSighash("transfer"))) {
+    const outOfGas = !!tx.gasLimit && tx.gasLimit.lt(this.gasFor(tx.to, tx.data))
+    const valued = !!tx.value && !BigNumber.from(tx.value).isZero()
+    if (outOfGas || (valued && (target === this.token.toLowerCase() || target === DISPERSE))) {
+      status = 0 // out of gas, or native value to contracts that take none
+    } else if (target === this.token.toLowerCase() && tx.data.startsWith(erc20.getSighash("transfer"))) {
       const [to, amount] = erc20.decodeFunctionData("transfer", tx.data)
       const value = BigInt(amount.toString())
       const balance = this.tokenBalance(tx.from)
@@ -319,6 +339,8 @@ export class MockEvm {
       status = 0 // a function the token does not have
     } else if (target === DISPERSE && tx.data.startsWith(disperseAbi.getSighash("disperseTokenSimple"))) {
       if (!this.disperse(tx.from, tx.data, { blockNumber, hash: tx.hash })) status = 0
+    } else if (target === DISPERSE) {
+      status = 0 // Disperse has no fallback
     }
     const mined = { ...tx, blockNumber, status }
     this.mined.set(tx.hash, mined)
@@ -439,7 +461,7 @@ export class MockEvm {
         }
       }
       case "eth_getTransactionByHash": {
-        const hash = String(params[0])
+        const hash = String(params[0]).toLowerCase()
         const tx = this.mined.get(hash) || this.mempool.find((p) => p.hash === hash)
         if (!tx) return null
         return {
@@ -474,8 +496,13 @@ export class MockEvm {
       case "eth_gasPrice":
       case "eth_maxPriorityFeePerGas":
         return hex(1000000000)
-      case "eth_estimateGas":
-        return hex(60000)
+      case "eth_estimateGas": {
+        // what the call would use, or its revert, as a node estimates
+        const call = params[0] || {}
+        const target = String(call.to || "").toLowerCase()
+        if (target === this.token.toLowerCase() || target === DISPERSE) this.handle("eth_call", [call, "latest"])
+        return hex(this.gasFor(call.to, call.data || "0x"))
+      }
       default:
         throw { code: -32601, message: `method ${method} not mocked` }
     }

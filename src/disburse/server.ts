@@ -78,6 +78,7 @@ export const createDisburseServer = (session: DisburseSession, opts: { token?: s
         account: String(b.account || ""),
         unrelatedTxs: Array.isArray(b.unrelatedTxs) ? b.unrelatedTxs.map(String) : [],
         skipPaidOnChain: b.skipPaidOnChain === true,
+        paidTxs: Array.isArray(b.paidTxs) ? b.paidTxs.map(String) : [],
         mode: String(b.mode || ""),
       }),
     "/api/next": (b) => session.next({ checkId: String(b.checkId || "") }),

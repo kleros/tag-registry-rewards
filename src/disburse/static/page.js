@@ -23,6 +23,9 @@
   var TRANSFER = "0xa9059cbb" // transfer(address,uint256)
   var APPROVE = "0x095ea7b3" // approve(address,uint256)
   var DISPERSE_TOKEN_SIMPLE = "0x51ba162c" // disperseTokenSimple(address,address[],uint256[])
+  // Disperse (disperse.app): the only contract this page pays through, wherever
+  // the server says it is.
+  var DISPERSE = "0xd152f549545093347a162dce210e7293f1452150"
 
   // An amount of wei as PNK, with thousands separators and `decimals` decimals.
   function formatPnk(wei, decimals) {
@@ -93,6 +96,12 @@
         headers: headers,
         body: JSON.stringify(body || {}),
       })
+      if (response.status === 403) {
+        throw new Error(
+          "The page's server refused this page (HTTP 403): open the whole link the terminal printed for this run " +
+            "(its key, after #, changes every time the page is started)"
+        )
+      }
       var json
       try {
         json = await response.json()
@@ -122,10 +131,10 @@
    * The page's session: Check, then Disburse, which runs only right after a
    * Check that no change of the wallet's account or chain interrupted, and
    * hands the wallet one transfer at a time until every chosen payout is paid
-   * or something stops it. `options`: wallet (EIP-1193), api, chainId, payer
-   * (SEND_FROM, or null), disperse (Disperse's address, from the overview),
-   * events ({ running, voided, asking, sent, unverified, waiting, confirmed,
-   * stopped, done }), sleep (for the suite).
+   * or something stops it. `options`: wallet (EIP-1193), api, chainId, token
+   * (PNK's address, from the overview), payer (SEND_FROM, or null), events
+   * ({ running, voided, asking, sent, unverified, waiting, confirmed, stopped,
+   * done }), sleep (for the suite).
    */
   function createController(options) {
     var wallet = options.wallet
@@ -134,7 +143,12 @@
     var sleep = options.sleep || function (ms) { return new Promise(function (resolve) { setTimeout(resolve, ms) }) }
     var emit = function (name) {
       var args = Array.prototype.slice.call(arguments, 1)
-      if (events[name]) events[name].apply(null, args)
+      try {
+        if (events[name]) events[name].apply(null, args)
+      } catch (error) {
+        // drawing the page must never break the run's bookkeeping
+        if (typeof console !== "undefined") console.error(error)
+      }
     }
     var checked = null // the last check, while it may be used
     var expected = null // the account and chain it was made for
@@ -207,12 +221,13 @@
     // value, the chain's id. Returns the transaction to hand the wallet, built
     // from the plan: nothing else the server sent goes to the wallet.
     function verifyStep(plan, step, handed) {
+      if (step.state !== "send") throw new Error("The server asked for a " + step.state + " step, not a transfer")
       var payout = plan.payouts.filter(function (p) { return p.kind === step.kind && !p.refusal })[0]
       var row = payout && payout.transfers[step.index]
       if (!row || !sameAddress(row.recipient, step.recipient) || row.amount !== step.amount) {
         throw new Error("The server asked for a transfer that is not in the checked plan")
       }
-      if (row.status === "confirmed") throw new Error("The server asked for a transfer the check showed as paid already")
+      if (row.status !== "pending" && row.status !== "failed") throw new Error("The server asked for a transfer the check showed as " + row.status)
       var key = step.kind + ":" + step.index
       if (handed[key]) throw new Error("The server asked for a transfer handed to the wallet already in this run")
       var tx = step.tx || {}
@@ -231,16 +246,49 @@
       }
     }
 
-    // The checked plan's rows still to pay, in the order Disperse pays them.
+    // The checked plan's rows still to pay (pending, or reverted before), in
+    // the order Disperse pays them.
     function openRows(plan) {
       var rows = []
       plan.payouts.forEach(function (p) {
         if (p.refusal) return
         p.transfers.forEach(function (t) {
-          if (t.status !== "confirmed") rows.push({ kind: p.kind, index: t.index, recipient: t.recipient, amount: t.amount })
+          if (t.status === "pending" || t.status === "failed") rows.push({ kind: p.kind, index: t.index, recipient: t.recipient, amount: t.amount })
         })
       })
       return rows
+    }
+
+    // Why a check's answer does not hold together, or "": it must be for the
+    // account, chain, token and way of paying asked, every row of it paid or
+    // ready to send, and its total that of the rows to send.
+    function planProblem(result, account, mode) {
+      if (!sameAddress(result.account, account)) return "it is for " + result.account + ", not " + account
+      if (result.mode !== mode) return "it pays with " + result.mode + ", not " + mode
+      if (Number(result.chainId) !== options.chainId) return "it is for chain " + result.chainId + ", not " + options.chainId
+      if (options.token && !sameAddress(result.token, options.token)) return "its token is " + result.token + ", not " + options.token
+      if (mode === "disperse" && !(result.disperse && sameAddress(result.disperse.address, DISPERSE))) return "it names no Disperse, or another one"
+      var due = BigInt(0)
+      var odd = ""
+      result.payouts.forEach(function (p) {
+        if (p.refusal) {
+          if (p.transfers.length > 0) odd = "a refused payout lists transfers"
+          return
+        }
+        p.transfers.forEach(function (t) {
+          if (t.status === "pending" || t.status === "failed") due += BigInt(t.amount)
+          else if (t.status !== "confirmed") odd = "a transfer of it is " + t.status
+        })
+      })
+      if (odd) return odd
+      if (due !== BigInt(result.due)) return "its total " + result.due + " is not its rows' " + due
+      return ""
+    }
+
+    // Rows of the plan not handed to the wallet yet in this run.
+    function rowsLeft(plan, handed, batch) {
+      if (batch) return handed.disperse ? 0 : openRows(plan).length
+      return openRows(plan).filter(function (r) { return !handed[r.kind + ":" + r.index] }).length
     }
 
     function sameTx(server, built) {
@@ -261,15 +309,15 @@
     // once in a run. Returns the transaction to hand the wallet, built from the
     // plan.
     function verifyBatchStep(plan, step, handed) {
-      var spender = plan.disperse && plan.disperse.address
-      if (!spender || (options.disperse && !sameAddress(spender, options.disperse))) {
+      var spender = DISPERSE
+      if (!plan.disperse || !sameAddress(plan.disperse.address, DISPERSE)) {
         throw new Error("The check names no Disperse, or not the one this page knows")
       }
       var rows = openRows(plan)
       var total = rows.reduce(function (sum, r) { return sum + BigInt(r.amount) }, BigInt(0))
       var chainId = "0x" + plan.chainId.toString(16)
       if (step.state === "approve") {
-        if (handed.approve) throw new Error("The server asked for a second approval in this run")
+        if (handed.approve || handed.disperse) throw new Error("The server asked for an approval again in this run")
         if (!sameAddress(step.spender, spender)) throw new Error("The server asked to approve " + step.spender + ", not Disperse (" + spender + ")")
         if (BigInt(step.amount) !== total) throw new Error("The server asked to approve " + step.amount + ", not the checked total " + total)
         var approve = { from: plan.account, to: plan.token, data: approveData(spender, total), value: "0x0", chainId: chainId }
@@ -298,26 +346,33 @@
       return disperse
     }
 
-    // `extra`: { unrelatedTxs, skipPaidOnChain }, send's --unrelated-tx and
-    // --skip-paid-on-chain for the transfers the check finds on-chain.
+    // `extra`: { mode: "disperse" or "transfers", unrelatedTxs, skipPaidOnChain,
+    // paidTxs }: how to pay, and send's --unrelated-tx, --skip-paid-on-chain and
+    // --paid-tx for the transfers the check finds on-chain.
     async function check(folder, kinds, extra) {
       if (running) throw new Error("Disbursing right now: stop it first")
       checked = null
       expected = null
+      var before = changes
       var account = await walletReady(null)
       expected = { account: account }
-      var before = changes
-      var options = extra || {}
+      var choice = extra || {}
+      var mode = choice.mode === "disperse" ? "disperse" : "transfers"
       var result = await api.check({
         folder: folder,
         kinds: kinds,
         account: account,
-        unrelatedTxs: options.unrelatedTxs || [],
-        skipPaidOnChain: !!options.skipPaidOnChain,
-        mode: options.mode === "disperse" ? "disperse" : "transfers",
+        unrelatedTxs: choice.unrelatedTxs || [],
+        skipPaidOnChain: !!choice.skipPaidOnChain,
+        paidTxs: choice.paidTxs || [],
+        mode: mode,
       })
       if (changes !== before) throw new Error("The wallet's account or chain changed during the check: Check again")
-      if (result.checkId) checked = result
+      if (result.checkId) {
+        var problem = planProblem(result, account, mode)
+        if (problem) throw new Error("The server's check does not hold together (" + problem + "): Check again")
+        checked = result
+      }
       return result
     }
 
@@ -396,12 +451,20 @@
             await walletReady(plan.account)
           } catch (error) {
             // the wallet was never asked: nothing was sent
-            var cleared = await api.rejected({ requestId: step.requestId })
-            emit("stopped", error.message + (cleared.state === "cleared" ? "" : ". " + cleared.message))
+            var note = ""
+            try {
+              var cleared = await api.rejected({ requestId: step.requestId })
+              if (cleared.state !== "cleared") note = ". " + cleared.message
+            } catch (again) {
+              note = ". " + ((again && again.message) || String(again))
+            }
+            emit("stopped", error.message + note)
             return null
           }
           if (!(await runStep(step, tx))) return null
-          if (stopAfter && step.state !== "approve") {
+          // Stopped (or the wallet's account or chain changed): nothing more is
+          // handed out. With nothing left, the server still closes the payouts.
+          if (stopAfter && rowsLeft(plan, handed, batch) > 0) {
             emit("stopped", "Stopped after this one: Check again, then Disburse, for the rest")
             return null
           }

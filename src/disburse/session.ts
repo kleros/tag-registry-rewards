@@ -82,8 +82,10 @@ const REPEAT_DAYS = 45
 export const MAX_BATCH = 150
 // send's refusals name its flags; the page has two of them.
 const PAGE_OPTIONS =
-  "\n(On this page, --unrelated-tx and --skip-paid-on-chain are the two options under \"Transfers the check finds already " +
-  "on-chain\"; --skip-onchain-check is only in yarn start --mode send.)"
+  "\n(On this page, --unrelated-tx, --skip-paid-on-chain and --paid-tx are the options under \"Transfers the check finds " +
+  "already on-chain\"; --skip-onchain-check is only in yarn start --mode send.)"
+// A transaction hash, or a hash and a recipient (one transfer of a batch).
+const NAMED = /^0x[0-9a-f]{64}(:0x[0-9a-f]{40})?$/
 
 export type PayMode = "transfers" | "disperse"
 
@@ -174,6 +176,13 @@ export type Receipt =
   | { state: "confirmed"; hash: string; block: number; url: string | null; note?: string }
   | { state: "reverted"; hash: string; message: string }
   | { state: "stopped"; message: string }
+
+// A batch settled from the chain (`found`: by its Transfer logs, its answer
+// lost), or left open: to wait for, or for the operator to decide.
+type BatchOutcome =
+  | { state: "confirmed"; hash: string; block: number; url: string | null; note?: string; found: boolean }
+  | { state: "reverted"; hash: string; message: string }
+  | { state: "open"; wait: boolean; hash?: string; message: string; actions: ("hash" | "forget")[] }
 
 interface PlanPayout {
   kind: DisbursementKind
@@ -311,6 +320,9 @@ const saveAll = (members: Member[]): void => {
   for (const record of Array.from(new Set(members.map((m) => m.record)))) saveDisbursement(record)
 }
 
+// The wallet answered something for it: a hash, a transaction.
+const answered = (t: LedgerTransfer): boolean => !!(t.reportedTxHash || t.txHash || (t.attempts || []).length)
+
 const paidHashes = (t: LedgerTransfer): string[] =>
   (t.attempts || []).concat(t.txHash ? [t.txHash] : []).map((h) => h.toLowerCase())
 
@@ -342,6 +354,7 @@ const untouched = (t: LedgerTransfer): boolean =>
   !(t.revertedTxs || []).length &&
   !(t.forgottenTxs || []).length &&
   !(t.strayTxs || []).length &&
+  !t.neverSent &&
   !t.foundOnChain
 
 // The transfers handed out with the record's transfer at `index`: itself, or
@@ -393,6 +406,7 @@ export class DisburseSession {
     account: string
     unrelatedTxs?: string[]
     skipPaidOnChain?: boolean
+    paidTxs?: string[]
     mode?: string
   }): Promise<CheckResult> {
     // A check starts over (the page reloaded, or another tab checks): what is
@@ -413,10 +427,15 @@ export class DisburseSession {
     for (const kind of kinds) {
       if (!available.some((p) => p.kind === kind)) throw new SendRefusedError(`${input.folder} has no ${kind} payout`)
     }
-    const unrelatedTxs = (input.unrelatedTxs || []).map((h) => String(h).trim().toLowerCase()).filter(Boolean)
-    for (const hash of unrelatedTxs) {
-      if (!HASH.test(hash)) throw new SendRefusedError(`"${hash}" is not a transaction hash (0x and 64 hex digits)`)
+    const named = (values: string[] | undefined): string[] => {
+      const out = (values || []).map((h) => String(h).trim().toLowerCase()).filter(Boolean)
+      for (const value of out) {
+        if (!NAMED.test(value)) throw new SendRefusedError(`"${value}" is not a transaction hash (0x and 64 hex digits), nor a hash and a recipient (0x…:0x…)`)
+      }
+      return out
     }
+    const unrelatedTxs = named(input.unrelatedTxs)
+    const paidTxs = named(input.paidTxs)
     const skipPaidOnChain = !!input.skipPaidOnChain
     const mode: PayMode = input.mode === "disperse" ? "disperse" : "transfers"
 
@@ -456,7 +475,7 @@ export class DisburseSession {
         if (listed.problem) throw new SendRefusedError(`Refusing to send: ${listed.problem}`)
         if (blocking.length > 0) throw new SendRefusedError("Settle the transfers handed to a wallet before (listed above) first")
         const result = await sendRoutine(
-          { file, filesDir: dir, dryRun: true, from: account, unrelatedTxs, skipPaidOnChain, walletFees: true },
+          { file, filesDir: dir, dryRun: true, from: account, unrelatedTxs, skipPaidOnChain, paidTxs, walletFees: true },
           { chain, log: (line) => lines.push(line) }
         )
         const record = result.record as DisbursementRecord
@@ -471,7 +490,7 @@ export class DisburseSession {
         }
         const twin = planned.find((q) => q.record.id === record.id)
         if (twin) throw new SendRefusedError(`Refusing to send: it is the very payout ${twin.kind} pays (${twin.file}): one payout is paid once`)
-        this.keepSettled(record, skipPaidOnChain, notes)
+        this.keepSettled(record, skipPaidOnChain || paidTxs.length > 0, notes)
         const open = record.transfers.filter((t) => t.status !== "confirmed")
         payouts.push({
           kind,
@@ -542,17 +561,16 @@ export class DisburseSession {
           problems.push(`${count} transfers are more than one Disperse transaction pays here (${MAX_BATCH}): untick a payout, or pay one transaction per transfer`)
         }
         const allowance = await chain.tokenAllowance(DISPERSE_ADDRESS)
-        const confirmations = allowance.gte(due) ? 1 : 2
+        const confirmations = allowance.eq(due) ? 1 : 2
         disperse = { address: DISPERSE_ADDRESS, allowance: allowance.toString(), confirmations }
         if (count > 0) {
           notes.push(
             confirmations === 1
-              ? `Disperse is already allowed ${pnk(allowance)}: one confirmation pays all ${count} transfers`
-              : `Two confirmations: approve Disperse (${DISPERSE_ADDRESS}) for exactly ${pnk(due)}, then pay all ${count} transfers in one transaction`
+              ? `Disperse is already allowed exactly ${pnk(allowance)}: one confirmation pays all ${count} transfers`
+              : `Two confirmations: approve Disperse (${DISPERSE_ADDRESS}) for exactly ${pnk(due)}` +
+                  (allowance.gt(ZERO) ? ` (it is allowed ${pnk(allowance)} now)` : "") +
+                  `, then pay all ${count} transfers in one transaction`
           )
-          if (allowance.gt(due)) {
-            notes.push(`${pnk(allowance.sub(due))} stays allowed to Disperse after it: only this account can ever use that, by calling Disperse itself`)
-          }
         }
       }
     }
@@ -795,10 +813,12 @@ export class DisburseSession {
       throw new SendRefusedError(`${plan.account} holds ${pnk(balance)}, less than the ${pnk(total)} to send: Check again`)
     }
     const requestId = randomId()
-    if (allowance.lt(total)) {
-      // Exactly the total: what this batch spends, nothing left allowed once
-      // it is paid. An approval pays no one, so the ledger does not record it:
-      // the next check reads what Disperse is allowed.
+    if (!allowance.eq(total)) {
+      // Exactly the total, whatever Disperse was allowed before: what this
+      // batch spends, nothing left allowed once it is paid, so that no other
+      // batch (a request still open in the wallet) can spend anything after
+      // it. An approval pays no one, so the ledger does not record it: the
+      // next check reads what Disperse is allowed.
       const data = approveCalldata(DISPERSE_ADDRESS, total)
       try {
         await chain.simulateCall(token, data, `approve(Disperse, ${total.toString()})`)
@@ -870,7 +890,13 @@ export class DisburseSession {
     if (!HASH.test(hash)) throw new SendRefusedError(`"${input.hash}" is not a transaction hash`)
     const a = this.active && this.active.requestId === String(input.requestId) ? this.active : null
     if (!a) return this.lateAnswer(String(input.requestId), hash)
-    if (a.hash && a.hash !== hash) throw new SendRefusedError(`The wallet answered ${a.hash} for this already`)
+    if (a.hash && a.hash !== hash) {
+      // kept all the same: every hash a wallet gives is evidence
+      const fresh = a.members.filter((m) => !(m.t.strayTxs || []).includes(hash))
+      for (const m of fresh) m.t.strayTxs = union(m.t.strayTxs, [hash])
+      if (fresh.length > 0) saveAll(fresh)
+      throw new SendRefusedError(`The wallet answered ${a.hash} for this already, and now ${hash}: both are recorded. Check again.`)
+    }
     const chainId = sendChainId()
     const url = explorerTxUrl(chainId, hash)
     if (!a.hash) {
@@ -956,6 +982,9 @@ export class DisburseSession {
     const first = members[0].t
     const label = members.length > 1 || issued.kind === "disperse" ? `the batch of ${members.length} transfers (${pnk(sumOf(members))})` : `${pnk(first.amount)} to ${first.recipient}`
     const one = members.length > 1 || issued.kind === "disperse" ? "the batch" : "the transfer"
+    if (members.every((m) => isRequested(m.t) && m.t.requestId === requestId && m.t.reportedTxHash === hash)) {
+      throw new SendRefusedError(`The wallet's answer ${hash} for ${label} is recorded already. Check again: the check settles it from the chain.`)
+    }
     if (members.every((m) => isRequested(m.t) && m.t.requestId === requestId && !m.t.reportedTxHash)) {
       for (const m of members) m.t.reportedTxHash = hash
       saveAll(members)
@@ -1002,6 +1031,13 @@ export class DisburseSession {
       const outcome = a.kind === "approve" ? await this.settleApproval(chain, a) : await this.settleMembers(chain, a.members)
       if (outcome.state === "confirmed") {
         this.active = null
+        for (const record of Array.from(new Set(a.members.map((m) => m.record)))) {
+          if (record.status !== "completed" && record.transfers.every((t) => t.status === "confirmed")) {
+            record.status = "completed"
+            record.completedAt = new Date().toISOString()
+            saveDisbursement(record)
+          }
+        }
         if (this.plan) {
           // the wallet used the nonce it was expected to: what follows may follow
           const used = a.kind === "approve" ? a.txNonce : a.members[0].t.nonce
@@ -1065,7 +1101,8 @@ export class DisburseSession {
   // --- settling what the chain does not settle on its own -----------------
 
   // The transfer at `index` and those handed out with it (its batch), each
-  // handed to a wallet and waiting to be settled.
+  // handed to a wallet and waiting to be settled. Only part of a batch when
+  // the page stopped while recording it: then it never reached the wallet.
   private walletMembers(recordId: string, index: number): Member[] {
     const record = this.ledgerRecord(String(recordId))
     if (!record) throw new SendRefusedError("No such payout in the ledger")
@@ -1081,7 +1118,7 @@ export class DisburseSession {
         throw new SendRefusedError("That transfer is with the wallet right now: answer it there first")
       }
     }
-    if (t.batch && members.length !== t.batch) {
+    if (t.batch && members.length !== t.batch && members.some((m) => answered(m.t))) {
       throw new SendRefusedError(
         `Only ${members.length} of the batch's ${t.batch} transfers are in the ledger as handed to the wallet: restore ` +
           "disbursements/ from git"
@@ -1095,7 +1132,7 @@ export class DisburseSession {
   async recordHash(input: { recordId: string; index: number; hash: string }): Promise<{ state: string; message: string }> {
     const members = this.walletMembers(input.recordId, input.index)
     const first = members[0]
-    const one = members.length > 1 || first.t.batch ? "batch" : "transfer"
+    const one = first.t.batch ? "batch" : "transfer"
     const hash = String(input.hash || "").toLowerCase()
     if (!HASH.test(hash)) throw new SendRefusedError(`"${input.hash}" is not a transaction hash`)
     const chain = this.chain(first.record.from)
@@ -1112,15 +1149,15 @@ export class DisburseSession {
     let stray: string | null = null
     const reported = first.t.reportedTxHash ? first.t.reportedTxHash.toLowerCase() : null
     if (reported && reported !== hash) {
-      const answered = await chain.transactionDetails(reported)
-      const answeredWrong = answered
-        ? transferMismatch(answered, { ...expected, from: first.record.from, chainId: first.record.chainId, minNonce: first.t.requestedNonce })
+      const answeredTx = await chain.transactionDetails(reported)
+      const answeredWrong = answeredTx
+        ? transferMismatch(answeredTx, { ...expected, from: first.record.from, chainId: first.record.chainId, minNonce: first.t.requestedNonce })
         : ""
-      if (answered && !answeredWrong) throw new SendRefusedError(`The wallet answered ${reported} for it, which is this ${one}: Check again, which settles it`)
-      if (answered && answered.blockNumber === null) {
+      if (answeredTx && !answeredWrong) throw new SendRefusedError(`The wallet answered ${reported} for it, which is this ${one}: Check again, which settles it`)
+      if (answeredTx && answeredTx.blockNumber === null) {
         throw new SendRefusedError(`The wallet answered ${reported} for it, which is not mined yet: wait until it is, then decide`)
       }
-      if (!answered && tx.blockNumber === null) {
+      if (!answeredTx && tx.blockNumber === null) {
         throw new SendRefusedError(
           `The wallet answered ${reported} for it, which the RPC does not know: ${hash} is taken for it once mined (wait for it), ` +
             "when no other transaction of the account can still use its nonce"
@@ -1128,11 +1165,15 @@ export class DisburseSession {
       }
       stray = reported
     }
-    for (const m of members) {
-      const payment = await this.paymentSince(chain, m.record, m.t, hash)
+    // A transfer paid by another transaction since it was handed out: the
+    // check records that one. (A batch's own transaction is taken all the
+    // same: a payment of one of its transfers by another one is then a second
+    // payment, which the check reports.)
+    if (!first.t.batch) {
+      const payment = await this.paymentSince(chain, first.record, first.t, hash)
       if (payment) {
         throw new SendRefusedError(
-          `${payment.txHash} (block ${payment.blockNumber}) already pays ${pnk(m.t.amount)} to ${m.t.recipient}: Check again, which records it.` +
+          `${payment.txHash} (block ${payment.blockNumber}) already pays it: Check again, which records it.` +
             (tx.blockNumber !== null ? ` ${hash} is mined too: the recipient was paid twice.` : "")
         )
       }
@@ -1171,13 +1212,17 @@ export class DisburseSession {
 
   // The operator says the wallet never sent it (a transfer, or its batch), or
   // that its transaction is gone. Taken only when the chain cannot contradict
-  // it: nothing of the account's pending, no payment of any of it since it was
-  // handed out, its own transaction (if any) past mining (its nonce used by
-  // another), and a hash the wallet answered for it either mined as another
-  // transaction, or unknown to the node with the account's nonce moved on.
+  // it: nothing of the account's pending, no payment of it since it was handed
+  // out (for a batch: the batch itself never mined), its own transaction (if
+  // any) past mining (its nonce used by another), and a hash the wallet
+  // answered for it either mined as another transaction, or unknown to the
+  // node with the account's nonce moved on. A batch's transfers paid by other
+  // transactions of the account since (a request approved late) are recorded
+  // as paid by those; only the rest is marked never sent.
   async forget(input: { recordId: string; index: number }): Promise<{ state: "cleared"; message: string }> {
     const members = this.walletMembers(input.recordId, input.index)
     const first = members[0]
+    const batch = !!first.t.batch
     const from = first.record.from
     const chain = this.chain(from)
     const [latest, pending] = await Promise.all([chain.nonce("latest"), chain.nonce("pending")])
@@ -1191,7 +1236,7 @@ export class DisburseSession {
       const wrong = tx
         ? transferMismatch(tx, { ...expectedFor(members), from, chainId: first.record.chainId, minNonce: first.t.requestedNonce })
         : ""
-      if (tx && !wrong) throw new SendRefusedError(`The wallet answered ${reported} for it, which is this ${members.length > 1 ? "batch" : "transfer"}: Check again, which settles it`)
+      if (tx && !wrong) throw new SendRefusedError(`The wallet answered ${reported} for it, which is this ${batch ? "batch" : "transfer"}: Check again, which settles it`)
       if (tx && tx.blockNumber === null) {
         throw new SendRefusedError(`The wallet answered ${reported} for it, which is not mined yet: wait until it is, then decide`)
       }
@@ -1203,11 +1248,21 @@ export class DisburseSession {
       }
       if (tx) stray = reported // mined, and another transaction than this
     }
-    for (const m of members) {
-      const payment = await this.paymentSince(chain, m.record, m.t)
+    let paidElsewhere: { member: Member; txHash: string; blockNumber: number }[] = []
+    if (batch) {
+      const found = await this.batchPayment(chain, members)
+      if (found.batchTx) {
+        throw new SendRefusedError(
+          `Not forgetting it: ${found.batchTx.txHash} (block ${found.batchTx.blockNumber}) is the batch itself, mined. Check again: ` +
+            "the check records it."
+        )
+      }
+      paidElsewhere = found.others
+    } else {
+      const payment = await this.paymentSince(chain, first.record, first.t)
       if (payment) {
         throw new SendRefusedError(
-          `Not forgetting it: ${payment.txHash} (block ${payment.blockNumber}) pays ${m.t.recipient} exactly this amount since the ` +
+          `Not forgetting it: ${payment.txHash} (block ${payment.blockNumber}) pays ${first.t.recipient} exactly this amount since the ` +
             "transfer was handed to the wallet. Check again: the check records it."
         )
       }
@@ -1223,20 +1278,35 @@ export class DisburseSession {
       )
     }
     for (const m of members) {
+      const other = paidElsewhere.find((o) => o.member === m)
+      if (other) {
+        // paid by another transaction of the account: recorded as such, out of the batch
+        this.recordPayment(m.record, m.t, { txHash: other.txHash, blockNumber: other.blockNumber, nonce: null })
+        delete m.t.batch
+        delete m.t.batchIndex
+        continue
+      }
       const own = paidHashes(m.t).concat(m.t.reportedTxHash && !stray ? [m.t.reportedTxHash.toLowerCase()] : [])
       if (own.length > 0) m.t.forgottenTxs = union(m.t.forgottenTxs, own)
       if (stray) m.t.strayTxs = union(m.t.strayTxs, [stray])
       clearTransaction(m.t)
       m.t.status = "pending"
+      // handed to a wallet once: its record is never moved to another account
+      m.t.neverSent = (m.t.neverSent || 0) + 1
     }
     saveAll(members)
     this.plan = null
+    const rest = members.length - paidElsewhere.length
     return {
       state: "cleared",
-      message:
-        members.length > 1
-          ? `The batch's ${members.length} transfers are marked as never sent: Check again to send them`
-          : `${first.t.recipient}'s transfer is marked as never sent: Check again to send it`,
+      message: !batch
+        ? `${first.t.recipient}'s transfer is marked as never sent: Check again to send it`
+        : `The batch's ${rest} transfer(s) are marked as never sent: Check again to send them` +
+          (paidElsewhere.length > 0
+            ? `. ${paidElsewhere.length} of its transfers were paid by other transactions of the account since it was handed ` +
+              `out (${paidElsewhere.map((o) => `${pnk(o.member.t.amount)} to ${o.member.t.recipient}: ${o.txHash}`).join("; ")}): ` +
+              "recorded as paid by them."
+            : ""),
     }
   }
 
@@ -1351,18 +1421,222 @@ export class DisburseSession {
     }
   }
 
-  // Transfers sent in one transaction (one, or a batch), settled together:
-  // what one of them shows is what the transaction did.
+  // Transfers sent in one transaction (one, or a batch), settled together.
   private async settleMembers(chain: SendChain, members: Member[]): Promise<Receipt> {
-    const first = await this.settleSent(chain, members[0].record, members[0].t)
-    if (first.state === "pending") return first
-    const outcomes: Receipt[] = [first]
-    for (const m of members.slice(1)) outcomes.push(await this.settleSent(chain, m.record, m.t))
-    for (const state of ["pending", "reverted", "stopped"]) {
-      const outcome = outcomes.find((o) => o.state === state)
-      if (outcome) return outcome
+    if (!members[0].t.batch) return this.settleSent(chain, members[0].record, members[0].t)
+    const outcome = await this.settleBatch(chain, members)
+    if (outcome.state === "open") {
+      return outcome.wait ? { state: "pending", hash: String(outcome.hash || members[0].t.txHash || "") } : { state: "stopped", message: outcome.message }
     }
-    return first
+    return outcome
+  }
+
+  // A Disperse batch, settled from the chain as one: by its own transaction,
+  // its receipt or its Transfer logs, or by the wallet's replacement of it
+  // (from the account, to Disperse, with exactly its calldata, a nonce from
+  // the hand-out's on). Never transfer by transfer by other transactions:
+  // those pay what they name, not the batch, and are left to the operator.
+  private async settleBatch(chain: SendChain, members: Member[]): Promise<BatchOutcome> {
+    const first = members[0]
+    const from = first.record.from
+    const chainId = first.record.chainId
+    const expected = expectedFor(members)
+    const isBatch = (tx: TransactionDetails | null): tx is TransactionDetails =>
+      !!tx && !transferMismatch(tx, { ...expected, from, chainId, minNonce: first.t.requestedNonce })
+    const confirmAll = (payment: { txHash: string; blockNumber: number; nonce: number | null }, found: boolean, note?: string): BatchOutcome => {
+      for (const m of members) this.recordPayment(m.record, m.t, payment)
+      return {
+        state: "confirmed",
+        hash: payment.txHash,
+        block: payment.blockNumber,
+        url: explorerTxUrl(chainId, payment.txHash),
+        found,
+        ...(note ? { note } : {}),
+      }
+    }
+    const elsewhere = (others: { member: Member; txHash: string; blockNumber: number }[]): string =>
+      others.length === 0
+        ? ""
+        : ` Meanwhile ${others.map((o) => `${o.txHash} (block ${o.blockNumber}) paid ${pnk(o.member.t.amount)} to ${o.member.t.recipient}`).join("; ")}, ` +
+          "by transactions that are not the batch (a request approved late?): marking the batch as never sent records those " +
+          "as paid by them, and sends only the rest anew."
+    // The wallet's answer, once the chain shows it is the batch.
+    if (isRequested(first.t) && first.t.reportedTxHash) {
+      const tx = await chain.transactionDetails(first.t.reportedTxHash)
+      if (isBatch(tx)) this.markSent(members, String(first.t.reportedTxHash), tx.nonce)
+    }
+    if (first.t.status === "sent") {
+      const hash = String(first.t.txHash)
+      const byReceipt = async (): Promise<BatchOutcome | null> => {
+        const outcomes: string[] = []
+        for (const m of members) outcomes.push(await settle(chain, m.t))
+        if (outcomes.every((o) => o === "pending")) return null
+        saveAll(members)
+        if (outcomes.includes("reverted")) {
+          for (const m of members) {
+            // one transaction for all: reverted for all
+            if (m.t.status !== "failed") {
+              m.t.revertedTxs = union(m.t.revertedTxs, [hash])
+              clearTransaction(m.t)
+              m.t.status = "failed"
+            }
+          }
+          saveAll(members)
+          return { state: "reverted", hash, message: `${hash} reverted: nothing was paid by it. Check again to send the batch anew.` }
+        }
+        return { state: "confirmed", hash: String(first.t.txHash), block: Number(first.t.blockNumber), url: explorerTxUrl(chainId, String(first.t.txHash)), found: false }
+      }
+      const settled = await byReceipt()
+      if (settled) return settled
+      const latest = await chain.nonce("latest")
+      if (first.t.nonce === undefined || latest <= first.t.nonce) {
+        const known = await chain.transactionDetails(hash)
+        return known
+          ? { state: "open", wait: true, hash, message: `its transaction ${hash} is not mined yet: wait for it (or speed it up in the wallet), then Check again`, actions: [] }
+          : {
+              state: "open",
+              wait: true,
+              hash,
+              message:
+                `its transaction ${hash} is not mined, and the RPC no longer knows it (dropped?), but its nonce ${first.t.nonce} is ` +
+                "free, so it may still be sent. If the wallet shows another transaction for it (sped up), give that one's hash. " +
+                `Otherwise cancel it in the wallet, or send any transaction from ${from} with nonce ${first.t.nonce} (a 0-value one ` +
+                "to itself), then Check again: it can then be marked as never sent.",
+              actions: ["hash"],
+            }
+      }
+      // Its nonce is used: by it, its receipt not served yet, or by a replacement.
+      const pollMs = envInt("SEND_POLL_MS", 2000) || 2000
+      for (let tries = 0; tries < 3; tries++) {
+        await sleep(pollMs)
+        const again = await byReceipt()
+        if (again) return again
+      }
+      const found = await this.batchPayment(chain, members)
+      if (found.batchTx) {
+        return confirmAll(found.batchTx, false, found.batchTx.own ? undefined : `paid by ${found.batchTx.txHash}, the wallet's replacement of ${hash} (sped up)`)
+      }
+      return {
+        state: "open",
+        wait: false,
+        message:
+          `${hash} can no longer be mined: its nonce went to another transaction, and the batch is not paid by any other ` +
+          `(cancelled in the wallet?).${elsewhere(found.others)} Once you confirm in the wallet it was never sent, mark it as never sent.`,
+        actions: ["hash", "forget"],
+      }
+    }
+    // "requested": the wallet's answer lost, or not (yet) shown to be the batch
+    const [latest, pending] = await Promise.all([chain.nonce("latest"), chain.nonce("pending")])
+    if (pending > latest) {
+      return { state: "open", wait: true, message: `${from} has a transaction pending, maybe this one: wait until it is mined, then Check again`, actions: [] }
+    }
+    const reported = first.t.reportedTxHash
+    const found = latest > Number(first.t.requestedNonce) || reported ? await this.batchPayment(chain, members) : { batchTx: null, others: [] }
+    if (found.batchTx) return confirmAll(found.batchTx, true)
+    const others = elsewhere(found.others)
+    if (reported) {
+      const tx = await chain.transactionDetails(reported)
+      if (tx && tx.blockNumber === null) {
+        return { state: "open", wait: true, message: `the wallet answered ${reported} for it, which is not it and is not mined yet: wait until it is, then Check again`, actions: [] }
+      }
+      if (tx) {
+        return {
+          state: "open",
+          wait: false,
+          message:
+            `the wallet answered ${reported} for it, mined in block ${tx.blockNumber}, which is not this batch ` +
+            `(${transferMismatch(tx, { ...expected, from, chainId, minNonce: first.t.requestedNonce })}), and nothing else is the batch.${others} ` +
+            "If the wallet's activity shows another hash for it, give that one; otherwise mark it as never sent.",
+          actions: ["hash", "forget"],
+        }
+      }
+      if (latest <= Number(first.t.requestedNonce)) {
+        return {
+          state: "open",
+          wait: false,
+          message:
+            `the wallet answered ${reported} for it, which the RPC does not know. If the wallet shows it pending, speed it up or ` +
+            "cancel it there, then Check again. If the wallet's activity shows another hash for it, give that one. If it shows " +
+            `nothing, use nonce ${first.t.requestedNonce}: send any transaction from ${from} (a 0-value one to itself); then it ` +
+            "can be marked as never sent.",
+          actions: ["hash"],
+        }
+      }
+      return {
+        state: "open",
+        wait: false,
+        message:
+          `the wallet answered ${reported} for it, which the RPC does not know, and the account has sent ` +
+          `${latest - Number(first.t.requestedNonce)} transaction(s) since, none of which is the batch.${others} If the wallet's ` +
+          "activity shows another hash for it, give that one; if it shows none, mark it as never sent.",
+        actions: ["hash", "forget"],
+      }
+    }
+    return {
+      state: "open",
+      wait: false,
+      message:
+        latest === Number(first.t.requestedNonce)
+          ? `handed to the wallet on ${String(first.t.requestedAt).slice(0, 19)}Z, and the account has sent nothing since. If the ` +
+            "wallet still shows that request, reject it there; then mark it as never sent."
+          : `handed to the wallet on ${String(first.t.requestedAt).slice(0, 19)}Z with nonce ${first.t.requestedNonce}; the account ` +
+            `has sent ${latest - Number(first.t.requestedNonce)} transaction(s) since, none of which is the batch.${others} Look at ` +
+            "the wallet's activity: give its hash if it was sent, or mark it as never sent.",
+      actions: ["hash", "forget"],
+    }
+  }
+
+  // What paid a batch's transfers since it was handed out, from the account's
+  // Transfer logs: the batch itself (its own transaction, or one with exactly
+  // its calldata: the wallet's replacement), or else, transfer by transfer,
+  // other transactions (each Transfer log paying one transfer at most).
+  private async batchPayment(
+    chain: SendChain,
+    members: Member[]
+  ): Promise<{
+    batchTx: { txHash: string; blockNumber: number; nonce: number | null; own: boolean } | null
+    others: { member: Member; txHash: string; blockNumber: number }[]
+  }> {
+    const first = members[0]
+    const fromBlock = first.t.requestedBlock !== undefined ? first.t.requestedBlock : first.record.startBlock
+    const blockTime = fromBlock !== undefined ? await chain.blockTimestamp(fromBlock) : null
+    const sinceUnix = blockTime !== null ? blockTime : Math.floor(Date.parse(String(first.t.requestedAt || first.record.createdAt)) / 1000) - 86400
+    const own = new Set(members.flatMap((m) => Array.from(ownHashes(m.t))))
+    const ledger = ledgerHashesBut(first.record.id, first.index, first.t.requestId)
+    const logs = (await chain.outgoingTransfers(sinceUnix)).filter((f) => fromBlock === undefined || f.blockNumber >= fromBlock)
+    const pays = (f: { to: string; amount: string }, m: Member) => f.to.toLowerCase() === m.t.recipient.toLowerCase() && f.amount === m.t.amount
+    const expected = expectedFor(members)
+    const hashes = Array.from(new Set(logs.filter((f) => members.some((m) => pays(f, m))).map((f) => f.txHash.toLowerCase())))
+    for (const hash of hashes) {
+      if (ledger.has(hash) && !own.has(hash)) continue
+      const tx = await chain.transactionDetails(hash)
+      if (tx && !transferMismatch(tx, { ...expected, from: first.record.from, chainId: first.record.chainId, minNonce: first.t.requestedNonce })) {
+        const log = logs.find((f) => f.txHash.toLowerCase() === hash) as { blockNumber: number }
+        return { batchTx: { txHash: hash, blockNumber: log.blockNumber, nonce: tx.nonce, own: own.has(hash) }, others: [] }
+      }
+    }
+    const pool = logs.filter((f) => !ledger.has(f.txHash.toLowerCase()) && !own.has(f.txHash.toLowerCase()) && (fromBlock === undefined || f.blockNumber > fromBlock))
+    const others: { member: Member; txHash: string; blockNumber: number }[] = []
+    for (const m of members) {
+      const i = pool.findIndex((f) => pays(f, m))
+      if (i >= 0) {
+        const f = pool.splice(i, 1)[0]
+        others.push({ member: m, txHash: f.txHash.toLowerCase(), blockNumber: f.blockNumber })
+      }
+    }
+    return { batchTx: null, others }
+  }
+
+  // The wallet's answer, shown by the chain to be the batch: its transaction.
+  private markSent(members: Member[], hash: string, nonce: number): void {
+    for (const m of members) {
+      m.t.status = "sent"
+      m.t.txHash = hash.toLowerCase()
+      m.t.nonce = nonce
+      m.t.attempts = [hash.toLowerCase()]
+      delete m.t.reportedTxHash
+    }
+    saveAll(members)
   }
 
   // An approval of Disperse: mined (and Disperse allowed enough), reverted,
@@ -1400,12 +1674,13 @@ export class DisburseSession {
     }
   }
 
-  // Before a check: every transfer of this chain and token handed to a wallet
-  // and not settled, settled from the chain when it tells (mined, still
-  // pending), or listed for the operator with what they may do (a batch once).
+  // Before a check: everything of this chain and token handed to a wallet and
+  // not settled, settled from the chain when it tells (mined, still pending),
+  // or listed for the operator with what they may do (a batch once, as one).
   private async settleWalletTransfers(chain: SendChain, account: string, notes: string[]): Promise<UnsettledTransfer[]> {
     const chainId = sendChainId()
     const token = sendTokenAddress().toLowerCase()
+    const pinned = pinnedPayer()
     const out: UnsettledTransfer[] = []
     const listed = new Set<string>()
     const records = listDisbursements()
@@ -1414,34 +1689,59 @@ export class DisburseSession {
       for (const [index, t] of record.transfers.entries()) {
         const sentByWallet = !!t.viaWallet && t.status === "sent"
         if (!isRequested(t) && !sentByWallet) continue
-        const members = batchIn(records, record, index)
-        const batch = members.length > 1 || !!t.batch
-        const ledger = displayPath(recordPath(record))
-        const entry = {
-          ledger,
-          recordId: record.id,
-          index,
-          recipient: t.recipient,
-          amount: t.amount,
-          from: record.from,
-          requestedAt: t.requestedAt,
-          requestedNonce: t.requestedNonce,
-          ...(batch ? { batch: members.length, total: sumOf(members).toString() } : {}),
-        }
-        const label = describeMembers(members)
+        const batch = !!t.batch
         const key = batch ? `batch:${t.requestId}` : `${record.id}:${index}`
-        const leave = (why: string, actions: ("hash" | "forget")[]) => {
-          if (listed.has(key)) return
-          listed.add(key)
-          out.push({ ...entry, actions, why: `${label}: ${why}` })
-        }
-        const once = (note: string) => {
-          if (listed.has(`note:${key}:${note}`)) return
-          listed.add(`note:${key}:${note}`)
-          notes.push(note)
-        }
+        if (listed.has(key)) continue
+        listed.add(key)
+        const members = batchIn(records, record, index)
+        const ledger = displayPath(recordPath(record))
+        const label = describeMembers(members)
+        const leave = (why: string, actions: ("hash" | "forget")[]) =>
+          out.push({
+            ledger,
+            recordId: record.id,
+            index,
+            recipient: t.recipient,
+            amount: t.amount,
+            from: record.from,
+            requestedAt: t.requestedAt,
+            requestedNonce: t.requestedNonce,
+            ...(batch ? { batch: members.length, total: sumOf(members).toString() } : {}),
+            actions,
+            why: `${label}: ${why}`,
+          })
         if (record.from.toLowerCase() !== account.toLowerCase()) {
-          leave(`handed to the wallet of ${record.from}, not settled: select that account in the wallet and Check, to settle it`, [])
+          leave(
+            pinned && pinned.toLowerCase() !== record.from.toLowerCase()
+              ? `handed to the wallet of ${record.from}, not settled: restart the page with SEND_FROM=${record.from} (or without ` +
+                  "SEND_FROM), select that account in the wallet and Check, to settle it"
+              : `handed to the wallet of ${record.from}, not settled: select that account in the wallet and Check, to settle it`,
+            []
+          )
+          continue
+        }
+        if (batch) {
+          if (members.length !== t.batch) {
+            if (members.some((m) => answered(m.t))) {
+              leave(`only ${members.length} of its ${t.batch} transfers are in the ledger as handed to the wallet: restore disbursements/ from git`, [])
+            } else {
+              leave(
+                `only ${members.length} of its ${t.batch} transfers were recorded before the page stopped, so the batch never ` +
+                  "reached the wallet: mark it as never sent",
+                ["forget"]
+              )
+            }
+            continue
+          }
+          const outcome = await this.settleBatch(chain, members)
+          if (outcome.state === "confirmed") {
+            notes.push(
+              outcome.found
+                ? `${label}: the wallet sent it, ${outcome.hash}, mined in block ${outcome.block}`
+                : `${label}: paid in block ${outcome.block} (${outcome.hash})${outcome.note ? `: ${outcome.note}` : ""}`
+            )
+          } else if (outcome.state === "reverted") notes.push(`${label}: ${outcome.message}`)
+          else leave(outcome.message, outcome.actions)
           continue
         }
         const expected = expectedFor(members)
@@ -1458,7 +1758,7 @@ export class DisburseSession {
             const payment = await this.paymentSince(chain, record, t)
             if (payment) {
               this.recordPayment(record, t, payment)
-              once(`${label}: paid in block ${payment.blockNumber} (${payment.txHash})`)
+              notes.push(`${label}: paid in block ${payment.blockNumber} (${payment.txHash})`)
               continue
             }
             const reported = t.reportedTxHash
@@ -1467,10 +1767,9 @@ export class DisburseSession {
               leave(`the wallet answered ${reported} for it, which is not it and is not mined yet: wait until it is, then Check again`, [])
             } else if (tx) {
               leave(
-                `the wallet answered ${reported} for it, mined in block ${tx.blockNumber}, which is not this ` +
-                  `${batch ? "batch" : "transfer"} (${transferMismatch(tx, { ...expected, from: record.from, chainId: record.chainId, minNonce: t.requestedNonce })}), ` +
-                  `and nothing pays the ${batch ? "batch" : "transfer"}. If the wallet's activity shows another hash for it, give ` +
-                  "that one; otherwise mark it as never sent.",
+                `the wallet answered ${reported} for it, mined in block ${tx.blockNumber}, which is not this transfer ` +
+                  `(${transferMismatch(tx, { ...expected, from: record.from, chainId: record.chainId, minNonce: t.requestedNonce })}), ` +
+                  "and nothing pays the transfer. If the wallet's activity shows another hash for it, give that one; otherwise mark it as never sent.",
                 ["hash", "forget"]
               )
             } else if (pending > latest || latest <= Number(t.requestedNonce)) {
@@ -1494,8 +1793,8 @@ export class DisburseSession {
         }
         if (t.status === "sent") {
           const outcome = await this.settleSent(chain, record, t)
-          if (outcome.state === "confirmed") once(`${label}: paid in block ${outcome.block} (${outcome.hash})`)
-          else if (outcome.state === "reverted") once(`${label}: ${outcome.message}`)
+          if (outcome.state === "confirmed") notes.push(`${label}: paid in block ${outcome.block} (${outcome.hash})`)
+          else if (outcome.state === "reverted") notes.push(`${label}: ${outcome.message}`)
           else if (outcome.state === "pending") {
             const known = await chain.transactionDetails(outcome.hash)
             leave(
@@ -1519,7 +1818,7 @@ export class DisburseSession {
         const payment = latest > Number(t.requestedNonce) ? await this.paymentSince(chain, record, t) : null
         if (payment) {
           this.recordPayment(record, t, payment)
-          once(`${label}: the wallet sent it, ${payment.txHash}, mined in block ${payment.blockNumber}`)
+          notes.push(`${label}: the wallet sent it, ${payment.txHash}, mined in block ${payment.blockNumber}`)
           continue
         }
         leave(
@@ -1538,9 +1837,11 @@ export class DisburseSession {
 
   // A transfer paid through a wallet and then paid again by another
   // transaction of the account (same recipient, same amount, after it was
-  // handed out, unknown to the ledger): a request approved late, or a
-  // transaction marked never sent and sent after all. Recorded on it
-  // (`paidTwiceBy`), and a problem of the check that finds it.
+  // handed out): a request approved late, or a transaction marked never sent
+  // and sent after all. Each Transfer log pays one transfer: those the ledger
+  // does not account for (an unknown transaction, or more logs of a known one
+  // than its transfers) are second payments. Recorded on the transfer
+  // (`paidTwiceBy`), and a problem of the check that finds them.
   private async findRepeats(chain: SendChain, account: string, problems: string[], notes: string[]): Promise<void> {
     const chainId = sendChainId()
     const token = sendTokenAddress().toLowerCase()
@@ -1565,17 +1866,34 @@ export class DisburseSession {
       notes.push(`Could not look for transfers paid twice (${errorMessage(err)}): Check again to retry`)
       return
     }
-    const paid = new Set(records.flatMap((r) => r.transfers.flatMap(paidHashes)))
+    const key = (hash: string, to: string, amount: string) => `${hash.toLowerCase()}|${to.toLowerCase()}|${amount}`
+    // the logs each transaction of the ledger accounts for
+    const accounted = new Map<string, number>()
+    for (const r of records) {
+      for (const t of r.transfers) {
+        if (t.status !== "confirmed" || !t.txHash) continue
+        const k = key(t.txHash, t.recipient, t.amount)
+        accounted.set(k, (accounted.get(k) || 0) + 1)
+      }
+    }
+    // what is left of each log once the ledger's transfers are accounted for
+    const extra: { to: string; amount: string; txHash: string; blockNumber: number }[] = []
+    const seen = new Map<string, number>()
+    for (const f of out) {
+      const k = key(f.txHash, f.to, f.amount)
+      seen.set(k, (seen.get(k) || 0) + 1)
+      if ((seen.get(k) as number) > (accounted.get(k) || 0)) extra.push(f)
+    }
     for (const { record, t } of watched) {
       const known = new Set((t.paidTwiceBy || []).map((h) => h.toLowerCase()))
-      const again = out.filter(
-        (f) =>
-          f.to.toLowerCase() === t.recipient.toLowerCase() &&
-          f.amount === t.amount &&
-          f.blockNumber > Number(t.requestedBlock) &&
-          !paid.has(f.txHash.toLowerCase()) &&
-          !known.has(f.txHash.toLowerCase())
-      )
+      const again: { txHash: string; blockNumber: number }[] = []
+      for (let i = 0; i < extra.length; i++) {
+        const f = extra[i]
+        if (f.to.toLowerCase() !== t.recipient.toLowerCase() || f.amount !== t.amount || f.blockNumber <= Number(t.requestedBlock)) continue
+        if (known.has(f.txHash.toLowerCase())) continue
+        again.push(f)
+        extra.splice(i--, 1) // one log, one second payment
+      }
       if (again.length === 0) continue
       t.paidTwiceBy = union(t.paidTwiceBy, again.map((f) => f.txHash))
       saveDisbursement(record)
@@ -1603,5 +1921,4 @@ export class DisburseSession {
     t.blockNumber = payment.blockNumber
     t.confirmedAt = new Date().toISOString()
     saveDisbursement(record)
-  }
-}
+  }}

@@ -21,8 +21,9 @@
       <fieldset id="pay-mode">
         <legend>Pay with</legend>
         <label><input type="radio" name="mode" value="disperse" checked /> One Disperse transaction: approve exactly the
-          total, then pay every transfer at once (2 confirmations, or 1 if Disperse is already allowed that much). The
-          wallet shows one contract call and the total: the transfers are the list below.</label>
+          total, then pay every transfer at once (2 confirmations, or 1 if Disperse is already allowed exactly that). The
+          wallet shows the approval's amount, then one contract call to Disperse: the transfers are the list below, and
+          if the wallet shows what leaves the account, it must be exactly their total.</label>
         <label><input type="radio" name="mode" value="transfers" /> One transaction per transfer: a confirmation for each,
           which the wallet shows with its recipient and amount.</label>
       </fieldset>
@@ -30,15 +31,20 @@
         <summary>Transfers the check finds already on-chain</summary>
         <p class="note">
           A check refuses a payout whose transfers it finds already paid on-chain (same recipient, same amount, since the
-          period ended), from this wallet or any other. Look each transaction it lists up on the explorer, then either:
+          period ended), from this wallet or any other. Look each transaction it lists up on the explorer, then:
         </p>
         <p>
-          <label>set aside the ones that only coincide with this payout (their hashes):<br />
+          <label>set aside the ones that only coincide with this payout (their hashes; <code>hash:recipient</code> for one
+            transfer of a transaction paying several):<br />
             <input id="unrelated" class="mono hash" placeholder="0x… 0x…" /></label>
         </p>
         <p>
-          <label><input type="checkbox" id="record-found" /> or record the ones listed as this payout's payments (it was
-            paid, in part, from elsewhere), and pay the rest</label>
+          <label><input type="checkbox" id="record-found" /> record the ones from this wallet as this payout's payments,
+            and pay the rest</label>
+        </p>
+        <p>
+          <label>record these from another wallet as this payout's payments (their hashes, named one by one):<br />
+            <input id="paid-elsewhere" class="mono hash" placeholder="0x… 0x…" /></label>
         </p>
       </details>
       <p>
