@@ -215,6 +215,14 @@
       return selected
     }
 
+    // Whether the wallet is on `account` and the chain right now, asked without
+    // a prompt.
+    async function walletStill(account) {
+      var accounts = await wallet.request({ method: "eth_accounts" })
+      var chain = Number(await wallet.request({ method: "eth_chainId" }))
+      return Array.isArray(accounts) && !!accounts[0] && sameAddress(accounts[0], account) && chain === options.chainId
+    }
+
     // The step is one of the checked plan's transfers, not paid when checked
     // and not handed out before in this run, and its transaction is exactly
     // that transfer: from the account, to PNK, transfer(recipient, amount), no
@@ -353,9 +361,14 @@
       if (running) throw new Error("Disbursing right now: stop it first")
       checked = null
       expected = null
-      var before = changes
       var account = await walletReady(null)
+      // What the wallet announced while it was made ready is no change: its
+      // account as the page connects to it, the chain it was switched to. From
+      // here to the server's answer it must stay on both: its events are
+      // counted, and it is asked again at the end, which also shows an account
+      // or chain it moved to while it was made ready.
       expected = { account: account }
+      var before = changes
       var choice = extra || {}
       var mode = choice.mode === "disperse" ? "disperse" : "transfers"
       var result = await api.check({
@@ -367,7 +380,8 @@
         paidTxs: choice.paidTxs || [],
         mode: mode,
       })
-      if (changes !== before) throw new Error("The wallet's account or chain changed during the check: Check again")
+      var still = await walletStill(account)
+      if (!still || changes !== before) throw new Error("The wallet's account or chain changed during the check: Check again")
       if (result.checkId) {
         var problem = planProblem(result, account, mode)
         if (problem) throw new Error("The server's check does not hold together (" + problem + "): Check again")

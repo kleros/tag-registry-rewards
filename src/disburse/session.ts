@@ -71,6 +71,14 @@ import { FolderPayout, folderPayouts, listPayoutFolders, PAYOUT_KINDS, PayoutFol
 
 const ZERO = BigNumber.from(0)
 const pnk = (wei: BigNumber | string): string => `${humanizeAmount(BigNumber.from(wei))} PNK`
+// To the last wei, as the page's rows and a wallet show an amount
+// ("331,421.861696305094283609 PNK", "500 PNK"): for what the operator holds
+// against the wallet, and for two amounts told apart.
+const pnkExact = (wei: BigNumber | string): string => {
+  const [whole, fraction] = utils.formatUnits(BigNumber.from(wei), 18).split(".")
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+  return (fraction && fraction !== "0" ? `${grouped}.${fraction}` : grouped) + " PNK"
+}
 const hexQuantity = (n: number): string => `0x${n.toString(16)}`
 const PLAN_MINUTES = 30
 const HASH = /^0x[0-9a-f]{64}$/
@@ -535,7 +543,7 @@ export class DisburseSession {
     const [balance, native, baseFee] = await Promise.all([chain.tokenBalance(), chain.nativeBalance(), chain.baseFee()])
     const due = payouts.reduce((sum, p) => sum.add(p.due), ZERO)
     const count = payouts.reduce((n, p) => n + p.toSend, 0)
-    if (balance.lt(due)) problems.push(`${account} holds ${pnk(balance)}, less than the ${pnk(due)} to send`)
+    if (balance.lt(due)) problems.push(`${account} holds ${pnkExact(balance)}, less than the ${pnkExact(due)} to send`)
     const gasPerTransfer = BigNumber.from(envInt("SEND_GAS_LIMIT", 100000) || 100000).mul(
       (baseFee || utils.parseUnits("1", "gwei")).mul(2).add(utils.parseUnits("1", "gwei"))
     )
@@ -566,9 +574,9 @@ export class DisburseSession {
         if (count > 0) {
           notes.push(
             confirmations === 1
-              ? `Disperse is already allowed exactly ${pnk(allowance)}: one confirmation pays all ${count} transfers`
-              : `Two confirmations: approve Disperse (${DISPERSE_ADDRESS}) for exactly ${pnk(due)}` +
-                  (allowance.gt(ZERO) ? ` (it is allowed ${pnk(allowance)} now)` : "") +
+              ? `Disperse is already allowed exactly ${pnkExact(allowance)}: one confirmation pays all ${count} transfers`
+              : `Two confirmations: approve Disperse (${DISPERSE_ADDRESS}) for exactly ${pnkExact(due)}` +
+                  (allowance.gt(ZERO) ? ` (it is allowed ${pnkExact(allowance)} now)` : "") +
                   `, then pay all ${count} transfers in one transaction`
           )
         }
@@ -810,7 +818,7 @@ export class DisburseSession {
     }
     if (balance.lt(total)) {
       this.plan = null
-      throw new SendRefusedError(`${plan.account} holds ${pnk(balance)}, less than the ${pnk(total)} to send: Check again`)
+      throw new SendRefusedError(`${plan.account} holds ${pnkExact(balance)}, less than the ${pnkExact(total)} to send: Check again`)
     }
     const requestId = randomId()
     if (!allowance.eq(total)) {
@@ -1650,7 +1658,7 @@ export class DisburseSession {
         return {
           state: "stopped",
           message:
-            `The approval ${hash} is mined, but Disperse is allowed ${pnk(allowance)}, less than the ${pnk(a.amount)} the batch ` +
+            `The approval ${hash} is mined, but Disperse is allowed ${pnkExact(allowance)}, less than the ${pnkExact(a.amount)} the batch ` +
             "needs (was its amount changed in the wallet?): Check again",
         }
       }
@@ -1670,7 +1678,7 @@ export class DisburseSession {
     if (allowance.gte(a.amount)) return allowed(await chain.blockNumber())
     return {
       state: "stopped",
-      message: `The approval ${hash} can no longer be mined (its nonce went to another transaction), and Disperse is allowed ${pnk(allowance)}: Check again`,
+      message: `The approval ${hash} can no longer be mined (its nonce went to another transaction), and Disperse is allowed ${pnkExact(allowance)}: Check again`,
     }
   }
 

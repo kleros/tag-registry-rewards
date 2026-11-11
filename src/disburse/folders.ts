@@ -106,6 +106,13 @@ export const folderPayouts = (dir: string, records?: DisbursementRecord[]): Fold
   })
 }
 
+// Names in the order of their characters' codes, whatever the machine's
+// language: the same listing everywhere.
+const byName = (a: string, b: string): number => {
+  if (a < b) return -1
+  return a > b ? 1 : 0
+}
+
 // Every folder under FILES_DIR (itself included) whose manifests name a
 // transactions file, as paths relative to it, sorted.
 export const listPayoutFolders = (root: string = conf.FILES_DIR): PayoutFolder[] => {
@@ -137,7 +144,7 @@ export const listPayoutFolders = (root: string = conf.FILES_DIR): PayoutFolder[]
     } catch {
       return
     }
-    for (const name of entries.sort()) {
+    for (const name of entries.sort(byName)) {
       if (name.startsWith(".")) continue
       const path = join(dir, name)
       try {

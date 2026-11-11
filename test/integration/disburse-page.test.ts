@@ -2,7 +2,7 @@ import { afterEach, describe, it } from "node:test"
 import { strict as assert } from "assert"
 import { BigNumber, utils, Wallet } from "ethers"
 import { request as httpRequest, Server } from "http"
-import { AddressInfo } from "net"
+import { AddressInfo, connect } from "net"
 import { join } from "path"
 import { createDisburseServer } from "../../src/disburse/server"
 import { DisburseSession } from "../../src/disburse/session"
@@ -77,12 +77,35 @@ class FakeWallet {
   noSwitch = false
   tamper: ((tx: Tx) => Tx) | null = null
   afterSend: (() => Promise<void>) | null = null
+  connected = true // false: a wallet this page is not connected to yet
+  shown: string | null = null // the account selected in it, when not the key's
+  onRequest: ((method: string) => void) | null = null
   private listeners: { [event: string]: ((value: unknown) => void)[] } = {}
 
   constructor(readonly signer: Wallet) {}
 
   on(event: string, listener: (value: unknown) => void): void {
     this.listeners[event] = (this.listeners[event] || []).concat(listener)
+  }
+
+  // What a wallet tells the page when its account or chain changes.
+  announce(event: "accountsChanged" | "chainChanged", value: unknown): void {
+    for (const listener of this.listeners[event] || []) listener(value)
+  }
+
+  // The operator selects another account, or another chain, in the wallet.
+  select(account: string): void {
+    this.shown = account
+    this.announce("accountsChanged", [account])
+  }
+
+  switchChain(chainId: number): void {
+    this.chainId = chainId
+    this.announce("chainChanged", utils.hexValue(chainId))
+  }
+
+  private account(): string {
+    return this.shown || this.signer.address
   }
 
   async signAndSend(tx: Tx, fees = { max: "2", tip: "1" }, nonce?: number): Promise<string> {
@@ -111,16 +134,22 @@ class FakeWallet {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- EIP-1193 params
   async request({ method, params = [] }: { method: string; params?: any[] }): Promise<unknown> {
+    if (this.onRequest) this.onRequest(method)
     switch (method) {
       case "eth_requestAccounts":
+        if (!this.connected) {
+          // approving the connection announces the account, as MetaMask and Rabby do
+          this.connected = true
+          this.announce("accountsChanged", [this.account()])
+        }
+        return [this.account()]
       case "eth_accounts":
-        return [this.signer.address]
+        return this.connected ? [this.account()] : []
       case "eth_chainId":
         return utils.hexValue(this.chainId)
       case "wallet_switchEthereumChain":
         if (this.noSwitch) throw { code: 4902, message: "Unrecognized chain ID" }
-        this.chainId = Number(params[0].chainId)
-        for (const listener of this.listeners.chainChanged || []) listener(params[0].chainId)
+        this.switchChain(Number(params[0].chainId))
         return null
       case "eth_sendTransaction": {
         if (this.reject || (this.rejectIf && this.rejectIf(params[0]))) throw { code: 4001, message: "User rejected the request." }
@@ -328,6 +357,104 @@ describe("disburse page: paying", () => {
   })
 })
 
+describe("disburse page: the wallet's account and chain", () => {
+  const SUB = [
+    { recipient: evmAddress(0xd01), amount: PNK(5) },
+    { recipient: evmAddress(0xd02), amount: PNK(6) },
+  ]
+  const OTHER = evmAddress(0xd99)
+  const DURING = /The wallet's account or chain changed during the check: Check again/
+
+  it("checks at the first Check a wallet that announces its account as the page connects to it", async () => {
+    writeFolder("f", { submissions: SUB })
+    const fake = new FakeWallet(wallet)
+    fake.connected = false
+    fake.chainId = 1 // and it is switched to the chain, which it announces too
+    const controller = page(await startPage(), fake)
+    assert.ok((await controller.check("f", ["submissions"])).checkId)
+    assert.equal(controller.canDisburse(), true)
+    assert.equal((await controller.disburse()).state, "done")
+    assert.equal(paid().length, 2)
+  })
+
+  it("throws away a check the wallet left meanwhile, for another account or chain", async () => {
+    writeFolder("f", { submissions: SUB })
+    const api = await startPage()
+    // while the server checks: told by the wallet, not told, or there and back
+    const leaves: [string, (fake: FakeWallet) => void][] = [
+      ["another account", (fake) => fake.select(OTHER)],
+      ["another chain", (fake) => fake.switchChain(1)],
+      ["another account, untold", (fake) => (fake.shown = OTHER)],
+      ["another chain, untold", (fake) => (fake.chainId = 1)],
+      ["another account and back", (fake) => (fake.select(OTHER), fake.select(wallet.address))],
+    ]
+    for (const [what, leave] of leaves) {
+      const fake = new FakeWallet(wallet)
+      const leaving = {
+        ...api,
+        check: async (body: unknown) => {
+          const result = await api.check(body)
+          leave(fake)
+          return result
+        },
+      }
+      const controller = page(leaving, fake)
+      await assert.rejects(controller.check("f", ["submissions"]), DURING, what)
+      assert.equal(controller.canDisburse(), false, what)
+      await assert.rejects(controller.disburse(), /Check first/, what)
+    }
+    // while the wallet is made ready, after it gave its account
+    const fake = new FakeWallet(wallet)
+    fake.onRequest = (method) => {
+      if (method === "eth_getTransactionCount" && !fake.shown) fake.select(OTHER)
+    }
+    const controller = page(api, fake)
+    await assert.rejects(controller.check("f", ["submissions"]), DURING)
+    assert.equal(controller.canDisburse(), false)
+    // back on the account, it is checked
+    fake.onRequest = null
+    fake.select(wallet.address)
+    assert.ok((await controller.check("f", ["submissions"])).checkId)
+    assert.equal(paid().length, 0)
+  })
+
+  it("voids a check when the wallet's account or chain changes after it, and stops a run after the transfer with the wallet", async () => {
+    writeFolder("f", { submissions: SUB })
+    const api = await startPage()
+    const fake = new FakeWallet(wallet)
+    const voided: string[] = []
+    const stopped: string[] = []
+    const controller = page(api, fake, { voided: (event: string) => voided.push(event), stopped: (m: string) => stopped.push(m) })
+    await controller.check("f", ["submissions"])
+    fake.select(OTHER)
+    assert.deepEqual(voided, ["accountsChanged"])
+    assert.equal(controller.canDisburse(), false)
+    await assert.rejects(controller.disburse(), /Check first/)
+    fake.select(wallet.address)
+
+    await controller.check("f", ["submissions"])
+    fake.switchChain(1)
+    assert.deepEqual(voided, ["accountsChanged", "chainChanged"])
+    await assert.rejects(controller.disburse(), /Check first/)
+
+    // in the middle of a run: the transfer with the wallet is followed to its
+    // receipt, and the next one is not handed out
+    await controller.check("f", ["submissions"]) // switches the wallet back to the chain
+    assert.equal(fake.chainId, 100)
+    fake.afterSend = async () => fake.select(OTHER)
+    assert.equal(await controller.disburse(), null)
+    assert.match(stopped[0], /Stopped after this one: Check again/)
+    assert.equal(paid().length, 1)
+    assert.deepEqual(ledger()[0].transfers.map((t) => t.status), ["confirmed", "pending"])
+
+    fake.afterSend = null
+    fake.select(wallet.address)
+    await controller.check("f", ["submissions"])
+    assert.equal((await controller.disburse()).state, "done")
+    assert.equal(paid().length, 2)
+  })
+})
+
 describe("disburse page: one Disperse transaction", () => {
   const SUB = [
     { recipient: evmAddress(0xf01), amount: PNK(500) },
@@ -362,7 +489,7 @@ describe("disburse page: one Disperse transaction", () => {
     assert.ok(result.checkId, JSON.stringify(result.problems))
     assert.equal(result.mode, "disperse")
     assert.deepEqual(result.disperse, { address: DISPERSE_ADDRESS, allowance: "0", confirmations: 2 })
-    assert.ok(result.notes.some((n: string) => /Two confirmations: approve Disperse .* for exactly 11734\.5 PNK, then pay all 4 transfers/.test(n)), JSON.stringify(result.notes))
+    assert.ok(result.notes.some((n: string) => /Two confirmations: approve Disperse .* for exactly 11,734\.5 PNK, then pay all 4 transfers/.test(n)), JSON.stringify(result.notes))
     assert.equal((await controller.disburse()).state, "done")
     assert.deepEqual(asked, ["approve", "disperse"])
     assert.equal(fake.sent.length, 2, "two confirmations")
@@ -408,10 +535,27 @@ describe("disburse page: one Disperse transaction", () => {
     const again = page(api, fake)
     const second = await again.check("g", ["removals"], { mode: "disperse" })
     assert.equal(second.disperse.confirmations, 2)
-    assert.ok(second.notes.some((n: string) => /approve Disperse .* for exactly 7,?000 PNK \(it is allowed 100,?000 PNK now\)/.test(n)), JSON.stringify(second.notes))
+    assert.ok(second.notes.some((n: string) => /approve Disperse .* for exactly 7,000 PNK \(it is allowed 100,000 PNK now\)/.test(n)), JSON.stringify(second.notes))
     assert.equal((await again.disburse()).state, "done")
     assert.equal(fake.sent.length, 3)
     assert.equal(evm.allowance(wallet.address, DISPERSE), BigInt(0), "nothing left allowed")
+  })
+
+  it("names the amount to approve to the last wei, as the wallet shows it", async () => {
+    const exact = "331421.861696305094283609"
+    writeFolder("f", { submissions: [{ recipient: evmAddress(0x3f1), amount: PNK(exact) }] })
+    const api = await startPage()
+    const result = await page(api, new FakeWallet(wallet)).check("f", ["submissions"], { mode: "disperse" })
+    assert.ok(result.checkId, JSON.stringify(result.problems))
+    assert.ok(result.notes.some((n: string) => n.includes("for exactly 331,421.861696305094283609 PNK, then pay")), JSON.stringify(result.notes))
+    assert.equal(P.formatPnkExact(result.due), "331,421.861696305094283609")
+    // and tells apart a balance one wei short of it
+    evm.setTokenBalance(wallet.address, PNK(exact).sub(1))
+    const short = await api.check({ folder: "f", kinds: ["submissions"], account: wallet.address, mode: "disperse" })
+    assert.ok(
+      short.problems.some((p: string) => p.includes("holds 331,421.861696305094283608 PNK, less than the 331,421.861696305094283609 PNK to send")),
+      JSON.stringify(short.problems)
+    )
   })
 
   it("leaves every transfer to send when the batch is rejected in the wallet, and pays it all after the next Check", async () => {
@@ -1200,6 +1344,29 @@ describe("disburse page: its server", () => {
     assert.equal(await raw("/", `localhost:${port}`), 200)
     assert.equal(await raw("/../package.json", host), 404)
     assert.equal(await raw("/%2e%2e/package.json", host), 404)
+
+    // A request line no browser writes, with everything else the page sends: a
+    // name every object has, in place of a path, reaches nothing of the API.
+    const line = (target: string) =>
+      new Promise<number>((resolve, reject) => {
+        const socket = connect(Number(port), hostname, () => {
+          socket.write(
+            `POST ${target} HTTP/1.1\r\nHost: ${host}\r\nOrigin: ${base}\r\nX-Disburse-Session: ${TOKEN}\r\n` +
+              "Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+          )
+        })
+        let answer = ""
+        socket.on("data", (chunk) => (answer += String(chunk)))
+        socket.on("close", () => resolve(Number((/^HTTP\/1\.1 (\d+)/.exec(answer) || [])[1] || 0)))
+        socket.on("error", reject)
+      })
+    assert.equal(await line("/api/overview"), 200)
+    for (const target of ["/constructor", "/__proto__", "/toString"]) assert.equal(await line(target), 404, target)
+    for (const target of ["constructor", "__proto__", "toString", "hasOwnProperty"]) assert.notEqual(await line(target), 200, target)
+
+    // An object where the page sends text reads as nothing, and is refused.
+    const odd = await fetch(`${base}/api/next`, { method: "POST", headers: good, body: JSON.stringify({ checkId: { a: 1 } }) })
+    assert.deepEqual([odd.status, (await odd.json()).ok], [200, false])
   })
 })
 

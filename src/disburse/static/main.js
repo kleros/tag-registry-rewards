@@ -137,7 +137,8 @@
         el("tr", {}, [el("td", { text: "Paying account" }), el("td", { className: "mono", text: result.account })]),
         el("tr", {}, [el("td", { text: "Network" }), el("td", { text: "chain " + result.chainId + ", PNK " + result.token })]),
         el("tr", {}, [el("td", { text: "Holds" }), el("td", { text: P.formatPnk(result.balance) + " PNK, " + P.formatPnk(result.native, 4) + " for gas" })]),
-        el("tr", {}, [el("td", { text: "To send" }), el("td", { text: P.formatPnk(result.due) + " PNK" })]),
+        // to the last wei: what an approval of "exactly this total" shows in the wallet
+        el("tr", {}, [el("td", { text: "To send" }), el("td", { text: P.formatPnkExact(result.due) + " PNK" })]),
         el("tr", {}, [
           el("td", { text: "Pays with" }),
           el("td", {

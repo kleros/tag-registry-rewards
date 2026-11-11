@@ -63,36 +63,49 @@ const readBody = (request: IncomingMessage): Promise<string> =>
     request.on("error", reject)
   })
 
-type Handler = (body: { [key: string]: unknown }) => Promise<unknown> | unknown
+type Body = { [key: string]: unknown }
+type Handler = (body: Body) => unknown
+
+// What the page sends: text, lists of text, a row's number. Anything else in
+// their place (an object where a hash goes…) reads as nothing, which the
+// session refuses in its own words.
+const text = (value: unknown): string => (typeof value === "string" ? value : "")
+const texts = (value: unknown): string[] => (Array.isArray(value) ? value.map(text) : [])
+const rowNumber = (value: unknown): number => (typeof value === "number" ? value : NaN)
 
 export const createDisburseServer = (session: DisburseSession, opts: { token?: string } = {}): { server: Server; token: string } => {
   const token = opts.token || randomBytes(32).toString("hex")
   const assets = new Map<string, { body: Buffer; type: string }>()
   for (const [path, { file, type }] of Object.entries(ASSETS)) assets.set(path, { type, body: readFileSync(join(STATIC, file)) })
-  const routes: { [path: string]: Handler } = {
-    "/api/overview": () => session.overview(),
-    "/api/check": (b) =>
-      session.check({
-        folder: String(b.folder || ""),
-        kinds: Array.isArray(b.kinds) ? b.kinds.map(String) : [],
-        account: String(b.account || ""),
-        unrelatedTxs: Array.isArray(b.unrelatedTxs) ? b.unrelatedTxs.map(String) : [],
-        skipPaidOnChain: b.skipPaidOnChain === true,
-        paidTxs: Array.isArray(b.paidTxs) ? b.paidTxs.map(String) : [],
-        mode: String(b.mode || ""),
-      }),
-    "/api/next": (b) => session.next({ checkId: String(b.checkId || "") }),
-    "/api/next-batch": (b) => session.nextBatch({ checkId: String(b.checkId || "") }),
-    "/api/sent": (b) => session.sent({ requestId: String(b.requestId || ""), hash: String(b.hash || "") }),
-    "/api/receipt": (b) => session.receipt({ requestId: String(b.requestId || "") }),
-    "/api/rejected": (b) => session.rejected({ requestId: String(b.requestId || "") }),
-    "/api/failed": (b) => session.failed({ requestId: String(b.requestId || ""), message: String(b.message || "") }),
-    "/api/record-hash": (b) => session.recordHash({ recordId: String(b.recordId || ""), index: Number(b.index), hash: String(b.hash || "") }),
-    "/api/forget": (b) => session.forget({ recordId: String(b.recordId || ""), index: Number(b.index) }),
-  }
+  // A Map, not an object: a path is only ever one of these, never a name every
+  // object has ("constructor", "__proto__"…).
+  const routes = new Map<string, Handler>([
+    ["/api/overview", () => session.overview()],
+    [
+      "/api/check",
+      (b) =>
+        session.check({
+          folder: text(b.folder),
+          kinds: texts(b.kinds),
+          account: text(b.account),
+          unrelatedTxs: texts(b.unrelatedTxs),
+          skipPaidOnChain: b.skipPaidOnChain === true,
+          paidTxs: texts(b.paidTxs),
+          mode: text(b.mode),
+        }),
+    ],
+    ["/api/next", (b) => session.next({ checkId: text(b.checkId) })],
+    ["/api/next-batch", (b) => session.nextBatch({ checkId: text(b.checkId) })],
+    ["/api/sent", (b) => session.sent({ requestId: text(b.requestId), hash: text(b.hash) })],
+    ["/api/receipt", (b) => session.receipt({ requestId: text(b.requestId) })],
+    ["/api/rejected", (b) => session.rejected({ requestId: text(b.requestId) })],
+    ["/api/failed", (b) => session.failed({ requestId: text(b.requestId), message: text(b.message) })],
+    ["/api/record-hash", (b) => session.recordHash({ recordId: text(b.recordId), index: rowNumber(b.index), hash: text(b.hash) })],
+    ["/api/forget", (b) => session.forget({ recordId: text(b.recordId), index: rowNumber(b.index) })],
+  ])
   // One API call at a time: the session is a sequence, never concurrent.
   let queue: Promise<unknown> = Promise.resolve()
-  const serialized = <T>(job: () => Promise<T>): Promise<T> => {
+  const serialized = (job: () => unknown): Promise<unknown> => {
     const run = queue.then(job, job)
     queue = run.catch(() => undefined)
     return run
@@ -112,7 +125,7 @@ export const createDisburseServer = (session: DisburseSession, opts: { token?: s
       response.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": asset.type })
       return response.end(request.method === "HEAD" ? undefined : asset.body)
     }
-    const handler = routes[path]
+    const handler = routes.get(path)
     if (request.method !== "POST" || !handler) return deny()
     const origin = String(request.headers.origin || "")
     if (!origins.some((o) => origin === `http://${o}`)) return deny(403)
@@ -124,15 +137,15 @@ export const createDisburseServer = (session: DisburseSession, opts: { token?: s
       response.end(JSON.stringify(payload))
     }
     readBody(request)
-      .then((text) => {
+      .then((sent) => {
         let body: unknown
         try {
-          body = text ? JSON.parse(text) : {}
+          body = sent ? JSON.parse(sent) : {}
         } catch {
           throw new SendRefusedError("The request is not JSON")
         }
         if (!body || typeof body !== "object" || Array.isArray(body)) throw new SendRefusedError("The request is not a JSON object")
-        return serialized(async () => handler(body as { [key: string]: unknown }))
+        return serialized(() => handler(body as Body))
       })
       .then(
         (result) => reply(200, { ok: true, result }),
