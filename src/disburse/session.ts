@@ -685,10 +685,11 @@ export class DisburseSession {
   // payment the check did not see. Returns the account's next nonce.
   private async assertQuiet(chain: SendChain, plan: Plan): Promise<number> {
     // A nonce lower than the chain already showed is no transaction of the
-    // account's: it is a node behind another.
+    // account's: it is a node behind another. So is a pending count lower
+    // than the mined one, the two answered by different nodes.
     const [latest, pending] = await this.onceCaughtUp(
       () => Promise.all([chain.nonce("latest"), chain.nonce("pending")]),
-      (nonces) => nonces[0] >= plan.expectedNonce
+      (nonces) => nonces[0] >= plan.expectedNonce && nonces[1] >= nonces[0]
     )
     if (latest < plan.expectedNonce) {
       this.plan = null
@@ -1128,7 +1129,11 @@ export class DisburseSession {
       return { state: "unsettled", message: "The wallet answered a hash for it before: Check again to settle it" }
     }
     const chain = this.chain(a.account)
-    const [latest, pending] = await Promise.all([chain.nonce("latest"), chain.nonce("pending")])
+    // (counts lower than the nonce it was handed out with are a node behind)
+    const [latest, pending] = await this.onceCaughtUp(
+      () => Promise.all([chain.nonce("latest"), chain.nonce("pending")]),
+      (nonces) => nonces[0] >= a.nonce && nonces[1] >= nonces[0]
+    )
     if (latest === a.nonce && pending === latest) {
       for (const m of a.members) {
         clearTransaction(m.t)
@@ -1541,8 +1546,23 @@ export class DisburseSession {
           const receipt = await chain.receipt(h)
           if (!receipt) continue
           if (receipt.status !== 1) {
+            // A transfer the ledger holds as paid by this very transaction
+            // contradicts its receipt (the chain reorganised, or a node
+            // contradicts itself): neither is taken for the truth.
+            const contradicted = members.filter((m) => m.t.status === "confirmed" && String(m.t.txHash).toLowerCase() === h)
+            if (contradicted.length > 0) {
+              return {
+                state: "open",
+                wait: false,
+                message:
+                  `the ledger holds ${contradicted.length} of its transfers as paid by ${h}, and the RPC now says that transaction ` +
+                  "reverted (the chain reorganised, or a node contradicts itself). Nothing is changed: Check again in a while, and " +
+                  "look the transaction up on the explorer before anything of it is sent again.",
+                actions: [],
+              }
+            }
             for (const m of members) {
-              if (m.t.status === "confirmed") continue // paid is paid: never one to send again
+              if (m.t.status === "confirmed") continue // paid by another transaction: paid is paid
               m.t.revertedTxs = union(m.t.revertedTxs, [h])
               clearTransaction(m.t)
               m.t.status = "failed"
@@ -1722,8 +1742,9 @@ export class DisburseSession {
         return {
           state: "stopped",
           message:
-            `The approval ${hash} is mined, but Disperse is allowed ${pnkExact(allowance)}, not the ${pnkExact(a.amount)} asked ` +
-            "(was its amount changed in the wallet?). Check again: it asks to approve exactly the total",
+            `The approval ${hash} is mined, but the RPC shows Disperse allowed ${pnkExact(allowance)}, not the ${pnkExact(a.amount)} ` +
+            "asked: its amount was changed in the wallet, or the RPC answers from a node behind. Check again: it reads it anew, and " +
+            "asks to approve exactly the total if it must",
         }
       }
       return { state: "confirmed", hash, block, url }

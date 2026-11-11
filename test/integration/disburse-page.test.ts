@@ -809,7 +809,7 @@ describe("disburse page: one Disperse transaction", () => {
       fake.tamper = (tx) => ({ ...tx, data: P.approveData(DISPERSE_ADDRESS, cap.toString()) })
       assert.equal(await controller.disburse(), null)
       fake.tamper = null
-      assert.match(String(stopped.pop()), new RegExp(`is mined, but Disperse is allowed ${shown}, not the 1,734\\.5 PNK asked \\(was its amount changed in the wallet\\?\\)`))
+      assert.match(String(stopped.pop()), new RegExp(`is mined, but the RPC shows Disperse allowed ${shown}, not the 1,734\\.5 PNK asked: its amount was changed in the wallet, or`))
       assert.deepEqual(asked.splice(0), ["approve"], "the batch is not handed out")
       assert.equal(paid().length, 0)
     }
@@ -918,38 +918,63 @@ describe("disburse page: one Disperse transaction", () => {
     assert.deepEqual(await replacedApproval(() => ({ to: wallet.address, data: "0x" })), { state: "stopped", batch: false })
   })
 
-  // An RPC served by several nodes: one a block behind the one that showed the
-  // approval mined answers what was there before it, for `behind` reads.
-  const laggingNode = (behind: { allowance: number; nonce: number; simulation: number }): SessionDeps => ({
+  // An RPC served by several nodes: one of them a block behind the one that
+  // showed the approval mined answers what was there before it. How many of
+  // the next answers come from it is set per question, and decided as each
+  // question is asked (never by which answer comes back first); what is asked
+  // is counted.
+  type Behind = { latest: number; pending: number; allowance: number; simulation: number; asked: { nonces: number; allowance: number; simulation: number } }
+  const noneBehind = (): Behind => ({ latest: 0, pending: 0, allowance: 0, simulation: 0, asked: { nonces: 0, allowance: 0, simulation: 0 } })
+  const laggingNode = (behind: Behind): SessionDeps => ({
     chainFor: (account) => {
       const chain = createSendChain({ readOnlyFrom: account })
       return {
         ...chain,
-        tokenAllowance: async (spender) => (behind.allowance-- > 0 ? BigNumber.from(0) : chain.tokenAllowance(spender)),
-        nonce: async (tag) => {
-          const now = await chain.nonce(tag)
-          if (behind.nonce <= 0) return now
-          if (tag === "pending") behind.nonce -= 1
-          return now - 1
+        nonce: (tag) => {
+          if (tag === "latest") behind.asked.nonces += 1
+          const stale = behind[tag] > 0
+          if (stale) behind[tag] -= 1
+          return chain.nonce(tag).then((now) => (stale ? now - 1 : now))
         },
-        simulateCall: async (to, data, label) => {
-          if (to.toLowerCase() === DISPERSE_ADDRESS.toLowerCase() && behind.simulation-- > 0) throw new Error(`${label} would revert: nothing allowed`)
-          return chain.simulateCall(to, data, label)
+        tokenAllowance: (spender) => {
+          behind.asked.allowance += 1
+          const stale = behind.allowance > 0
+          if (stale) behind.allowance -= 1
+          return stale ? Promise.resolve(BigNumber.from(0)) : chain.tokenAllowance(spender)
+        },
+        simulateCall: (to, data, label) => {
+          if (to.toLowerCase() !== DISPERSE_ADDRESS.toLowerCase()) return chain.simulateCall(to, data, label)
+          behind.asked.simulation += 1
+          const stale = behind.simulation > 0
+          if (stale) behind.simulation -= 1
+          return stale ? Promise.reject(new Error(`${label} would revert: nothing allowed`)) : chain.simulateCall(to, data, label)
         },
       }
     },
   })
 
+  // This run's approval mined and confirmed through the API: the checked plan.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const approvedPlan = async (api: any, fake: FakeWallet): Promise<any> => {
+    const checked = await page(api, fake).check("f", ["submissions"], { mode: "disperse" })
+    assert.ok(checked.checkId, JSON.stringify(checked.problems))
+    const approval = await api.nextBatch({ checkId: checked.checkId })
+    assert.equal(approval.state, "approve")
+    await api.sent({ requestId: approval.requestId, hash: await fake.request({ method: "eth_sendTransaction", params: [approval.tx] }) })
+    assert.equal((await api.receipt({ requestId: approval.requestId })).state, "confirmed")
+    return checked
+  }
+
   it("goes on when a node answers a moment behind the approval it just showed mined", async () => {
     writeFolder("f", { submissions: SUB })
-    const behind = { allowance: 0, nonce: 0, simulation: 0 }
+    const behind = noneBehind()
     const api = await startPage(laggingNode(behind))
     const fake = new FakeWallet(wallet)
     const stopped: string[] = []
     const controller = page(api, fake, {
       // what the approval's receipt reads, then what is read before the batch is handed out
       sent: (step: { state: string }) => step.state === "approve" && (behind.allowance = 1),
-      confirmed: (step: { state: string }) => step.state === "approve" && Object.assign(behind, { allowance: 1, nonce: 1, simulation: 1 }),
+      confirmed: (step: { state: string }) => step.state === "approve" && Object.assign(behind, { latest: 1, pending: 1, allowance: 1, simulation: 1 }),
       stopped: (m: string) => stopped.push(m),
     })
     await controller.check("f", ["submissions"], { mode: "disperse" })
@@ -958,38 +983,110 @@ describe("disburse page: one Disperse transaction", () => {
     assert.equal(done && done.state, "done")
     assert.equal(fake.sent.length, 2)
     assert.equal(paid().length, 2)
-    assert.ok(behind.allowance <= 0 && behind.nonce <= 0 && behind.simulation <= 0, "each was read behind once")
+    assert.deepEqual([behind.latest, behind.pending, behind.allowance, behind.simulation], [0, 0, 0, 0], "each was answered from behind once")
+  })
+
+  it("goes on when only one of the account's two counts comes from the node behind", async () => {
+    writeFolder("f", { submissions: SUB })
+    for (const which of ["pending", "latest"] as const) {
+      evm.setAllowance(wallet.address, DISPERSE, BigNumber.from(0))
+      const behind = noneBehind()
+      const api = await startPage(laggingNode(behind))
+      const fake = new FakeWallet(wallet)
+      const checked = await approvedPlan(api, fake)
+      behind[which] = 1
+      const step = await api.nextBatch({ checkId: checked.checkId })
+      assert.equal(step.state, "disperse", which)
+      assert.equal((await api.rejected({ requestId: step.requestId })).state, "cleared", which)
+    }
+  })
+
+  it("takes a rejection in the wallet for one when the node is a block behind", async () => {
+    writeFolder("f", { submissions: SUB })
+    const behind = noneBehind()
+    const api = await startPage(laggingNode(behind))
+    const checked = await approvedPlan(api, new FakeWallet(wallet))
+    const step = await api.nextBatch({ checkId: checked.checkId })
+    Object.assign(behind, { latest: 1, pending: 1 })
+    assert.equal((await api.rejected({ requestId: step.requestId })).state, "cleared")
+    assert.ok(ledger()[0].transfers.every((t) => t.status === "pending" && t.batch === undefined))
   })
 
   it("stops, saying so, when the node stays behind: never a second approval, never a transaction on what it shows", async () => {
     writeFolder("f", { submissions: SUB })
-    const behind = { allowance: 0, nonce: 0, simulation: 0 }
+    const behind = noneBehind()
     const api = await startPage(laggingNode(behind))
     const fake = new FakeWallet(wallet)
     const stopped: string[] = []
-    const controller = page(api, fake, {
-      confirmed: (step: { state: string }) => step.state === "approve" && (behind.nonce = 1000),
+    const untilConfirmed = (then: () => void) => ({
+      confirmed: (step: { state: string }) => step.state === "approve" && then(),
       stopped: (m: string) => stopped.push(m),
     })
-    await controller.check("f", ["submissions"], { mode: "disperse" })
-    assert.equal(await controller.disburse(), null)
+    // the account's nonce
+    const first = page(api, fake, untilConfirmed(() => Object.assign(behind, { latest: 1000, pending: 1000, asked: { nonces: 0, allowance: 0, simulation: 0 } })))
+    await first.check("f", ["submissions"], { mode: "disperse" })
+    assert.equal(await first.disburse(), null)
     assert.match(stopped[0], /The RPC shows nonce \d+ for 0x[0-9a-fA-F]{40}, behind the \d+ the chain showed a moment ago \(a node lagging behind\): Check again/)
+    assert.equal(behind.asked.nonces, 4, "asked again three times, then no more")
     assert.equal(fake.sent.length, 1, "the approval only")
-    // the allowance, then: approved a moment ago, and not shown so
-    behind.nonce = 0
+    // what Disperse is allowed: approved a moment ago, and not shown so
+    Object.assign(behind, { latest: 0, pending: 0 })
     evm.setAllowance(wallet.address, DISPERSE, BigNumber.from(0))
-    const again = page(api, fake, { confirmed: (step: { state: string }) => step.state === "approve" && (behind.allowance = 1000), stopped: (m: string) => stopped.push(m) })
-    await again.check("f", ["submissions"], { mode: "disperse" })
-    assert.equal(await again.disburse(), null)
+    const second = page(api, fake, untilConfirmed(() => Object.assign(behind, { allowance: 1000, asked: { nonces: 0, allowance: 0, simulation: 0 } })))
+    await second.check("f", ["submissions"], { mode: "disperse" })
+    assert.equal(await second.disburse(), null)
     assert.match(stopped[1], /Disperse is allowed 0 PNK, not the 1,734\.5 PNK this run's approval allowed it a moment ago: Check again/)
+    assert.equal(behind.asked.allowance, 4)
     assert.equal(fake.sent.length, 2, "one more approval, and no batch")
+    // the batch's simulation: it would still revert
+    behind.allowance = 0
+    evm.setAllowance(wallet.address, DISPERSE, BigNumber.from(0))
+    const third = page(api, fake, untilConfirmed(() => Object.assign(behind, { simulation: 1000, asked: { nonces: 0, allowance: 0, simulation: 0 } })))
+    await third.check("f", ["submissions"], { mode: "disperse" })
+    assert.equal(await third.disburse(), null)
+    assert.match(stopped[2], /Not sending the batch: .*would revert/)
+    assert.equal(behind.asked.simulation, 4)
+    assert.equal(fake.sent.length, 3, "one more approval, and no batch")
+    assert.ok(ledger().every((r) => r.transfers.every((t) => t.status === "pending")), "nothing was handed to the wallet")
     assert.equal(paid().length, 0)
     // caught up: one confirmation pays it
-    behind.allowance = 0
+    behind.simulation = 0
     const last = page(api, fake)
     assert.equal((await last.check("f", ["submissions"], { mode: "disperse" })).disperse.confirmations, 1)
     assert.equal((await last.disburse()).state, "done")
     assert.equal(paid().length, 2)
+  })
+
+  it("never sends again, nor closes as paid, a batch whose receipt and ledger contradict each other", async () => {
+    writeFolder("f", { submissions: SUB, atq: ATQ })
+    const fake = new FakeWallet(wallet)
+    const running = await startPage()
+    const step = await toBatch(running, fake, ["submissions", "atq"])
+    evm.faults.revertTo = new Set([SUB[1].recipient.toLowerCase()])
+    const hash = String(await fake.request({ method: "eth_sendTransaction", params: [step.tx] })).toLowerCase()
+    evm.faults.revertTo = undefined
+    assert.equal((await running.sent({ requestId: step.requestId, hash })).state, "sent")
+    // the ledger holds ATQ's transfer as paid by it (as after a block that was reorganised away)
+    const atq = ledger().find((r) => r.kind === "atq") as DisbursementRecord
+    Object.assign(atq.transfers[0], { status: "confirmed", blockNumber: 11, confirmedAt: new Date().toISOString() })
+    saveDisbursement(atq)
+    const before = JSON.stringify(ledger())
+    const api = await startPage()
+    const result = await api.check({ folder: "f", kinds: ["submissions", "atq"], account: wallet.address, mode: "disperse" })
+    assert.equal(result.checkId, null)
+    assert.match(result.unsettled[0].why, /holds 1 of its transfers as paid by 0x[0-9a-f]{64}, and the RPC now says that transaction reverted/)
+    assert.deepEqual(result.unsettled[0].actions, [])
+    assert.equal(JSON.stringify(ledger()), before, "nothing is changed")
+    // paid by another transaction, though: that one stays paid, and the rest is to send again
+    const other = "0x" + "ab".repeat(32)
+    Object.assign(atq.transfers[0], { txHash: other, attempts: [other] })
+    saveDisbursement(atq)
+    const again = await api.check({ folder: "f", kinds: ["submissions", "atq"], account: wallet.address, mode: "disperse" })
+    assert.ok(again.notes.some((n: string) => /reverted: nothing was paid by it/.test(n)), JSON.stringify([again.notes, again.problems]))
+    const now = ledger()
+    assert.deepEqual((now.find((r) => r.kind === "atq") as DisbursementRecord).transfers.map((t) => [t.status, t.txHash]), [["confirmed", other]])
+    assert.ok((now.find((r) => r.kind === "submissions") as DisbursementRecord).transfers.every((t) => t.status === "failed" && (t.revertedTxs || []).includes(hash)))
+    assert.equal(paid().length, 0)
   })
 
   it("refuses Disperse when the contract at its address is not Disperse", async () => {
@@ -1520,6 +1617,90 @@ describe("disburse page: answers lost, and transactions replaced", () => {
     assert.equal(again((await check()).problems), 0)
     assert.equal(again((await check()).problems), 0)
     assert.deepEqual(ledger().flatMap((r) => r.transfers.map((t) => t.paidTwiceBy)), [[stray], [stray], [stray]])
+  })
+
+  it("drops no second payment: more of one transaction's logs than transfers go to the first, once per log", async () => {
+    const X = evmAddress(0xa71)
+    const five = PNK(500).toString()
+    writeFolder("f", { removals: [{ recipient: X, amount: PNK(500) }], atq: [{ recipient: X, amount: PNK(500) }] })
+    const api = await startPage()
+    const fake = new FakeWallet(wallet)
+    const controller = page(api, fake)
+    await controller.check("f", ["removals", "atq"], { mode: "disperse" })
+    assert.equal((await controller.disburse()).state, "done")
+    // X sent the amount three more times by one transaction: one each, and the third to the first
+    evm.setAllowance(wallet.address, DISPERSE, PNK(1500))
+    const stray = String(await fake.signAndSend({ to: DISPERSE, data: P.disperseData(evm.token, [X, X, X], [five, five, five]) })).toLowerCase()
+    const check = async () =>
+      (await api.check({ folder: "f", kinds: ["removals", "atq"], account: wallet.address, mode: "disperse" })).problems.filter((p: string) => /paid again/.test(p))
+    const held = () => ledger().map((r) => [r.kind, r.transfers[0].paidTwiceBy])
+    assert.equal((await check()).length, 2)
+    assert.deepEqual(held(), [
+      ["removals", [stray, stray]],
+      ["atq", [stray]],
+    ])
+    assert.deepEqual(await check(), [])
+    assert.deepEqual(held(), [
+      ["removals", [stray, stray]],
+      ["atq", [stray]],
+    ])
+    // and once more, by a plain transfer: one more, reported once
+    const plain = String(await fake.signAndSend({ to: evm.token, data: P.transferData(X, five) })).toLowerCase()
+    assert.equal((await check()).length, 1)
+    assert.deepEqual(await check(), [])
+    assert.deepEqual(held(), [
+      ["removals", [stray, stray, plain]],
+      ["atq", [stray]],
+    ])
+  })
+
+  it("takes back one log for each transaction a transfer holds, not every log of it", async () => {
+    // a transaction paying X twice again, of which only one of X's two transfers holds a record
+    const X = evmAddress(0xa75)
+    const Y = evmAddress(0xa76)
+    writeFolder("f", { removals: [{ recipient: X, amount: PNK(500) }, { recipient: Y, amount: PNK(600) }], atq: [{ recipient: X, amount: PNK(500) }] })
+    const api = await startPage()
+    const fake = new FakeWallet(wallet)
+    const controller = page(api, fake)
+    await controller.check("f", ["removals", "atq"], { mode: "disperse" })
+    assert.equal((await controller.disburse()).state, "done")
+    evm.setAllowance(wallet.address, DISPERSE, PNK(1600))
+    const data = P.disperseData(evm.token, [X, Y, X], [PNK(500), PNK(600), PNK(500)].map(String))
+    const stray = String(await fake.signAndSend({ to: DISPERSE, data })).toLowerCase()
+    const removals = ledger().find((r) => r.kind === "removals") as DisbursementRecord
+    for (const t of removals.transfers) t.paidTwiceBy = [stray]
+    saveDisbursement(removals)
+    const check = async () =>
+      (await api.check({ folder: "f", kinds: ["removals", "atq"], account: wallet.address, mode: "disperse" })).problems.filter((p: string) => /paid again/.test(p))
+    const first = await check()
+    assert.equal(first.length, 1)
+    assert.match(first[0], /\(atq /)
+    assert.deepEqual(await check(), [])
+    assert.deepEqual(ledger().flatMap((r) => r.transfers.map((t) => t.paidTwiceBy)), [[stray], [stray], [stray]])
+  })
+
+  it("keeps what a transfer holds as a second payment out of what a transfer not settled yet may take for its own", async () => {
+    const X = evmAddress(0xa79)
+    writeFolder("a", { removals: [{ recipient: X, amount: PNK(7000) }] }, 1790000000071)
+    const api = await startPage()
+    const fake = new FakeWallet(wallet)
+    const controller = page(api, fake)
+    await controller.check("a", ["removals"])
+    assert.equal((await controller.disburse()).state, "done")
+    const stray = String(await fake.signAndSend({ to: evm.token, data: P.transferData(X, PNK(7000).toString()) })).toLowerCase()
+    const check = async () => (await api.check({ folder: "a", kinds: ["removals"], account: wallet.address })).problems.filter((p: string) => /paid again/.test(p))
+    assert.equal((await check()).length, 1)
+    // send signs the month's submissions (X, the same amount): not mined, and replaced from another machine
+    writeFolder("b", { submissions: [{ recipient: X, amount: PNK(7000) }] })
+    evm.autoMine = false
+    await assert.rejects(sendRoutine({ file: "1790000000001.json", filesDir: join(work, "files", "b"), skipOnchainCheck: true }, { log }), /was not mined within/)
+    const signed = (ledger().find((r) => r.kind === "submissions") as DisbursementRecord).transfers[0]
+    await fake.signAndSend({ to: evm.token, data: P.transferData(X, PNK(7000).toString()) }, { max: "400", tip: "200" }, signed.nonce)
+    evm.mine()
+    evm.autoMine = true
+    assert.equal(paid().length, 3)
+    assert.deepEqual(await check(), [], "the replacement is that transfer's payment, not a second payment of the older one")
+    assert.deepEqual((ledger().find((r) => r.kind === "removals") as DisbursementRecord).transfers[0].paidTwiceBy, [stray])
   })
 
   it("never reports again a second payment recorded on a transfer it no longer watches", async () => {
