@@ -10,9 +10,11 @@ import { evmAddress, makeTag, SOLANA_CHAIN, solanaAddress } from "../support/fix
 
 // applyTagFilters' collaborators are swapped through their modules' exports
 // (CommonJS reads them at call time): the explorer check (off in the test
-// baseline, EXPLORER_CHECK=off), the RPC validation and the pauses between checks.
+// baseline, EXPLORER_CHECK=off) and its dating, the RPC validation and the
+// pauses between checks.
 const validation = require("../../src/utils/address-tag-validation")
 const explorerTags = require("../../src/utils/explorer-tags")
+const tagDating = require("../../src/utils/tag-dating")
 const sender = require("../../src/transaction-sender")
 const pm = require("../../src/utils/prediction-market-detection")
 const { applyTagFilters } = require("../../src/utils/tag-filters") as typeof import("../../src/utils/tag-filters")
@@ -445,10 +447,17 @@ describe("applyTagFilters", () => {
 
   describe("on the chain's reference explorer", () => {
     let asked: { host: string; address: string }[]
+    type DatingItem = import("../../src/utils/tag-dating").DatingItem
+    type DatingVerdict = import("../../src/utils/tag-dating").DatingVerdict
+    let dated: DatingItem[]
+    let verdictFor: (item: DatingItem) => DatingVerdict
+    let realDating: unknown
     beforeEach(() => {
       asked = []
+      dated = []
       process.env.EXPLORER_CHECK = "on"
-      // tagged on etherscan.io: evmAddress(0x7a9); arbiscan.io cannot be read
+      // tagged on etherscan.io: evmAddress(0x7a9), a token whose page shows its
+      // logo and age; arbiscan.io cannot be read
       explorerTags.checkExplorerTags = async (items: { key: string; host: string; address: string }[]) => {
         asked.push(...items.map(({ host, address }) => ({ host, address })))
         return new Map(
@@ -456,25 +465,43 @@ describe("applyTagFilters", () => {
             i.key,
             i.host === "arbiscan.io"
               ? { tagged: null, names: [], ignored: [], detail: "arbiscan.io shuts scripts out", url: `https://arbiscan.io/address/${i.address}` }
-              : { tagged: i.address === evmAddress(0x7a9), names: ["Uniswap V2: Router 2"], ignored: [], detail: "", url: "" },
+              : {
+                  tagged: i.address === evmAddress(0x7a9),
+                  names: ["Uniswap V2: Router 2"],
+                  ignored: [],
+                  detail: "",
+                  url: "",
+                  ...(i.address === evmAddress(0x7a9) ? { logo: "https://etherscan.io/token/images/uni_32.png", createdAt: 1600000000 } : {}),
+                },
           ])
         )
+      }
+      realDating = tagDating.dateExplorerTags
+      verdictFor = () => ({ decision: "paid by default", evidence: "no dated evidence either way" })
+      tagDating.dateExplorerTags = async (items: DatingItem[]) => {
+        dated.push(...items)
+        return new Map(items.map((i) => [i.key, verdictFor(i)]))
       }
     })
     afterEach(() => {
       process.env.EXPLORER_CHECK = "off"
+      tagDating.dateExplorerTags = realDating
     })
 
-    it("reports Address Tags and Tokens entries tagged there or not readable, excludes none, and never asks for CDN entries", async () => {
+    const NOVEMBER = { start: new Date("2026-11-01T00:00:00Z"), end: new Date("2026-12-01T00:00:00Z") }
+
+    it("before November 2026, reports Address Tags and Tokens entries tagged there or not readable, excludes none, and never asks for CDN entries", async () => {
       const tagged = makeTag({ chain: "1", tagAddress: evmAddress(0x7a9) })
       const taggedToken = makeTag({ registry: "tokens", chain: "1", tagAddress: evmAddress(0x7a9) })
       const untagged = makeTag({ chain: "1", tagAddress: evmAddress(0xc1) })
       const onArbitrum = makeTag({ registry: "tokens", chain: "42161", tagAddress: evmAddress(0xa4b) })
       const domain = makeTag({ registry: "domains", chain: "1", tagAddress: evmAddress(0xd0) })
       const eoa = makeTag({ chain: "1", tagAddress: evmAddress(0xe0a) })
-      const { passed, excluded, explorerReview } = await applyTagFilters([tagged, taggedToken, untagged, onArbitrum, domain, eoa])
+      const { passed, excluded, explorerReview } = await applyTagFilters([tagged, taggedToken, untagged, onArbitrum, domain, eoa], { period: OCTOBER })
       assert.equal(passed.length, 5, "a tag seen today may postdate the submission: a person decides")
       assert.deepEqual(excluded.map((e) => e.reason), ["not a contract (getCode == 0x)"])
+      assert.equal(dated.length, 0, "October 2026 was paid before the dated check: re-running it reproduces that")
+      assert.ok(explorerReview.every((r) => r.decision === undefined))
       assert.ok(!asked.some((a) => a.address === eoa.tagAddress), "an entry already excluded needs no review")
       assert.deepEqual(
         explorerReview.map((r) => [r.tag.id, r.status, r.detail]),
@@ -490,6 +517,55 @@ describe("applyTagFilters", () => {
       assert.ok(checked.includes(tagged.tagAddress), "an entry tagged there is still checked on-chain")
     })
 
+    it("from November 2026, excludes an entry with dated evidence of its tag before its submission, and gives every other its verdict", async () => {
+      const tagged = makeTag({ chain: "1", tagAddress: evmAddress(0x7a9), submissionTime: 1793000000 })
+      const taggedToken = makeTag({ registry: "tokens", chain: "1", tagAddress: evmAddress(0x7a9), submissionTime: 1793100000 })
+      const untagged = makeTag({ chain: "1", tagAddress: evmAddress(0xc1), submissionTime: 1793000000 })
+      const onArbitrum = makeTag({ registry: "tokens", chain: "42161", tagAddress: evmAddress(0xa4b), submissionTime: 1793200000 })
+      const domain = makeTag({ registry: "domains", chain: "1", tagAddress: evmAddress(0x7a9), submissionTime: 1793000000 })
+      verdictFor = (item) =>
+        item.tagged === null
+          ? { decision: "paid by default", evidence: "its explorer could not be read, with no dated evidence: the Wayback Machine did not answer (HTTP 503)" }
+          : item.submissionTime === 1793000000
+          ? { decision: "excluded", evidence: "archived with the public name tag \"Uniswap V2: Router 2\" on 2025-01-01T00:00:00Z, before the submission" }
+          : { decision: "kept", evidence: "archived without a public name tag after the submission" }
+      const { passed, excluded, explorerReview } = await applyTagFilters([tagged, taggedToken, untagged, onArbitrum, domain], { period: NOVEMBER })
+      assert.deepEqual(
+        excluded.map((e) => [e.tag.id, e.reason, e.detail]),
+        [[tagged.id, "tagged on explorer before submission", "archived with the public name tag \"Uniswap V2: Router 2\" on 2025-01-01T00:00:00Z, before the submission"]]
+      )
+      assert.deepEqual(new Set(passed.map((t) => t.id)), new Set([taggedToken.id, untagged.id, onArbitrum.id, domain.id]), "a CDN entry is exempt, whatever its address")
+      assert.deepEqual(
+        dated.map(({ address, submissionTime, tagged, names, logo, createdAt }) => ({ address, submissionTime, tagged, names, logo, createdAt })),
+        [
+          { address: evmAddress(0x7a9), submissionTime: 1793000000, tagged: true, names: ["Uniswap V2: Router 2"], logo: "https://etherscan.io/token/images/uni_32.png", createdAt: 1600000000 },
+          { address: evmAddress(0x7a9), submissionTime: 1793100000, tagged: true, names: ["Uniswap V2: Router 2"], logo: "https://etherscan.io/token/images/uni_32.png", createdAt: 1600000000 },
+          { address: evmAddress(0xa4b), submissionTime: 1793200000, tagged: null, names: [], logo: undefined, createdAt: undefined },
+        ],
+        "only entries tagged today or not readable are dated, each against its own submission"
+      )
+      assert.deepEqual(
+        explorerReview.map((r) => [r.tag.id, r.status, r.decision]),
+        [
+          [tagged.id, "tagged", "excluded"],
+          [taggedToken.id, "tagged", "kept"],
+          [onArbitrum.id, "not read", "paid by default"],
+        ]
+      )
+      assert.ok(logs.has("Explorer dating: 1 excluded on dated evidence of a tag before their submission, 1 kept on dated evidence, 1 paid without dated evidence either way"))
+      assert.ok(logs.has("1 of them could not be checked against the Wayback Machine or the registries"), "a later run may exclude it: the run says so")
+    })
+
+    it("dates from EXPLORER_DATING_SINCE, read when a period is filtered, and refuses a bad one", async () => {
+      const tags = [makeTag({ chain: "1", tagAddress: evmAddress(0x7a9), submissionTime: 1790000000 })]
+      await withEnv({ EXPLORER_DATING_SINCE: "2026-10-01" }, () => applyTagFilters(tags, { period: OCTOBER }))
+      assert.equal(dated.length, 1, "October dated when the setting says so")
+      await withEnv({ EXPLORER_DATING_SINCE: "2026-12-01" }, () => applyTagFilters(tags, { period: NOVEMBER }))
+      assert.equal(dated.length, 1, "November left alone when the setting starts later")
+      assert.ok(logs.has("Explorer dating skipped: period starts 2026-11-01T00:00:00.000Z, before EXPLORER_DATING_SINCE=2026-12-01"))
+      await withEnv({ EXPLORER_DATING_SINCE: "2026-13-01" }, () => assert.rejects(applyTagFilters(tags, { period: NOVEMBER }), /Invalid EXPLORER_DATING_SINCE "2026-13-01"/))
+    })
+
     it("is skipped with EXPLORER_CHECK=off, and by prefetch", async () => {
       const tags = [makeTag({ chain: "1", tagAddress: evmAddress(0x7a9) })]
       process.env.EXPLORER_CHECK = "off"
@@ -497,6 +573,7 @@ describe("applyTagFilters", () => {
       process.env.EXPLORER_CHECK = "on"
       assert.equal((await applyTagFilters(tags, { skipExplorerCheck: true })).passed.length, 1)
       assert.equal(asked.length, 0)
+      assert.equal(dated.length, 0)
     })
   })
 })

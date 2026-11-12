@@ -358,9 +358,10 @@ What it does:
     account, Solana's ERC-20)
   - Solana Address Tags skip the bytecode checks (no EVM code there)
 - looks up the Address Tags and Tokens entries (not Domains) on their chain's
-  reference explorer and lists, for review, those tagged there or whose
-  explorer cannot be read in `<runId>_explorer_check.csv`; nothing is excluded
-  for it automatically, see [Explorer tags](#explorer-tags)
+  reference explorer and, from the November 2026 period, excludes those with
+  dated evidence that they were tagged there before their submission; every
+  entry tagged there or whose explorer cannot be read is listed with its
+  verdict in `<runId>_explorer_check.csv`, see [Explorer tags](#explorer-tags)
   - the bytecode checks use each chain's `rpc` in `src/utils/chains.ts`: one
     that does not answer `eth_getCode` (3 attempts) stops the run, naming it,
     before any transaction is counted, since an unchecked tag would be
@@ -430,47 +431,111 @@ Files written under `files/`:
 
 - `<runId>_filter_check.csv` (detail rows + summary rows with totals by
   reason; the Detail column holds the evidence, e.g. the prediction market)
-- `<runId>_explorer_check.csv` (the explorer check's findings to review, see
+- `<runId>_explorer_check.csv` (every entry tagged on its explorer or not
+  readable, with the explorer check's verdict and evidence, see
   [Explorer tags](#explorer-tags))
 
 ### Explorer tags
 
 Address Tags and Tokens entries already tagged on their chain's reference
-explorer (`explorer` in `src/utils/chains.ts`, the program's list) are not
-rewarded; Domains (CDN) entries are exempt. `fetch` and `filter-check` look
-every such entry up, without any key, and list for review in
-`files/<runId>_explorer_check.csv` (fetch writes it before counting):
+explorer (`explorer` in `src/utils/chains.ts`, the program's list) **when they
+were submitted** are not rewarded; Domains (CDN) entries are exempt. An
+explorer shows a tag as it is today, never when it was added, and tags often
+appear after the submission (explorers import token listings in bulk), so
+`fetch` and `filter-check` decide each entry on dated evidence, with no key,
+no schedule and nothing to do by hand.
 
-- **tagged**: the explorer shows a name tag for it (in the last column):
-  - Etherscan-built explorers (etherscan.io, snowscan.xyz, celoscan.io,
-    basescan.org, lineascan.build, polygonscan.com, mega.etherscan.io,
-    hyperevmscan.io, arc.etherscan.io): the address page's public name tag,
-    the one with the tooltip "Public Name Tag (viewable by anyone)". Labels
-    and badges ("Token Contract", "DEX", the EIP-7702 "Authority") are no tags.
-  - Blockscout explorers (gnosis.blockscout.com, zksync.blockscout.com,
-    robinhoodchain.blockscout.com): the name tags of Blockscout's metadata
-    service, which their address pages show, except Blockscout's copies of
-    Kleros Scout's own entries (or every accepted entry would show up).
-- **not read**: arbiscan.io and optimistic.etherscan.io answer scripts with a
-  Cloudflare challenge, Solscan has no keyless way, and an explorer that fails
-  to answer lands here too: check those pages by hand.
+**1. Today's page** (`src/utils/explorer-tags.ts`). An entry with no name tag
+there is rewarded, and nothing more is asked about it:
 
-**Nothing is excluded for it automatically.** The rule is about tags that
-existed when the entry was submitted, and no explorer shows when a tag was
-added; Etherscan-built ones do not say where it came from either, and
-Etherscan has been reported to take name tags from Kleros Curate itself. In
-the first half of October 2026, ArcScan already showed a name tag for all 20
-Arc tokens one submitter had registered on Oct 9-13, some of them that same
-day. Open the page, decide, and put the entries that were tagged before their
-submission in `exclusions.json`, then generate and document the period again
-(see [Exclusions](#exclusions-fixing-rewards-after-they-were-generated)).
-`--mode all` documents right after fetching: its summary names the review
-file, to go through before sending.
+- Etherscan-built explorers (etherscan.io, snowscan.xyz, celoscan.io,
+  basescan.org, lineascan.build, polygonscan.com, mega.etherscan.io,
+  hyperevmscan.io, arc.etherscan.io, arbiscan.io, optimistic.etherscan.io):
+  the address page's public name tag, the one with the tooltip "Public Name
+  Tag (viewable by anyone)". Labels and badges ("Token Contract", "DEX", the
+  EIP-7702 "Authority") are no tags.
+- Blockscout explorers (gnosis.blockscout.com, zksync.blockscout.com,
+  robinhoodchain.blockscout.com): the name tags of Blockscout's metadata
+  service, which their address pages show.
+- A tag the explorer took from Kleros Scout never counts: Etherscan's public
+  note "This nametag was submitted by Kleros Curate.", Blockscout's link to the
+  Scout item (or every accepted entry would end up excluded).
+- arbiscan.io, optimistic.etherscan.io and (since November 2026) celoscan.io
+  answer scripts with a Cloudflare challenge, and Solscan has no keyless way:
+  those entries are **not read**, and dated below like the tagged ones.
 
-`EXPLORER_CHECK=off` skips the look-up (then check every entry by hand);
+**2. Dating** (`src/utils/tag-dating.ts`). Each entry tagged today, or whose
+explorer cannot be read, is dated against the time its registration was
+requested (`submissionTime` from the indexer); the first row that applies
+decides:
+
+| Evidence (free, public, made outside Kleros) | Verdict |
+|---|---|
+| A Wayback Machine copy of its address page, taken after the submission, shows no tag | kept |
+| A copy taken before the submission shows the tag | **excluded** |
+| The token logo the explorer hosts (the token tracker's, its `Last-Modified`) was written before the submission, and is not older than the contract by more than 7 days (a shared file dates nothing) | **excluded** |
+| [eth-labels](https://github.com/dawsbot/eth-labels), a public copy of Etherscan-built explorers' tags kept in git, lists the tag in a copy committed before the submission | **excluded** |
+| The token logo was written after the submission | kept |
+| Nothing dated either way: a name tag never archived, Solscan, a tag on Blockscout from another source than Kleros, an archive that does not answer | **paid by default** |
+
+An excluded entry gets the reason `tagged on explorer before submission` in
+`<runId>_filter_check.csv`, with its evidence as the detail.
+`files/<runId>_explorer_check.csv` (fetch writes it before counting) lists
+every entry tagged today or not read with its decision and the evidence: the
+archived copy's link, the logo's date, the eth-labels commit, or why there was
+none. The run's summary gives the counts.
+
+- **Failures only ever pay.** An exclusion's evidence must stand against
+  everything the Wayback Machine holds of the page: a logo or eth-labels
+  date excludes only once the archive was asked and its copies read, and when
+  no copy taken after that date (and before the submission) shows the page
+  without a tag. An archive that does not answer, refuses, or runs out of time
+  leaves the entry paid by default, saying so.
+- The logo dates the token's explorer profile, not its name tag: the two come
+  together when a profile is made, which an untagged copy after the logo's
+  date disproves (the entry is then paid by default).
+- A tag (or token profile) an explorer took from an earlier Kleros entry of
+  the address never counts: before any exclusion, the Address Tags and Tokens
+  registries are read (once per run, any spelling of the address) for a
+  registration that resolved before the evidence's date; one found, or a
+  registry that cannot be read, leaves the entry paid by default. Tags made
+  by the Address Tag Query registry name no address there, so on explorers
+  that cannot be read they are not recognised.
+- Archived copies are read strictly: the address's own badge, never the
+  contract creator's tag that some layouts mark the same way, nor the
+  contract's name that the page title shows when it has no tag; a copy the
+  archive redirects to another moment's is skipped.
+- A shared logo file rewritten after the contract was created (a rebrand of
+  the token it belongs to) would still date the profile wrongly: a rare case
+  the 7-day guard does not catch.
+- "Paid by default" is the published default: no dated evidence, no
+  exclusion. A tag seen only today is not evidence; on Arbiscan or Solscan
+  nothing at all can be seen.
+- A submitter protects an entry by archiving its address page on the Wayback
+  Machine (web.archive.org/save) when submitting.
+- Periods before November 2026 (`EXPLORER_DATING_SINCE`, default
+  `2026-11-01`) were paid without the dating: re-running one only lists its
+  tagged entries, decision "to review by hand", so it reproduces what was
+  paid. Add an entry confirmed tagged before its submission to
+  `exclusions.json`, then generate and document again (see
+  [Exclusions](#exclusions-fixing-rewards-after-they-were-generated)).
+
+`EXPLORER_CHECK=off` skips all of it (then check every entry by hand);
 `prefetch` never runs it. Each Etherscan-built explorer is read at one page per
 2 s, all of them side by side, and Blockscout 50 addresses per request: half a
-month's entries took under 2 minutes.
+month's entries took under 2 minutes. The dating reads each tagged token's
+logo date with one `HEAD` request, downloads eth-labels' file (~12 MB) once,
+and asks the Wayback Machine one request at a time: one index query per entry
+(its latest 50 copies), then an archived page only where there is one to read,
+5 s apart. Its index, and its pages, are each not asked again in the run when
+they refuse this machine (HTTP 429 with no `Retry-After`: its bot block,
+which lasts hours and can refuse pages while the index answers), fail for 2
+entries in a row (3 attempts each, waiting 30 s, then 90 s, or as long as it
+asks), or after 30 minutes in all; the entries they leave undecided are paid
+by default, saying so, and the summary says a fetch run again later, before
+sending, may exclude more. Token logos are asked one `HEAD` each, and an
+explorer whose logos fail 3 times in a row is not asked again. Expect about
+10 minutes for a month like October 2026 (~70 tagged or unreadable entries).
 
 ### 3) Removals + ATQ
 

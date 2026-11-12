@@ -8,6 +8,10 @@ import { httpFetch } from "./http"
 //   the address page. Its public name tag carries the tooltip "Public Name Tag
 //   (viewable by anyone)"; labels and badges ("Token Contract", "DEX", the
 //   EIP-7702 "Authority") share its markup without that tooltip, and are no tag.
+//   A tag the explorer took from Kleros Curate carries the public note "This
+//   nametag was submitted by Kleros Curate.": not counted, as on Blockscout.
+//   The page also gives what tag-dating.ts needs to date a tag: the token
+//   tracker's logo (hosted by the explorer) and the contract's age.
 // - Blockscout explorers (gnosis, zksync, robinhoodchain): Blockscout's metadata
 //   service, the name tags their address pages show. Blockscout also imports
 //   Kleros Scout's own entries as name tags: those are not counted, or an
@@ -22,6 +26,9 @@ export interface ExplorerCheck {
   ignored: string[] // name tags not counted (imported from Kleros Scout)
   detail: string
   url: string // the address page, for a check by hand
+  // Etherscan-built pages that show them (see tag-dating.ts):
+  logo?: string // the token tracker's logo, a file on the explorer
+  createdAt?: number // when the contract was created (unix s, to the day), from the age the page shows
 }
 
 export interface ExplorerItem {
@@ -88,6 +95,9 @@ const BROWSER_HEADERS = {
 
 const isEvmAddress = (address: string): boolean => /^0x[0-9a-fA-F]{40}$/.test(address)
 
+export const isEtherscanBuilt = (host: string): boolean => ETHERSCAN_BUILT.has(host.toLowerCase())
+export const EXPLORER_BROWSER_HEADERS = BROWSER_HEADERS
+
 export const explorerAddressUrl = (host: string, address: string): string =>
   host === "solscan.io" ? `https://solscan.io/account/${address}` : `https://${host}/address/${address}`
 
@@ -110,20 +120,115 @@ const decodeHtml = (s: string): string =>
     .replace(/&amp;/g, "&")
     .trim()
 
-// An Etherscan-built address page: tagged when it shows a public name tag.
-// null when the page is not that address's (a challenge, an error page).
-export const parseEtherscanAddressPage = (html: string, address: string, url = ""): ExplorerCheck => {
-  const title = decodeHtml(((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html) || [])[1] || "").replace(/\s+/g, " "))
-  if (/Just a moment|Attention Required/i.test(title)) return check(null, "a Cloudflare challenge page", url)
-  // "[<tag or ENS name> | ]Address: 0x1234abcd...<end> | <Explorer>"
+// Decoded first: the 2025 layout writes "<tag>&#10;(0x…) | Address 0x…", a
+// newline the whitespace is then folded with.
+const titleOf = (html: string): string =>
+  decodeHtml((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html) || [])[1] || "")
+    .replace(/\s+/g, " ")
+    .trim()
+
+// "[<name> | ]Address[:] 0x1234abcd…" naming this address, or why not.
+const notThisPage = (title: string, address: string): string | null => {
+  if (/Just a moment|Attention Required/i.test(title)) return "a Cloudflare challenge page"
   if (!/Address:?\s*0x/i.test(title) || !title.toLowerCase().includes(address.slice(0, 10).toLowerCase())) {
-    return check(null, `not this address's page ("${title.slice(0, 80)}")`, url)
+    return `not this address's page ("${title.slice(0, 80)}")`
   }
-  if (!html.includes(PUBLIC_NAME_TAG)) return check(false, "no public name tag", url)
+  return null
+}
+
+// The public note of a tag the explorer took from Kleros ("This nametag was
+// submitted by <a …>Kleros Curate</a>." in 2026), in any markup or wording
+// that says it was submitted by Kleros.
+const KLEROS_NOTE = /submitted by(?:\s|<[^>]*>)*Kleros/i
+
+// The token tracker's logo: "<a … title="View Token Tracker Page"><img src='/token/images/x_32.png' …>"
+// (a placeholder image outside /token/images/ is no logo).
+const trackerLogo = (html: string): string | undefined => {
+  const m = /title=["']View Token Tracker Page["'][^>]*>\s*<img\b[^>]*\bsrc=["']([^"']+)["']/i.exec(html)
+  return m && /^\/token\/images\/[^\s"'<>]+$/.test(m[1]) ? m[1] : undefined
+}
+
+// An age as the explorer writes it ("3 yrs 301 days ago", "5 hrs 2 mins ago"),
+// in seconds; null when it is not one.
+export const parseExplorerAge = (text: string): number | null => {
+  const UNIT: { [unit: string]: number } = { yr: 365 * 86400, day: 86400, hr: 3600, min: 60, sec: 1 }
+  const clean = text.trim().replace(/\s+/g, " ")
+  if (!/^(\d+ (yrs?|days?|hrs?|mins?|secs?) ?)+ago$/i.test(clean)) return null
+  let seconds = 0
+  const re = /(\d+) (yr|day|hr|min|sec)s?/gi
+  for (let m = re.exec(clean); m; m = re.exec(clean)) seconds += Number(m[1]) * UNIT[m[2].toLowerCase()]
+  return seconds
+}
+
+// The contract's creation time, from the age next to its creation transaction
+// ("Contract Creator … | <a href="/tx/0x…"><span>3 yrs 301 days ago</span>").
+const contractCreatedAt = (html: string, nowSeconds: number): number | undefined => {
+  const start = html.indexOf("<!-- Contract Creator -->")
+  const end = html.indexOf("<!-- End Contract Creator -->", start)
+  if (start < 0 || end < 0) return undefined
+  const m = /<a\b[^>]*href=["']\/tx\/0x[0-9a-fA-F]{64}["'][^>]*>\s*<span>([^<]+)<\/span>/.exec(html.slice(start, end))
+  const age = m ? parseExplorerAge(m[1]) : null
+  return age === null ? undefined : nowSeconds - age
+}
+
+// An Etherscan-built address page: tagged when it shows a public name tag
+// (not one submitted by Kleros Curate). null when the page is not that
+// address's (a challenge, an error page). `now`: when the page was read (ms).
+export const parseEtherscanAddressPage = (html: string, address: string, url = "", now = Date.now()): ExplorerCheck => {
+  const title = titleOf(html)
+  const wrongPage = notThisPage(title, address)
+  if (wrongPage) return check(null, wrongPage, url)
+  const logoPath = trackerLogo(html)
+  const createdAt = contractCreatedAt(html, Math.floor(now / 1000))
+  const extras = {
+    ...(logoPath ? { logo: url ? new URL(logoPath, url).toString() : logoPath } : {}),
+    ...(createdAt !== undefined ? { createdAt } : {}),
+  }
+  if (!html.includes(PUBLIC_NAME_TAG)) return { ...check(false, "no public name tag", url), ...extras }
   const names: string[] = []
   const re = /Public Name Tag \(viewable by anyone\)[\s\S]{0,600}?<i class=['"]fas fa-tag text-muted['"]><\/i>\s*<span class=['"]hash-tag[^'"]*['"]>([^<]*)<\/span>/g
   for (let m = re.exec(html); m; m = re.exec(html)) names.push(decodeHtml(m[1]))
-  return check(true, "public name tag", url, names.length > 0 ? names : ["(name not read)"])
+  const found = names.length > 0 ? names : ["(name not read)"]
+  if (KLEROS_NOTE.test(html)) return { ...check(false, "only a name tag submitted by Kleros Curate", url, [], found), ...extras }
+  return { ...check(true, "public name tag", url, found), ...extras }
+}
+
+export interface ArchivedPage {
+  readable: boolean // a copy of this address's page
+  tagged: boolean // the address's own public name tag, not one submitted by Kleros Curate
+  names: string[] // that tag
+  detail: string
+}
+
+// An archived copy of an Etherscan-built address page (any layout since
+// 2023), read strictly: an exclusion rests on it. The title leads with the
+// address's name ("<name> | Address 0x…"), which is its public name tag only
+// when an element of the page marked "Public Name Tag (viewable by anyone)"
+// says the same: untagged, the title shows the contract's own name or an ENS
+// name instead, and the late-2024 and 2025 layouts also put that tooltip on
+// the contract creator's link (another address's tag).
+export const parseArchivedAddressPage = (html: string, address: string): ArchivedPage => {
+  const title = titleOf(html)
+  const wrongPage = notThisPage(title, address)
+  if (wrongPage) return { readable: false, tagged: false, names: [], detail: wrongPage }
+  const leading = /^(.*?)\s*\|\s*Address:?\s*0x/i.exec(title)
+  const name = leading ? leading[1].replace(/\s*\(0x[0-9a-fA-F]{40}\)\s*$/, "").trim() : ""
+  if (!name) return { readable: true, tagged: false, names: [], detail: "no public name tag" }
+  const marked = new Set<string>()
+  const patterns = [
+    // the tag's badge (2025 on): the marker tooltip, then the name in a hash-tag span
+    /Public Name Tag \(viewable by anyone\)[\s\S]{0,600}?<i class=['"]fas fa-tag text-muted['"]><\/i>\s*<span class=['"]hash-tag[^'"]*['"]>([^<]*)<\/span>/g,
+    // the marker tooltip naming it: "Public Name Tag (viewable by anyone) <br/> <name>&#10;(0x…)"
+    /title=['"]Public Name Tag \(viewable by anyone\)\s*<br\s*\/?>\s*([^'"]+?)\s*(?:&#10;|['"])/g,
+    // an element whose tooltip is the marker and whose text is the name (2023 layout)
+    /title=['"]Public Name Tag \(viewable by anyone\)['"][^>]*>([^<]+)</g,
+  ]
+  for (const re of patterns) {
+    for (let m = re.exec(html); m; m = re.exec(html)) marked.add(decodeHtml(m[1]).replace(/\s+/g, " ").toLowerCase())
+  }
+  if (!marked.has(name.toLowerCase())) return { readable: true, tagged: false, names: [], detail: `no public name tag ("${name}" is not one)` }
+  if (KLEROS_NOTE.test(html)) return { readable: true, tagged: false, names: [], detail: `only a name tag submitted by Kleros Curate ("${name}")` }
+  return { readable: true, tagged: true, names: [name], detail: "public name tag" }
 }
 
 interface MetadataTag {

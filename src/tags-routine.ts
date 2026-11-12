@@ -14,7 +14,7 @@ import { loadHypersync, requireEnvioApiToken } from "./utils/hypersync-enrichmen
 import { assertSolanaRpcSettings } from "./utils/solana-rpc-enrichment"
 import { acquireTxCountCacheLock, txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
 import { writeFetchOutputs } from "./utils/fetch-output"
-import { applyTagFilters } from "./utils/tag-filters"
+import { applyTagFilters, datedUnchecked } from "./utils/tag-filters"
 import { writeExplorerCheck } from "./utils/filter-check-output"
 import { assertIndexerComplete } from "./utils/indexer-checks"
 import { ExclusionList, loadExclusions } from "./utils/exclusions"
@@ -202,7 +202,15 @@ export const tagsRoutine = async (period: Period, sharedExclusions?: ExclusionLi
   const runId = String(new Date().getTime())
   const explorerFile = await writeExplorerCheck(runId, explorerReview)
   const tagged = explorerReview.filter((r) => r.status === "tagged").length
-  if (explorerFile) {
+  const dated = explorerReview.some((r) => r.decision !== undefined)
+  const decided = (decision: string): number => explorerReview.filter((r) => r.decision === decision).length
+  if (explorerFile && dated) {
+    console.log(
+      `[filter] Explorer check: ${conf.FILES_DIR}/${explorerFile} lists each entry tagged on its explorer or not readable, ` +
+        `with its verdict and evidence: ${decided("excluded")} excluded, ${decided("paid by default")} paid without dated evidence ` +
+        "(README \"Explorer tags\"); nothing to do by hand"
+    )
+  } else if (explorerFile) {
     console.log(
       `[filter] Explorer check to review: ${conf.FILES_DIR}/${explorerFile}. Add the entries already tagged before ` +
         "their submission to exclusions.json, then run generate and document again (README \"Explorer tags\")"
@@ -218,7 +226,22 @@ export const tagsRoutine = async (period: Period, sharedExclusions?: ExclusionLi
     {
       excludedCount: excluded.length,
       enrichment,
-      ...(explorerFile ? { explorerCheck: { file: explorerFile, tagged, notRead: explorerReview.length - tagged } } : {}),
+      ...(explorerFile
+        ? {
+            explorerCheck: {
+              file: explorerFile,
+              tagged,
+              notRead: explorerReview.length - tagged,
+              ...(dated
+                ? {
+                    excluded: decided("excluded"),
+                    paidByDefault: decided("paid by default"),
+                    unchecked: explorerReview.filter(datedUnchecked).length,
+                  }
+                : {}),
+            },
+          }
+        : {}),
     }
   )
 

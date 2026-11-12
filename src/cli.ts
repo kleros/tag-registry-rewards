@@ -435,7 +435,19 @@ const main = async () => {
     console.log(`Documented ${entry.recipientCount} recipients for ${entry.period}.`)
     if (entry.url) console.log(`IPFS URL: ${entry.url}`)
     const review = fetchManifest.explorerCheck
-    if (review) {
+    if (review && review.excluded !== undefined) {
+      // the dated check decided every entry (README "Explorer tags")
+      console.log(
+        `Explorer check: ${conf.FILES_DIR}/${review.file} (${review.excluded} excluded on dated evidence of a tag before ` +
+          `their submission, ${review.paidByDefault} paid without dated evidence). Nothing to do by hand.`
+      )
+      if (review.unchecked) {
+        console.log(
+          `  ${review.unchecked} of the entries paid by default could not be checked against the Wayback Machine or the ` +
+            "registries (see their evidence): fetching again later, before sending, may exclude more."
+        )
+      }
+    } else if (review) {
       // Published already: an exclusion found in the review means generating
       // and documenting the period again (README "Exclusions").
       console.log(
