@@ -6,51 +6,50 @@ import { EXPLORER_BROWSER_HEADERS, isEtherscanBuilt, parseArchivedAddressPage } 
 // Whether an Address Tags or Tokens entry tagged on its reference explorer
 // today (or on an explorer that cannot be read) was already tagged when it was
 // submitted, the moment the program's rule is about. Explorers show no date
-// for a tag, so an entry is excluded only on dated evidence made outside
-// Kleros, all of it free and public, in this order:
+// for a tag, so an entry is excluded only on dated evidence of the tag itself,
+// made outside Kleros, all of it free and public, in this order:
 //
 //   1. a Wayback Machine copy of its address page taken after the submission
 //      shows no public name tag                                   -> kept
 //   2. a copy taken before the submission shows the tag           -> excluded
-//   3. the token logo the explorer hosts for it (the tracker's) was written
-//      before the submission, and is not a file older than the contract
-//      (a shared one, which dates nothing)                        -> excluded
-//   4. eth-labels (dawsbot/eth-labels, a public scrape of Etherscan-built
+//   3. eth-labels (dawsbot/eth-labels, a public scrape of Etherscan-built
 //      explorers' tags kept in git) lists the tag in a copy committed before
 //      the submission                                             -> excluded
-//   5. the token logo was written after the submission            -> kept
-//   6. anything else (no dated evidence, Solscan)                 -> paid by default
+//   4. the token logo the explorer hosts for it (the tracker's) was written
+//      after the submission                                       -> kept
+//   5. anything else (no dated evidence, Solscan)                 -> paid by default
 //
-// Failures only ever pay. An exclusion's evidence must stand against all the
-// archive holds of the page: 3 and 4 exclude only once the archive was asked
-// and its copies read, and when none taken after the evidence's date shows
-// the page without a tag (the logo dates the token's explorer profile, not
-// its tag: the two come together when a profile is made, which such a copy
-// disproves). 2 and 4 exclude only when the program's registries hold no
-// earlier entry of the address: a tag an explorer took from Kleros never
-// counts (explorer-tags.ts reads its note on today's page and on archived
-// ones; this covers the pages that cannot be read and layouts without it).
-// An archive that does not answer, refuses, or runs out of time leaves the
-// entry paid by default, saying so. Every verdict says what it rests on.
+// A logo written before the submission excludes nothing: it dates the token's
+// explorer profile, which can exist without a tag (COMP, TROLL and BabyPepe
+// show a logo and no tag), so a tag added to it later would pass for an old
+// one.
+//
+// Failures only ever pay. An exclusion's evidence must stand against what the
+// archive holds of the page: 2 and 3 exclude only once the archive answered,
+// the earliest copy after the submission (which could keep the entry) was
+// read, and no copy before the submission that could show the tag gone was
+// left unread or shows it gone: for 2, none newer than the copy with the tag;
+// for 3, whose rows carry no date of their own, none at all. An empty answer
+// of the index that 3 would rest on (a page never archived, or none of its
+// copies before the submission) is checked first against the page's earliest
+// copy, asked for in another form, since an answer cut short reads the same
+// as none. Both exclude only when the program's registries
+// hold no earlier entry of the address, registered before the copy with the
+// tag or eth-labels' copy: a tag an explorer took from Kleros never counts
+// (explorer-tags.ts reads its note on today's page and on archived ones; this
+// covers the pages that cannot be read and layouts without it). An archive
+// that does not answer, refuses, or runs out of time leaves the entry paid by
+// default, saying so. Every verdict says what it rests on. Nothing is left to
+// check by hand.
 
 export type DatingDecision = "excluded" | "kept" | "paid by default"
 
 // A verdict paid by default because the Wayback Machine did not answer,
-// refused the run's requests or ran out of time, or the registries could not
-// be read for an earlier Kleros entry: one a later run may decide otherwise,
-// and one for a person to check meanwhile (its evidence links the archived
-// copies to open).
+// refused the run's requests or ran out of time, eth-labels could not be
+// read, or the registries could not be read for an earlier Kleros entry: one
+// a later run may decide otherwise. The run counts them; the rule pays them.
 export const datedUnchecked = (verdict: { decision?: string; evidence?: string }): boolean =>
-  verdict.decision === "paid by default" && /the Wayback Machine|could not be checked/.test(verdict.evidence || "")
-
-// Of those, one with dated evidence of a tag before its submission that could
-// not be confirmed (a logo written before it, an eth-labels listing, an
-// archived copy with the tag): the first to check.
-export const datedEarlyEvidence = (verdict: { decision?: string; evidence?: string }): boolean =>
-  datedUnchecked(verdict) &&
-  /before the submission, but |archived with the public name tag "[^"]*" on \S+, but |eth-labels lists the public name tag "[^"]*" in its copy of \S+, but /.test(
-    verdict.evidence || ""
-  )
+  verdict.decision === "paid by default" && /the Wayback Machine|could not be checked|eth-labels could not be read/.test(verdict.evidence || "")
 
 export interface DatingItem {
   key: string
@@ -62,7 +61,6 @@ export interface DatingItem {
   tagged: boolean | null
   names?: string[]
   logo?: string
-  createdAt?: number
 }
 
 export interface DatingVerdict {
@@ -84,9 +82,6 @@ const ETH_LABELS_COMMITS = "https://api.github.com/repos/dawsbot/eth-labels/comm
 const ethLabelsCsv = (sha: string): string => `https://raw.githubusercontent.com/dawsbot/eth-labels/${sha}/data/csv/accounts.csv`
 const ethLabelsPage = (sha: string): string => `https://github.com/dawsbot/eth-labels/blob/${sha}/data/csv/accounts.csv`
 
-// A logo file older than the contract by more than this was made for another
-// contract (bridged and wrapped tokens share their origin's): it dates nothing.
-const SHARED_LOGO_MARGIN_SECONDS = 7 * 86400
 // The Wayback Machine rate-limits (HTTP 429) and stalls at times: it is asked
 // one request at a time, waits as long as it says (Retry-After, up to a
 // limit) or backs off, and its index and its pages are each not asked again
@@ -230,12 +225,16 @@ interface ArchiveFindings {
   afterSkippedAt: number | null // its earliest copy after the submission, when a later one was read instead
   before: ArchivedReading | null // the latest one taken before it (read unless `after` shows no tag)
   beforeUnreadAt: number | null // its newest copy before the submission, when that one could not be read
-  // The copies a person would look at when they could not be read here: the
+  // An empty answer of the index where 3 needs to know there is no copy: of
+  // the page at all ("all": never archived) or before the submission
+  // ("before", asked apart), to check before eth-labels excludes.
+  emptyAnswer: "all" | "before" | null
+  // The copies the verdict names when they could not be read here: the
   // newest before the submission and the earliest after it, from the index.
-  toLookAt: string[]
+  links: string[]
 }
 
-// Where a person sees every copy the archive holds of a page.
+// Where anyone sees every copy the archive holds of a page.
 const archiveCalendar = (host: string, address: string): string => `${WAYBACK}/web/*/https://${host}/address/${address}`
 const copyLink = (copy: Copy): string => `${WAYBACK}/web/${copy.timestamp}/${copy.original}`
 
@@ -354,23 +353,35 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
       afterSkippedAt: null,
       before: null,
       beforeUnreadAt: null,
-      toLookAt: [archiveCalendar(item.host, item.address)],
+      emptyAnswer: null,
+      links: [archiveCalendar(item.host, item.address)],
     })
     if (indexDown) return unanswered(indexDown)
     if (archiveDeadline === undefined) archiveDeadline = Date.now() + archiveBudgetMs
     const deadline = archiveDeadline
     let after: Copy[]
     let before: Copy[]
+    let emptyAnswer: "all" | "before" | null = null
     try {
       // one request finds the copies on both sides of the submission, unless
-      // the page has more copies than an answer holds, all after it
+      // the page has more copies than an answer holds, all after it: then the
+      // earliest after it (the answer kept only the latest) and the latest
+      // before it are asked for apart
       await sleep(ARCHIVE_PACE_SECONDS)
       const copies = await archivedCopies(item.host, item.address, `limit=-${INDEX_ROWS}`, deadline)
       after = copies.filter((c) => c.at > sub) // the earliest first
       before = copies.filter((c) => c.at < sub).reverse() // the latest first
+      if (copies.length === 0) emptyAnswer = "all"
       if (copies.length >= INDEX_ROWS && before.length === 0) {
         await sleep(ARCHIVE_PACE_SECONDS)
+        after = (await archivedCopies(item.host, item.address, `from=${waybackTimestamp(sub + 1)}&limit=${COPIES_TRIED}`, deadline)).filter(
+          (c) => c.at > sub
+        )
+        // the first answer listed copies after the submission: none now is the index failing
+        if (after.length === 0) throw new ArchiveUnreachable("the Wayback Machine's index gave no copy after the submission when asked for the earliest")
+        await sleep(ARCHIVE_PACE_SECONDS)
         before = (await archivedCopies(item.host, item.address, `to=${waybackTimestamp(sub - 1)}&limit=-${COPIES_TRIED}`, deadline)).reverse()
+        if (before.length === 0) emptyAnswer = "before"
       }
       indexFailures = 0
     } catch (err) {
@@ -390,7 +401,8 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
       afterSkippedAt: null,
       before: null,
       beforeUnreadAt: null,
-      toLookAt: [before[0], after[0]].filter((copy): copy is Copy => copy !== undefined).map(copyLink),
+      emptyAnswer,
+      links: [before[0], after[0]].filter((copy): copy is Copy => copy !== undefined).map(copyLink),
     }
     if (findings.copies === 0) return findings
     if (pagesDown) return { ...findings, failure: pagesDown }
@@ -437,6 +449,29 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
     return { note: `its token logo could not be read (${answer.failed})` }
   }
 
+  // An empty answer of the index is all eth-labels would be checked against
+  // (`empty`: no copy of the page at all, or none before the submission
+  // `sub`). Before it excludes, the index is asked in another form for the
+  // page's earliest copy, since an answer cut short reads the same as none.
+  // Why that contradicts the empty answer, or null.
+  const confirmEmptyAnswer = async (item: DatingItem, sub: number, empty: "all" | "before"): Promise<string | null> => {
+    const failed = (why: string): string => `the Wayback Machine could not be asked again for the page's copies (${why})`
+    if (indexDown) return failed(indexDown)
+    try {
+      await sleep(ARCHIVE_PACE_SECONDS)
+      const earliest = await archivedCopies(item.host, item.address, "limit=1", archiveDeadline as number)
+      const contradicts = empty === "all" ? earliest.length > 0 : earliest.some((c) => c.at < sub)
+      return contradicts ? "the Wayback Machine's index listed copies of the page when asked again" : null
+    } catch (err) {
+      if (!(err instanceof ArchiveUnreachable)) throw err
+      if (err instanceof ArchiveRefuses || budgetSpent()) {
+        indexDown = budgetSpent() ? BUDGET_SPENT : `${err.message}; not asked again in this run`
+        console.warn(`[explorer-dating] ${indexDown}`)
+      }
+      return failed(err.message)
+    }
+  }
+
   const dateOne = async (item: DatingItem): Promise<DatingVerdict> => {
     const sub = item.submissionTime
     const today = item.tagged === true ? `tagged today (${(item.names || []).join("; ") || "name not read"})` : "its explorer could not be read"
@@ -446,36 +481,31 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
       return { decision: "paid by default", evidence: `${today}, and ${item.host} keeps no dated copy a script can read` }
     }
     const notes: string[] = []
+    let unconfirmedEvidence = false // of a tag before the submission
     const archive = isEtherscanBuilt(item.host) ? await askArchive(item, sub) : null
 
-    // Why evidence dated `date` cannot exclude against the archive, or null:
-    // the archive must have answered, its copies after the submission (which
-    // could keep the entry) been read, and none of its copies from `date` on
-    // left unread or showing the page without a tag.
-    const unconfirmed = (date: number): string | null => {
+    // Why evidence of the tag before the submission cannot exclude against
+    // the archive, or null: the archive must have answered, its earliest copy
+    // after the submission (which could keep the entry) been read, and none
+    // of its copies before the submission taken from `since` on (from any
+    // date when `since` is null: evidence with no date of its own) left
+    // unread or showing the page without a tag.
+    const unconfirmed = (since: number | null): string | null => {
       if (!archive) return null
       if (!archive.answered) return `the Wayback Machine could not be asked to confirm it (${archive.failure})`
       if (archive.failure) return `the Wayback Machine's copies of the page could not be read to confirm it (${archive.failure})`
       if (archive.afterUnread) return "the page's archived copies after the submission could not be read"
-      if (archive.beforeUnreadAt !== null && archive.beforeUnreadAt >= date) {
-        return `the page's archived copy of ${iso(archive.beforeUnreadAt)}, after that, could not be read`
-      }
-      if (archive.before && !archive.before.tagged && archive.before.at >= date) {
-        return `the page was archived without a public name tag on ${iso(archive.before.at)}, after that`
-      }
-      return null
-    }
-    // The same for evidence that dates the token's profile or a scrape, not a
-    // copy of the page (rules 3 and 4): an unread copy after the submission,
-    // earlier than the one read, could still have kept the entry, and a
-    // profile an explorer built from an earlier Kleros entry is its echo too.
-    const unconfirmedOffPage = async (date: number): Promise<string | null> => {
-      const why = unconfirmed(date)
-      if (why) return why
-      if (archive && archive.afterSkippedAt !== null) {
+      if (archive.afterSkippedAt !== null) {
         return `the page's archived copy of ${iso(archive.afterSkippedAt)}, after the submission, could not be read`
       }
-      return options.earlierKlerosEntry(item, date)
+      const when = since === null ? "before the submission" : "after that"
+      if (archive.beforeUnreadAt !== null && (since === null || archive.beforeUnreadAt >= since)) {
+        return `the page's archived copy of ${iso(archive.beforeUnreadAt)}, ${when}, could not be read`
+      }
+      if (archive.before && !archive.before.tagged && (since === null || archive.before.at >= since)) {
+        return `the page was archived without a public name tag on ${iso(archive.before.at)}, ${when}`
+      }
+      return null
     }
 
     if (archive) {
@@ -489,30 +519,12 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
           return { decision: "excluded", evidence: `archived with ${tag}, before the submission (${iso(sub)}): ${archive.before.url}` }
         }
         notes.push(`archived with ${tag}, but ${why}`)
+        unconfirmedEvidence = true
       } else if (!archive.answered) notes.push(archive.failure)
       else if (archive.failure) notes.push(`its archived copies could not be read (${archive.failure})`)
       else if (archive.copies === 0) notes.push("never archived")
       else if (archive.before) notes.push(`archived without a public name tag on ${iso(archive.before.at)}, before the submission`)
       else notes.push("no readable archived copy before the submission")
-    }
-
-    let logoAt: number | null = null
-    if (item.tagged === true && item.logo) {
-      const logo = await askLogo(item, item.logo)
-      if ("note" in logo) notes.push(logo.note)
-      else {
-        logoAt = logo.at
-        if (logoAt < sub) {
-          if (item.createdAt === undefined) notes.push(`its token logo was written ${iso(logoAt)}, but the contract's age could not be read`)
-          else if (logoAt < item.createdAt - SHARED_LOGO_MARGIN_SECONDS) {
-            notes.push(`its token logo was written ${iso(logoAt)}, before the contract (${iso(item.createdAt)}): a shared file`)
-          } else {
-            const why = await unconfirmedOffPage(logoAt)
-            if (!why) return { decision: "excluded", evidence: `its token logo ${item.logo} was written ${iso(logoAt)}, before the submission (${iso(sub)})` }
-            notes.push(`its token logo was written ${iso(logoAt)}, before the submission, but ${why}`)
-          }
-        }
-      }
     }
 
     if (isEtherscanBuilt(item.host)) {
@@ -525,25 +537,50 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
         const name = ethLabels.tags.get(`${item.chainId}:${item.address.toLowerCase()}`)
         if (name && ethLabels.at < sub) {
           const listed = `eth-labels lists the public name tag "${name}" in its copy of ${iso(ethLabels.at)}`
-          const why = await unconfirmedOffPage(ethLabels.at)
+          // Its rows carry no date of their own (its puller keeps a row from
+          // whichever scrape first saw the tag, years before that copy at
+          // times): any copy before the submission without the tag, or
+          // unread, stands against it, and so does an earlier Kleros entry
+          // of the address registered before that copy (the tag's possible
+          // source; a later one cannot be the source of a tag it lists).
+          const why =
+            unconfirmed(null) ||
+            (archive && archive.emptyAnswer !== null ? await confirmEmptyAnswer(item, sub, archive.emptyAnswer) : null) ||
+            (await options.earlierKlerosEntry(item, ethLabels.at))
           if (!why) return { decision: "excluded", evidence: `${listed}, before the submission (${iso(sub)}): ${ethLabelsPage(ethLabels.sha)}` }
           notes.push(`${listed}, but ${why}`)
+          unconfirmedEvidence = true
         }
       }
     }
 
-    if (logoAt !== null && logoAt >= sub) {
-      // a copy before the submission showing the tag would have excluded it:
-      // kept only once the archive could say there is none
-      const why = archive && (!archive.answered || archive.failure) ? `the Wayback Machine could not be asked about earlier copies (${archive.failure})` : null
-      if (!why) return { decision: "kept", evidence: `its token logo ${item.logo} was written ${iso(logoAt)}, after the submission (${iso(sub)})` }
-      notes.push(`its token logo was written ${iso(logoAt)}, after the submission, but ${why}`)
+    if (item.tagged === true && item.logo) {
+      const logo = await askLogo(item, item.logo)
+      if ("note" in logo) notes.push(logo.note)
+      else if (logo.at < sub) notes.push(`its token logo was written ${iso(logo.at)}, before the submission (which dates its profile, not its tag)`)
+      else {
+        // a copy before the submission showing the tag, or eth-labels, would
+        // have excluded it: kept only once both could say there is none, and
+        // no other evidence of the tag before the submission is unconfirmed
+        const why =
+          archive && (!archive.answered || archive.failure)
+            ? `the Wayback Machine could not be asked about earlier copies (${archive.failure})`
+            : archive && archive.beforeUnreadAt !== null
+            ? `the page's archived copy of ${iso(archive.beforeUnreadAt)}, before the submission, could not be read`
+            : typeof ethLabels === "string"
+            ? "eth-labels could not be read"
+            : unconfirmedEvidence
+            ? "the evidence of a tag before the submission above could not be confirmed"
+            : null
+        if (!why) return { decision: "kept", evidence: `its token logo ${item.logo} was written ${iso(logo.at)}, after the submission (${iso(sub)})` }
+        notes.push(`its token logo was written ${iso(logo.at)}, after the submission, but ${why}`)
+      }
     }
-    // The archive did not answer here: the copies a person can open instead.
-    const look = archive && (!archive.answered || archive.failure) && archive.toLookAt.length > 0 ? `; to look at by hand: ${archive.toLookAt.join(" , ")}` : ""
+    // The archive did not answer here: the copies its verdict could rest on.
+    const links = archive && (!archive.answered || archive.failure) && archive.links.length > 0 ? `; archived copies: ${archive.links.join(" , ")}` : ""
     return {
       decision: "paid by default",
-      evidence: `${today}, with no dated evidence of a tag at the submission (${iso(sub)})${notes.length ? `: ${notes.join("; ")}` : ""}${look}`,
+      evidence: `${today}, with no dated evidence of a tag at the submission (${iso(sub)})${notes.length ? `: ${notes.join("; ")}` : ""}${links}`,
     }
   }
 

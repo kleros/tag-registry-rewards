@@ -1,7 +1,7 @@
 import { ChainConfig, ExplorerReview, FilterCheckReason, Period, Tag } from "../types"
 import { findChainConfig } from "./chains"
 import { checkExplorerTags } from "./explorer-tags"
-import { dateExplorerTags, datedEarlyEvidence, datedUnchecked, DatingItem } from "./tag-dating"
+import { dateExplorerTags, datedUnchecked, DatingItem } from "./tag-dating"
 import { registrationLookup } from "../tag-fetch"
 import { getAddressTagExclusionReason } from "./address-tag-validation"
 import { detectPredictionMarketTokens } from "./prediction-market-detection"
@@ -71,8 +71,7 @@ export interface TagFilterOptions {
   skipExplorerCheck?: boolean
 }
 
-// EXPLORER_CHECK=off skips the explorer check (then every entry is to be
-// checked by hand, with exclusions.json for the tagged ones).
+// EXPLORER_CHECK=off skips the explorer check: the rule is then not applied.
 export const explorerCheckEnabled = (): boolean =>
   !/^(off|false|0|no)$/i.test(String(process.env.EXPLORER_CHECK || "").trim())
 
@@ -83,8 +82,7 @@ export const explorerCheckEnabled = (): boolean =>
 export const explorerCheckSkipped = (period?: Period): string | null =>
   !explorerCheckEnabled() && explorerDatingApplies(period)
     ? "EXPLORER_CHECK=off, so the explorer rule is not applied to this period: entries tagged on their explorer " +
-      "before their submission are paid like the others. Remove EXPLORER_CHECK=off from .env and run again, unless " +
-      'every Address Tags and Tokens entry is checked by hand (README "Explorer tags").'
+      'before their submission are paid like the others. Remove EXPLORER_CHECK=off from .env and run again (README "Explorer tags").'
     : null
 
 export const applyTagFilters = async (
@@ -188,7 +186,7 @@ export const applyTagFilters = async (
   if (!explorerCheckEnabled()) {
     const skipped = skipExplorerCheck ? null : explorerCheckSkipped(period)
     if (skipped) console.warn(`[filter] WARNING: ${skipped}`)
-    else console.log("[filter] EXPLORER_CHECK=off: no entry looked up on its explorer (check them by hand)")
+    else console.log("[filter] EXPLORER_CHECK=off: no entry looked up on its explorer")
   } else if (!skipExplorerCheck) {
     explorerReview = await reviewOnExplorer(afterPhase1b.filter((tag) => !excludedSet.has(tag.id)), period)
     for (const review of explorerReview) {
@@ -223,10 +221,7 @@ export const reviewOnExplorer = async (tags: Tag[], period?: Period): Promise<Ex
   checked.forEach((tag, i) => {
     const verdict = results.get(String(i))
     if (!verdict || verdict.tagged === false) return
-    const shown = {
-      ...(verdict.logo ? { logo: verdict.logo } : {}),
-      ...(verdict.createdAt !== undefined ? { createdAt: verdict.createdAt } : {}),
-    }
+    const shown = verdict.logo ? { logo: verdict.logo } : {}
     namesOf.push(verdict.names)
     if (verdict.tagged === true) {
       review.push({ tag, status: "tagged", url: verdict.url, detail: `${hostOf(tag)}: ${verdict.names.join("; ")}`, ...shown })
@@ -280,7 +275,6 @@ export const reviewOnExplorer = async (tags: Tag[], period?: Period): Promise<Ex
       tagged: r.status === "tagged" ? true : null,
       names: namesOf[i],
       ...(r.logo ? { logo: r.logo } : {}),
-      ...(r.createdAt !== undefined ? { createdAt: r.createdAt } : {}),
     })),
     { earlierKlerosEntry }
   )
@@ -297,29 +291,14 @@ export const reviewOnExplorer = async (tags: Tag[], period?: Period): Promise<Ex
   )
   const unchecked = review.filter(datedUnchecked).length
   if (unchecked > 0) {
+    // the rule pays an entry without dated evidence: nothing to do, but a run
+    // with every source answering may exclude more
     console.warn(
-      `[filter] Explorer dating: ${unchecked} of them could not be checked against the Wayback Machine or the registries ` +
-        "(their evidence says why): they are paid unless checked by hand (marked \"check by hand\" at the top of the " +
-        "explorer check file, with the archived copies to open), or a fetch run again once the archive answers excludes them"
+      `[filter] Explorer dating: ${unchecked} of them paid by default because the Wayback Machine, eth-labels or the ` +
+        "registries did not answer (their evidence says which)"
     )
   }
   return review
 }
 
-export { datedUnchecked, datedEarlyEvidence }
-
-// The entries the dated check could not check, for the run's summary: one
-// line each (the explorer check file has their evidence and the archived
-// copies to open), those with evidence of a tag before their submission first.
-export const uncheckedSummary = (reviews: ExplorerReview[], max = 20): string[] => {
-  const unchecked = reviews.filter(datedUnchecked)
-  const ordered = unchecked.filter(datedEarlyEvidence).concat(unchecked.filter((r) => !datedEarlyEvidence(r)))
-  const lines = ordered.slice(0, max).map(
-    (r) =>
-      `  - ${r.tag.registry} ${r.tag.chain}:${r.tag.tagAddress} (${r.tag.id}): ` +
-      (r.status === "tagged" ? `tagged today (${r.detail})` : "its explorer could not be read") +
-      (datedEarlyEvidence(r) ? ", with evidence of a tag before its submission" : "")
-  )
-  if (ordered.length > max) lines.push(`  - and ${ordered.length - max} more, in the explorer check file`)
-  return lines
-}
+export { datedUnchecked }

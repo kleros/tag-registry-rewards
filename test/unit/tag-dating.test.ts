@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from "node:test"
 import { strict as assert } from "assert"
 import { gzipSync } from "zlib"
-import { dateExplorerTags, datedEarlyEvidence, datedUnchecked, DatingItem, DatingOptions, parseEthLabelsCsv, waybackTimestamp } from "../../src/utils/tag-dating"
+import { dateExplorerTags, datedUnchecked, DatingItem, DatingOptions, parseEthLabelsCsv, waybackTimestamp } from "../../src/utils/tag-dating"
 
 // The dated explorer check against answers shaped like the Wayback Machine's,
 // the explorers' and GitHub's (2026-11-11). Its HTTP and pauses are swapped
@@ -137,10 +137,14 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     names: ["Treat: TREAT Token"],
     ...overrides,
   })
-  // a token whose page shows its logo, written in 2025 by the explorer, and its 2025 contract
+  // a token whose page shows its logo, written in 2025 by the explorer
   const token = (overrides: Partial<DatingItem> = {}): DatingItem => {
     logos[LOGO] = "2025-05-01T00:00:00Z"
-    return item({ logo: LOGO, createdAt: unixOf("2025-04-20T00:00:00Z"), ...overrides })
+    return item({ logo: LOGO, ...overrides })
+  }
+  // eth-labels listing ADDRESS's tag, in its copy of 2026-07-10
+  const listed = () => {
+    ethLabels = { committed: "2026-07-10T16:37:25Z", csv: `address,chainId,label,nameTag\n"${ADDRESS}",1,"treat","Treat: TREAT Token"\n` }
   }
   const asked = (host: string) => requests.filter((r) => new URL(r.url).host === host).length
 
@@ -152,8 +156,8 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     assert.equal(asked("etherscan.io") + asked("api.github.com"), 0, "the copy after the submission settles it: neither its logo nor eth-labels")
   })
 
-  it("excludes an entry archived with its tag before the submission, reading compressed copies and skipping a challenge", async () => {
-    copies[ADDRESS] = [["2025-01-16T09:17:35Z", true], ["2026-10-10T00:00:00Z", "challenge"], ["2026-10-20T00:00:00Z", true]]
+  it("excludes an entry archived with its tag before the submission, reading compressed copies", async () => {
+    copies[ADDRESS] = [["2025-01-16T09:17:35Z", true], ["2026-10-20T00:00:00Z", true]]
     const verdict = (await date([item()])).get("a")!
     assert.equal(verdict.decision, "excluded")
     assert.equal(
@@ -162,6 +166,18 @@ describe("tag dating: whether a tag seen today was already there at the submissi
         `https://web.archive.org/web/20250116091735/https://etherscan.io/address/${ADDRESS}`
     )
     assert.deepEqual(earlierAsked, [{ address: ADDRESS, before: unixOf("2025-01-16T09:17:35Z") }], "no earlier Kleros entry of the address was asked about first")
+  })
+
+  it("does not exclude on an archived tag when the earliest copy after the submission could not be read (it might have kept the entry)", async () => {
+    copies[ADDRESS] = [["2025-01-16T09:17:35Z", true], ["2026-10-10T00:00:00Z", "challenge"], ["2026-10-20T00:00:00Z", true]]
+    const verdict = (await date([item()])).get("a")!
+    assert.equal(verdict.decision, "paid by default")
+    assert.match(
+      verdict.evidence,
+      /archived with the public name tag "Treat: TREAT Token" on 2025-01-16T09:17:35Z, but the page's archived copy of 2026-10-10T00:00:00Z, after the submission, could not be read/
+    )
+    copies[ADDRESS] = [["2025-01-16T09:17:35Z", true], ["2026-10-10T00:00:00Z", false], ["2026-10-20T00:00:00Z", true]]
+    assert.equal((await date([item()])).get("a")!.decision, "kept", "read, that copy keeps it")
   })
 
   it("does not hold against an entry a tag an earlier Kleros entry of its address may have given it", async () => {
@@ -192,72 +208,123 @@ describe("tag dating: whether a tag seen today was already there at the submissi
       verdict.evidence,
       /archived with the public name tag "Treat: TREAT Token" on 2025-01-16T09:17:35Z, but the page's archived copy of 2026-01-29T05:09:03Z, after that, could not be read/
     )
-    assert.match(verdict.evidence, /its token logo was written 2025-05-01T00:00:00Z, before the submission, but the page's archived copy of 2026-01-29T05:09:03Z/)
+    assert.match(verdict.evidence, /its token logo was written 2025-05-01T00:00:00Z, before the submission \(which dates its profile, not its tag\)/)
   })
 
   it("takes a copy the archive answers with anything but the page or a 404 for the archive failing", async () => {
     copies[ADDRESS] = [["2026-09-01T00:00:00Z", false]]
     const answer = route
     route = (url, method) => (new URL(url).pathname.startsWith("/web/") ? { status: 403, body: "Forbidden" } : answer(url, method))
-    const verdict = (await date([token()])).get("a")!
-    assert.equal(verdict.decision, "paid by default", "the unread copy might have contradicted the logo")
-    assert.match(verdict.evidence, /could not be read to confirm it \(the Wayback Machine answered HTTP 403 for a copy\)/)
+    listed()
+    const verdict = (await date([item()])).get("a")!
+    assert.equal(verdict.decision, "paid by default", "the unread copy might have contradicted eth-labels")
+    assert.match(verdict.evidence, /its archived copies could not be read \(the Wayback Machine answered HTTP 403 for a copy\)/)
+    assert.match(verdict.evidence, /eth-labels lists the public name tag "Treat: TREAT Token" in its copy of 2026-07-10T16:37:25Z, but the Wayback Machine's copies of the page could not be read to confirm it/)
   })
 
-  it("excludes on a token logo written before the submission, unless the file is older than the contract (shared) or the contract's age is unknown", async () => {
-    const logo = (name: string) => `https://etherscan.io/token/images/${name}_32.png`
-    logos[logo("treat")] = "2023-08-27T10:00:00Z"
-    logos[logo("bridged")] = "2021-03-01T00:00:00Z"
-    const created = unixOf("2023-01-14T00:00:00Z")
-    const verdicts = await date([
-      item({ key: "own", logo: logo("treat"), createdAt: created }),
-      item({ key: "shared", logo: logo("bridged"), createdAt: created }),
-      item({ key: "age unknown", logo: logo("treat") }),
-    ])
-    assert.deepEqual(verdicts.get("own"), {
-      decision: "excluded",
-      evidence: `its token logo ${logo("treat")} was written 2023-08-27T10:00:00Z, before the submission (2026-10-04T14:33:00Z)`,
+  it("never excludes on a token logo written before the submission: it dates the token's profile, which can come before its tag", async () => {
+    const verdict = (await date([token()])).get("a")!
+    assert.deepEqual(verdict, {
+      decision: "paid by default",
+      evidence:
+        "tagged today (Treat: TREAT Token), with no dated evidence of a tag at the submission (2026-10-04T14:33:00Z): never archived; " +
+        "its token logo was written 2025-05-01T00:00:00Z, before the submission (which dates its profile, not its tag)",
     })
-    assert.equal(verdicts.get("shared")!.decision, "paid by default")
-    assert.match(verdicts.get("shared")!.evidence, /never archived; its token logo was written 2021-03-01T00:00:00Z, before the contract \(2023-01-14T00:00:00Z\): a shared file/)
-    assert.equal(verdicts.get("age unknown")!.decision, "paid by default")
-    assert.match(verdicts.get("age unknown")!.evidence, /the contract's age could not be read/)
+    assert.deepEqual(earlierAsked, [], "no evidence to clear against the registries")
+    assert.ok(!datedUnchecked(verdict), "every source answered: nothing a later run would add")
   })
 
-  it("does not exclude on a logo the archive shows the tag did not come with (an untagged copy after it, before the submission)", async () => {
-    copies[ADDRESS] = [["2026-09-30T00:00:00Z", false], ["2026-10-20T00:00:00Z", true]]
-    const verdict = (await date([token()])).get("a")!
+  it("does not exclude on eth-labels when the page was archived without the tag before the submission, however early (its rows are undated)", async () => {
+    listed()
+    copies[ADDRESS] = [["2026-03-01T00:00:00Z", false], ["2026-11-20T00:00:00Z", true]] // untagged before eth-labels' copy, tagged again later
+    const verdict = (await date([item()])).get("a")!
     assert.equal(verdict.decision, "paid by default")
     assert.match(
       verdict.evidence,
-      /its token logo was written 2025-05-01T00:00:00Z, before the submission, but the page was archived without a public name tag on 2026-09-30T00:00:00Z, after that/
+      /eth-labels lists the public name tag "Treat: TREAT Token" in its copy of 2026-07-10T16:37:25Z, but the page was archived without a public name tag on 2026-03-01T00:00:00Z, before the submission/
     )
-    copies[ADDRESS] = [["2025-03-01T00:00:00Z", false]] // untagged before the logo was written: no contradiction
-    assert.equal((await date([token()])).get("a")!.decision, "excluded")
+    copies[ADDRESS] = [["2026-03-01T00:00:00Z", "challenge"], ["2026-11-20T00:00:00Z", true]]
+    const unread = (await date([item()])).get("a")!
+    assert.equal(unread.decision, "paid by default", "nor when that copy cannot be read")
+    assert.match(unread.evidence, /2026-07-10T16:37:25Z, but the page's archived copy of 2026-03-01T00:00:00Z, before the submission, could not be read/)
   })
 
-  it("does not exclude on a logo when an earlier Kleros entry of the address may have made the profile, or when that cannot be checked", async () => {
-    earlier = (_item, before) =>
-      before >= unixOf("2025-01-01T00:00:00Z") ? "Kleros entry 0x03@0xee registered this address on 2024-11-01T00:00:00.000Z, and a tag an explorer took from Kleros never counts" : null
-    const echo = (await date([token()])).get("a")!
+  it("does not exclude on eth-labels when an earlier Kleros entry of the address came before eth-labels' copy, or when that cannot be checked", async () => {
+    listed()
+    const registeredAt = (iso: string) => (_item: DatingItem, before: number) =>
+      before > unixOf(iso) ? `Kleros entry 0x03@0xee registered this address on ${iso}, and a tag an explorer took from Kleros never counts` : null
+    earlier = registeredAt("2026-05-01T00:00:00Z")
+    const echo = (await date([item()])).get("a")!
     assert.equal(echo.decision, "paid by default")
-    assert.match(echo.evidence, /its token logo was written 2025-05-01T00:00:00Z, before the submission, but Kleros entry 0x03@0xee/)
-    assert.deepEqual(earlierAsked, [{ address: ADDRESS, before: unixOf("2025-05-01T00:00:00Z") }], "asked about the logo's date")
+    assert.match(echo.evidence, /in its copy of 2026-07-10T16:37:25Z, but Kleros entry 0x03@0xee/)
+    assert.deepEqual(earlierAsked, [{ address: ADDRESS, before: unixOf("2026-07-10T16:37:25Z") }], "asked up to eth-labels' copy")
+    // the same address in the other registry, after eth-labels' copy: not where the tag it lists came from
+    earlier = registeredAt("2026-08-01T00:00:00Z")
+    assert.equal((await date([item()])).get("a")!.decision, "excluded")
     earlier = () => "the program's registries could not be checked for an earlier entry of this address (the indexer answered HTTP 503)"
-    assert.equal((await date([token()])).get("a")!.decision, "paid by default", "an unanswered check never excludes")
+    const unanswered = (await date([item()])).get("a")!
+    assert.equal(unanswered.decision, "paid by default", "an unanswered check never excludes")
+    assert.ok(datedUnchecked(unanswered))
   })
 
-  it("does not exclude on a logo when an earlier copy after the submission was skipped (it might have kept the entry)", async () => {
+  it("does not exclude on eth-labels when the earliest copy after the submission could not be read (it might have kept the entry)", async () => {
+    listed()
     copies[ADDRESS] = [["2026-10-05T00:00:00Z", "challenge"], ["2026-10-06T00:00:00Z", true]]
-    const verdict = (await date([token()])).get("a")!
+    const verdict = (await date([item()])).get("a")!
     assert.equal(verdict.decision, "paid by default")
-    assert.match(verdict.evidence, /before the submission, but the page's archived copy of 2026-10-05T00:00:00Z, after the submission, could not be read/)
+    assert.match(verdict.evidence, /2026-07-10T16:37:25Z, but the page's archived copy of 2026-10-05T00:00:00Z, after the submission, could not be read/)
+  })
+
+  it("asks the archive's index again before eth-labels excludes a page it said was never archived (an answer cut short reads the same)", async () => {
+    listed()
+    copies[ADDRESS] = [["2026-10-05T10:00:00Z", false]] // would keep the entry
+    let cut = 1
+    const answer = route
+    route = (url, method) => (new URL(url).pathname === "/cdx/search/cdx" && cut-- > 0 ? { body: "" } : answer(url, method))
+    const verdict = (await date([item()])).get("a")!
+    assert.equal(verdict.decision, "paid by default")
+    assert.match(
+      verdict.evidence,
+      /never archived; eth-labels lists the public name tag "Treat: TREAT Token" in its copy of 2026-07-10T16:37:25Z, but the Wayback Machine's index listed copies of the page when asked again/
+    )
+    assert.ok(datedUnchecked(verdict), "a later run may decide it")
+
+    copies[ADDRESS] = []
+    const asked = requests.length
+    const confirmed = (await date([item()])).get("a")!
+    assert.equal(confirmed.decision, "excluded", "never archived, twice")
+    assert.equal(requests.slice(asked).filter((r) => r.url.includes("/cdx/search/cdx")).length, 2)
+  })
+
+  it("does not keep on a logo written after the submission while eth-labels or the newest copy before the submission could not be read", async () => {
+    logos[LOGO] = "2026-10-10T00:00:00Z"
+    ethLabels = null
+    const noLabels = (await date([item({ logo: LOGO })])).get("a")!
+    assert.equal(noLabels.decision, "paid by default")
+    assert.match(noLabels.evidence, /its token logo was written 2026-10-10T00:00:00Z, after the submission, but eth-labels could not be read/)
+    assert.ok(datedUnchecked(noLabels), "a later run may decide it")
+    ethLabels = { committed: "2026-07-10T16:37:25Z", csv: "address,chainId,label,nameTag\n" }
+    copies[ADDRESS] = [["2026-06-01T00:00:00Z", "challenge"]]
+    const unread = (await date([item({ logo: LOGO })])).get("a")!
+    assert.equal(unread.decision, "paid by default")
+    assert.match(unread.evidence, /after the submission, but the page's archived copy of 2026-06-01T00:00:00Z, before the submission, could not be read/)
+  })
+
+  it("does not keep on a logo written after the submission while earlier evidence of the tag is left unconfirmed", async () => {
+    copies[ADDRESS] = [["2025-01-16T09:17:35Z", true], ["2026-10-20T00:00:00Z", true]]
+    logos[LOGO] = "2026-10-10T00:00:00Z"
+    earlier = () => "the program's registries could not be checked for an earlier entry of this address (the indexer answered HTTP 503)"
+    const verdict = (await date([item({ logo: LOGO })])).get("a")!
+    assert.equal(verdict.decision, "paid by default")
+    assert.match(verdict.evidence, /archived with the public name tag "Treat: TREAT Token" on 2025-01-16T09:17:35Z, but the program's registries could not be checked/)
+    assert.match(verdict.evidence, /its token logo was written 2026-10-10T00:00:00Z, after the submission, but the evidence of a tag before the submission above could not be confirmed/)
+    assert.ok(datedUnchecked(verdict))
   })
 
   it("keeps a token whose logo the explorer wrote after the submission (an import after it)", async () => {
     const logo = "https://arc.etherscan.io/token/images/arcstockpad_aspad_64.png"
     logos[logo] = "2026-10-13T04:22:00Z"
-    const verdict = (await date([item({ host: "arc.etherscan.io", chainId: "5042", submissionTime: unixOf("2026-10-12T17:53:00Z"), logo, createdAt: unixOf("2026-08-01T00:00:00Z") })])).get("a")!
+    const verdict = (await date([item({ host: "arc.etherscan.io", chainId: "5042", submissionTime: unixOf("2026-10-12T17:53:00Z"), logo })])).get("a")!
     assert.deepEqual(verdict, { decision: "kept", evidence: `its token logo ${logo} was written 2026-10-13T04:22:00Z, after the submission (2026-10-12T17:53:00Z)` })
   })
 
@@ -296,7 +363,7 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     assert.equal(untagged.decision, "paid by default", "archived untagged after eth-labels' copy: the tag went before the submission")
   })
 
-  it("finds the copies before the submission of a page archived more often than one answer holds", async () => {
+  it("finds the copies on both sides of the submission of a page archived more often than one answer holds", async () => {
     copies[ADDRESS] = [["2026-03-01T00:00:00Z", true]].concat(
       Array.from({ length: 50 }, (_, i) => [new Date((SUBMITTED + (i + 1) * DAY) * 1000).toISOString(), true])
     ) as [string, boolean][]
@@ -304,21 +371,62 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     assert.equal(verdict.decision, "excluded")
     assert.match(verdict.evidence, /archived with the public name tag "Treat: TREAT Token" on 2026-03-01T00:00:00Z, before the submission/)
     const queries = requests.filter((r) => r.url.includes("/cdx/search/cdx")).map((r) => new URL(r.url).searchParams)
-    assert.deepEqual(queries.map((q) => [q.get("to"), q.get("limit")]), [[null, "-50"], [waybackTimestamp(SUBMITTED - 1), "-3"]])
+    assert.deepEqual(
+      queries.map((q) => [q.get("from"), q.get("to"), q.get("limit")]),
+      [
+        [null, null, "-50"],
+        [waybackTimestamp(SUBMITTED + 1), null, "3"],
+        [null, waybackTimestamp(SUBMITTED - 1), "-3"],
+      ]
+    )
   })
 
-  it("never excludes on a logo the archive could not be asked to confirm, and says so", async () => {
+  it("takes an index that lists no copy after the submission when asked for the earliest, after listing 50, for failing", async () => {
+    copies[ADDRESS] = [["2025-01-16T09:17:35Z", true]].concat(
+      Array.from({ length: 50 }, (_, i) => [new Date((SUBMITTED + (i + 1) * DAY) * 1000).toISOString(), true])
+    ) as [string, boolean][]
+    const answer = route
+    route = (url, method) => (new URL(url).searchParams.get("from") ? { body: "[]" } : answer(url, method))
+    const verdict = (await date([item()])).get("a")!
+    assert.equal(verdict.decision, "paid by default", "the copies right after the submission, which could keep it, are unknown")
+    assert.match(verdict.evidence, /the Wayback Machine's index gave no copy after the submission when asked for the earliest/)
+  })
+
+  it("asks again before eth-labels excludes a page whose copies before the submission the index answered with none, past 50 later ones", async () => {
+    listed()
+    copies[ADDRESS] = ([["2026-09-01T00:00:00Z", false]] as [string, boolean][]).concat(
+      Array.from({ length: 50 }, (_, i) => [new Date((SUBMITTED + (i + 1) * DAY) * 1000).toISOString(), true]) as [string, boolean][]
+    )
+    let cut = 1
+    const answer = route
+    route = (url, method) => (new URL(url).searchParams.get("to") && cut-- > 0 ? { body: "" } : answer(url, method))
+    const verdict = (await date([item()])).get("a")!
+    assert.equal(verdict.decision, "paid by default", "the untagged copy of 2026-09-01 is there when asked again")
+    assert.match(verdict.evidence, /but the Wayback Machine's index listed copies of the page when asked again/)
+    copies[ADDRESS] = copies[ADDRESS].slice(1)
+    assert.equal((await date([item()])).get("a")!.decision, "excluded", "none before the submission, twice")
+  })
+
+  it("keeps a page archived without its tag right after the submission, though more copies came later than one answer holds", async () => {
+    // tagged before, untagged the first hours after the submission, then tagged in 50 later copies
+    const hours = Array.from({ length: 10 }, (_, i) => [new Date((SUBMITTED + (i + 1) * 3600) * 1000).toISOString(), false])
+    const later = Array.from({ length: 50 }, (_, i) => [new Date((SUBMITTED + 2 * DAY + i * 3600) * 1000).toISOString(), true])
+    copies[ADDRESS] = ([["2025-01-16T09:17:35Z", true]] as [string, boolean][]).concat(hours as [string, boolean][], later as [string, boolean][])
+    const verdict = (await date([item()])).get("a")!
+    assert.equal(verdict.decision, "kept", "the copies the first answer left out keep it")
+    assert.match(verdict.evidence, /^archived without a public name tag on 2026-10-04T15:33:00Z, after the submission/)
+  })
+
+  it("never keeps on a logo written after the submission when the archive could not be asked, and says so", async () => {
     archiveDown = true
     const verdicts = await date([token({ key: "before" }), token({ key: "after", submissionTime: unixOf("2025-04-25T00:00:00Z") })])
     assert.equal(verdicts.get("before")!.decision, "paid by default")
-    assert.match(verdicts.get("before")!.evidence, /its token logo was written 2025-05-01T00:00:00Z, before the submission, but the Wayback Machine could not be asked to confirm it/)
+    assert.match(verdicts.get("before")!.evidence, /its token logo was written 2025-05-01T00:00:00Z, before the submission \(which dates its profile, not its tag\)/)
     assert.equal(verdicts.get("after")!.decision, "paid by default", "nor keep on it: a copy before the submission might show the tag")
     assert.match(verdicts.get("after")!.evidence, /its token logo was written 2025-05-01T00:00:00Z, after the submission, but the Wayback Machine could not be asked about earlier copies/)
-    // both left for a person to check, the one with early evidence first
-    assert.ok(datedUnchecked(verdicts.get("before")!) && datedEarlyEvidence(verdicts.get("before")!))
-    assert.ok(datedUnchecked(verdicts.get("after")!) && !datedEarlyEvidence(verdicts.get("after")!))
     for (const key of ["before", "after"]) {
-      assert.match(verdicts.get(key)!.evidence, /; to look at by hand: https:\/\/web\.archive\.org\/web\/\*\/https:\/\/[a-z.]+\/address\/0x[0-9a-fA-F]{40}$/, "the archive's list of copies")
+      assert.ok(datedUnchecked(verdicts.get(key)!), "a later run may decide it")
+      assert.match(verdicts.get(key)!.evidence, /; archived copies: https:\/\/web\.archive\.org\/web\/\*\/https:\/\/[a-z.]+\/address\/0x[0-9a-fA-F]{40}$/, "the archive's list of copies")
     }
   })
 
@@ -357,7 +465,7 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     const verdicts = await date([
       item({ key: "1" }),
       item({ key: "2" }),
-      item({ key: "never archived", host: "basescan.org", chainId: "8453", address: other, logo: "https://basescan.org/token/images/Elsa_64.png", createdAt: unixOf("2026-01-08T00:00:00Z") }),
+      item({ key: "never archived", host: "basescan.org", chainId: "8453", address: other, logo: "https://basescan.org/token/images/Elsa_64.png" }),
     ])
     for (const key of ["1", "2"]) {
       assert.equal(verdicts.get(key)!.decision, "paid by default")
@@ -366,12 +474,13 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     assert.match(verdicts.get("2")!.evidence, /its pages not asked again in this run/)
     for (const key of ["1", "2"]) {
       assert.ok(
-        verdicts.get(key)!.evidence.endsWith(`; to look at by hand: https://web.archive.org/web/20250116091735/https://etherscan.io/address/${ADDRESS}`),
-        "the copy the index named, for a person to open"
+        verdicts.get(key)!.evidence.endsWith(`; archived copies: https://web.archive.org/web/20250116091735/https://etherscan.io/address/${ADDRESS}`),
+        "the copy the index named"
       )
-      assert.ok(datedUnchecked(verdicts.get(key)!) && datedEarlyEvidence(verdicts.get(key)!) === false, "unchecked, with no early evidence read")
+      assert.ok(datedUnchecked(verdicts.get(key)!))
     }
-    assert.equal(verdicts.get("never archived")!.decision, "excluded", "a page the index shows was never archived needs no page to confirm its logo")
+    assert.equal(verdicts.get("never archived")!.decision, "paid by default", "a logo written before the submission excludes nothing")
+    assert.match(verdicts.get("never archived")!.evidence, /never archived; its token logo was written 2026-01-28T07:40:53Z, before the submission/)
     assert.deepEqual(
       requests.filter((r) => new URL(r.url).host === "web.archive.org").map((r) => new URL(r.url).pathname.split("/")[1]),
       ["cdx", "web", "cdx", "cdx"],
@@ -434,39 +543,34 @@ describe("tag dating: eth-labels' file", () => {
   })
 })
 
-describe("tag dating: the verdicts left for a person to check", () => {
+describe("tag dating: the verdicts paid by default because a source did not answer", () => {
   const paid = (evidence: string) => ({ decision: "paid by default", evidence })
   const refused = "the Wayback Machine refuses this machine's requests (HTTP 429, flagged as bot traffic)"
 
-  it("marks a verdict the archive or the registries left unchecked, and among them one with early evidence", () => {
-    const cases: [string, { decision: string; evidence: string }, boolean, boolean][] = [
-      [
-        "an early logo the archive could not confirm",
-        paid(`tagged today (Treat: TREAT Token), with no dated evidence of a tag at the submission (2026-10-04T14:33:00Z): its archived copies could not be read (${refused}); its token logo was written 2023-08-27T23:36:59Z, before the submission, but the Wayback Machine's copies of the page could not be read to confirm it (${refused})`),
-        true,
-        true,
-      ],
+  it("marks a verdict the archive, eth-labels or the registries left unchecked: one a later run may decide otherwise", () => {
+    const cases: [string, { decision: string; evidence: string }, boolean][] = [
       [
         "an eth-labels listing the archive could not confirm",
         paid(`its explorer could not be read, with no dated evidence of a tag at the submission (2026-10-28T09:05:45Z): its archived copies could not be read (${refused}); eth-labels lists the public name tag "Aave: Incentives V3" in its copy of 2026-07-10T16:37:25Z, but the Wayback Machine's copies of the page could not be read to confirm it (${refused})`),
-        true,
         true,
       ],
       [
         "an archived tag the registries could not clear",
         paid(`tagged today (X), with no dated evidence of a tag at the submission (2026-10-04T14:33:00Z): archived with the public name tag "X" on 2025-01-16T09:17:35Z, but the program's registries could not be checked for an earlier entry of this address (the indexer answered HTTP 503)`),
         true,
-        true,
       ],
-      ["the archive refused, nothing else known", paid(`its explorer could not be read, with no dated evidence of a tag at the submission (2026-10-27T00:32:15Z): its archived copies could not be read (${refused})`), true, false],
-      ["an earlier Kleros entry: decided, nothing to check", paid(`eth-labels lists the public name tag "A" in its copy of 2026-07-10T16:37:25Z, but Kleros entry 0x02@0x66 registered this address on 2023-05-01T00:00:00.000Z`), false, false],
-      ["never archived: nothing a person could add", paid("its explorer could not be read, with no dated evidence of a tag at the submission (2026-10-18T07:43:25Z): never archived"), false, false],
-      ["Solscan", paid("its explorer could not be read, and solscan.io keeps no dated copy a script can read"), false, false],
-      ["excluded", { decision: "excluded", evidence: `archived with the public name tag "X" on 2025-01-16T09:17:35Z, before the submission (2026-10-04T14:33:00Z): https://web.archive.org/web/20250116091735/x` }, false, false],
+      ["the archive refused, nothing else known", paid(`its explorer could not be read, with no dated evidence of a tag at the submission (2026-10-27T00:32:15Z): its archived copies could not be read (${refused})`), true],
+      ["eth-labels could not be read", paid("tagged today (X), with no dated evidence of a tag at the submission (2026-10-04T14:33:00Z): never archived; eth-labels could not be read (GitHub answered HTTP 403)"), true],
+      ["an earlier Kleros entry: decided", paid(`eth-labels lists the public name tag "A" in its copy of 2026-07-10T16:37:25Z, but Kleros entry 0x02@0x66 registered this address on 2023-05-01T00:00:00.000Z`), false],
+      ["never archived", paid("its explorer could not be read, with no dated evidence of a tag at the submission (2026-10-18T07:43:25Z): never archived"), false],
+      [
+        "a logo written before the submission",
+        paid("tagged today (X), with no dated evidence of a tag at the submission (2026-10-04T14:33:00Z): never archived; its token logo was written 2025-05-01T00:00:00Z, before the submission (which dates its profile, not its tag)"),
+        false,
+      ],
+      ["Solscan", paid("its explorer could not be read, and solscan.io keeps no dated copy a script can read"), false],
+      ["excluded", { decision: "excluded", evidence: `archived with the public name tag "X" on 2025-01-16T09:17:35Z, before the submission (2026-10-04T14:33:00Z): https://web.archive.org/web/20250116091735/x` }, false],
     ]
-    for (const [what, verdict, unchecked, early] of cases) {
-      assert.equal(datedUnchecked(verdict), unchecked, `${what}: unchecked`)
-      assert.equal(datedEarlyEvidence(verdict), early, `${what}: early evidence`)
-    }
+    for (const [what, verdict, unchecked] of cases) assert.equal(datedUnchecked(verdict), unchecked, what)
   })
 })

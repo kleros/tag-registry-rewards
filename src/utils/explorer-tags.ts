@@ -10,25 +10,25 @@ import { httpFetch } from "./http"
 //   EIP-7702 "Authority") share its markup without that tooltip, and are no tag.
 //   A tag the explorer took from Kleros Curate carries the public note "This
 //   nametag was submitted by Kleros Curate.": not counted, as on Blockscout.
-//   The page also gives what tag-dating.ts needs to date a tag: the token
-//   tracker's logo (hosted by the explorer) and the contract's age.
+//   The page also gives the token tracker's logo (hosted by the explorer),
+//   whose file date tag-dating.ts reads.
 // - Blockscout explorers (gnosis, zksync, robinhoodchain): Blockscout's metadata
 //   service, the name tags their address pages show. Blockscout also imports
 //   Kleros Scout's own entries as name tags: those are not counted, or an
 //   accepted entry would disqualify itself once imported.
 // - Explorers a script cannot read (arbiscan.io and optimistic.etherscan.io
 //   answer with a Cloudflare challenge, Solscan has no keyless way): unknown.
-//   Such an entry is never taken for untagged: it is listed for a check by hand.
+//   Such an entry is never taken for untagged: it is dated like a tagged one
+//   (tag-dating.ts), or listed for review in a period before the dating.
 
 export interface ExplorerCheck {
   tagged: boolean | null // null: the explorer could not be read
   names: string[] // the name tags that count
   ignored: string[] // name tags not counted (imported from Kleros Scout)
   detail: string
-  url: string // the address page, for a check by hand
-  // Etherscan-built pages that show them (see tag-dating.ts):
+  url: string // the address page
+  // Etherscan-built pages that show one (see tag-dating.ts):
   logo?: string // the token tracker's logo, a file on the explorer
-  createdAt?: number // when the contract was created (unix s, to the day), from the age the page shows
 }
 
 export interface ExplorerItem {
@@ -60,7 +60,7 @@ const PUBLIC_NAME_TAG = "Public Name Tag (viewable by anyone)"
 // read before the entries: should it not read as tagged, the explorer's page
 // or API has changed under this code, and every answer of it is suspect (a
 // changed page would read as "no tag" for everyone). Its entries are then all
-// "not read", for a check by hand, never silently untagged.
+// "not read" (dated like tagged ones), never silently untagged.
 export const CANARIES: { [host: string]: string } = {
   "etherscan.io": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // Circle: USDC Token
   "snowscan.xyz": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E", // USDC
@@ -82,7 +82,7 @@ export const CANARIES: { [host: string]: string } = {
 const formatChanged = (host: string, canary: string, result: ExplorerCheck): string =>
   `${host} does not read as expected: ${canary}, which carries a name tag, read as ` +
   (result.tagged === false ? "untagged" : `"${result.detail}"`) +
-  " (its pages or API changed, or it failed): check by hand"
+  " (its pages or API changed, or it failed)"
 const ETHERSCAN_PACE_SECONDS = 2 // between two pages of one host (hosts run side by side)
 const BLOCKSCOUT_BATCH = 50
 const BLOCKSCOUT_PACE_SECONDS = 1
@@ -148,42 +148,15 @@ const trackerLogo = (html: string): string | undefined => {
   return m && /^\/token\/images\/[^\s"'<>]+$/.test(m[1]) ? m[1] : undefined
 }
 
-// An age as the explorer writes it ("3 yrs 301 days ago", "5 hrs 2 mins ago"),
-// in seconds; null when it is not one.
-export const parseExplorerAge = (text: string): number | null => {
-  const UNIT: { [unit: string]: number } = { yr: 365 * 86400, day: 86400, hr: 3600, min: 60, sec: 1 }
-  const clean = text.trim().replace(/\s+/g, " ")
-  if (!/^(\d+ (yrs?|days?|hrs?|mins?|secs?) ?)+ago$/i.test(clean)) return null
-  let seconds = 0
-  const re = /(\d+) (yr|day|hr|min|sec)s?/gi
-  for (let m = re.exec(clean); m; m = re.exec(clean)) seconds += Number(m[1]) * UNIT[m[2].toLowerCase()]
-  return seconds
-}
-
-// The contract's creation time, from the age next to its creation transaction
-// ("Contract Creator … | <a href="/tx/0x…"><span>3 yrs 301 days ago</span>").
-const contractCreatedAt = (html: string, nowSeconds: number): number | undefined => {
-  const start = html.indexOf("<!-- Contract Creator -->")
-  const end = html.indexOf("<!-- End Contract Creator -->", start)
-  if (start < 0 || end < 0) return undefined
-  const m = /<a\b[^>]*href=["']\/tx\/0x[0-9a-fA-F]{64}["'][^>]*>\s*<span>([^<]+)<\/span>/.exec(html.slice(start, end))
-  const age = m ? parseExplorerAge(m[1]) : null
-  return age === null ? undefined : nowSeconds - age
-}
-
 // An Etherscan-built address page: tagged when it shows a public name tag
 // (not one submitted by Kleros Curate). null when the page is not that
-// address's (a challenge, an error page). `now`: when the page was read (ms).
-export const parseEtherscanAddressPage = (html: string, address: string, url = "", now = Date.now()): ExplorerCheck => {
+// address's (a challenge, an error page).
+export const parseEtherscanAddressPage = (html: string, address: string, url = ""): ExplorerCheck => {
   const title = titleOf(html)
   const wrongPage = notThisPage(title, address)
   if (wrongPage) return check(null, wrongPage, url)
   const logoPath = trackerLogo(html)
-  const createdAt = contractCreatedAt(html, Math.floor(now / 1000))
-  const extras = {
-    ...(logoPath ? { logo: url ? new URL(logoPath, url).toString() : logoPath } : {}),
-    ...(createdAt !== undefined ? { createdAt } : {}),
-  }
+  const extras = logoPath ? { logo: url ? new URL(logoPath, url).toString() : logoPath } : {}
   if (!html.includes(PUBLIC_NAME_TAG)) return { ...check(false, "no public name tag", url), ...extras }
   const names: string[] = []
   const re = /Public Name Tag \(viewable by anyone\)[\s\S]{0,600}?<i class=['"]fas fa-tag text-muted['"]><\/i>\s*<span class=['"]hash-tag[^'"]*['"]>([^<]*)<\/span>/g

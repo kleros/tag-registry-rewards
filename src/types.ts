@@ -85,8 +85,9 @@ export interface FetchManifest {
   // the periods the dated check applies to, how many it excluded on dated
   // evidence and how many it paid without any (utils/tag-dating.ts).
   // `unchecked`: of those paid, the ones that could not be checked against
-  // the Wayback Machine (it did not answer, refused, or ran out of time) or the
-  // registries (for an earlier Kleros entry): a later run may exclude more.
+  // the Wayback Machine (it did not answer, refused, or ran out of time),
+  // eth-labels, or the registries (for an earlier Kleros entry): a later run
+  // may exclude more.
   explorerCheck?: { file: string; tagged: number; notRead: number; excluded?: number; paidByDefault?: number; unchecked?: number }
 }
 
@@ -172,7 +173,6 @@ export interface ExplorerReview {
   detail: string // the tags, or why the explorer was not read
   // what the page showed to date the tag with (utils/explorer-tags.ts)
   logo?: string
-  createdAt?: number
   // the dated check's verdict and its evidence
   decision?: "excluded" | "kept" | "paid by default"
   evidence?: string

@@ -9,7 +9,6 @@ import {
   isKlerosSourced,
   parseArchivedAddressPage,
   parseEtherscanAddressPage,
-  parseExplorerAge,
 } from "../../src/utils/explorer-tags"
 
 // The explorer-tag check against pages and answers as the explorers gave them
@@ -77,32 +76,19 @@ describe("explorer tags: an Etherscan-built address page", () => {
     "<!-- Public Comment --> <div class='container-xxl'><div class='alert alert-dark alert-dismissible fade show mb-3' role='alert'>" +
     "This nametag was submitted by <a href='https://www.kleros.io/' target='_blank' rel=\"nofollow\">Kleros Curate</a>.</div></div>"
 
-  it("reads a token's tracker logo and the contract's age, what a tag is dated with", () => {
-    const now = Date.parse("2026-11-11T12:00:00Z")
+  it("reads a token's tracker logo, whose file date a tag is dated with", () => {
     const html = page(addressTitle(TREAT, "Etherscan", "Treat: TREAT Token"), TREAT_TAG + CREATOR("3 yrs 301 days ago") + TRACKER("/token/images/treattoken_32.png"))
-    const read = parseEtherscanAddressPage(html, TREAT, `https://etherscan.io/address/${TREAT}`, now)
+    const read = parseEtherscanAddressPage(html, TREAT, `https://etherscan.io/address/${TREAT}`)
     assert.deepEqual([read.tagged, read.names], [true, ["Treat: TREAT Token"]])
     assert.equal(read.logo, "https://etherscan.io/token/images/treattoken_32.png")
-    assert.equal(read.createdAt, now / 1000 - (3 * 365 + 301) * 86400)
-    const placeholder = parseEtherscanAddressPage(page(addressTitle(TREAT), CREATOR("12 mins ago") + TRACKER("/images/main/empty-token.png")), TREAT, "", now)
+    const placeholder = parseEtherscanAddressPage(page(addressTitle(TREAT), CREATOR("12 mins ago") + TRACKER("/images/main/empty-token.png")), TREAT, "")
     assert.equal(placeholder.logo, undefined, "a placeholder image is no logo")
-    assert.equal(placeholder.createdAt, now / 1000 - 720)
   })
 
   it("does not count a name tag the explorer took from Kleros Curate (its public note says so)", () => {
     const read = parseEtherscanAddressPage(page(addressTitle(TREAT, "Etherscan", "Treat: TREAT Token"), KLEROS_NOTE + TREAT_TAG), TREAT)
     assert.deepEqual([read.tagged, read.names, read.ignored], [false, [], ["Treat: TREAT Token"]])
     assert.equal(read.detail, "only a name tag submitted by Kleros Curate")
-  })
-
-  it("reads the ages the explorer writes, and nothing else", () => {
-    assert.equal(parseExplorerAge("3 yrs 301 days ago"), (3 * 365 + 301) * 86400)
-    assert.equal(parseExplorerAge(" 307 days ago "), 307 * 86400)
-    assert.equal(parseExplorerAge("1 yr ago"), 365 * 86400)
-    assert.equal(parseExplorerAge("1 day 2 hrs ago"), 86400 + 7200)
-    assert.equal(parseExplorerAge("5 hrs 2 mins ago"), 5 * 3600 + 120)
-    assert.equal(parseExplorerAge("45 secs ago"), 45)
-    for (const bad of ["yesterday", "3 yrs 301 days", "Oct-14-2026 08:09:12 AM", "ago"]) assert.equal(parseExplorerAge(bad), null, bad)
   })
 })
 

@@ -443,8 +443,8 @@ were submitted** are not rewarded; Domains (CDN) entries are exempt. An
 explorer shows a tag as it is today, never when it was added, and tags often
 appear after the submission (explorers import token listings in bulk), so
 `fetch` and `filter-check` decide each entry on dated evidence, with no key
-and no schedule. There is nothing to do by hand unless the Wayback Machine or
-the registries did not answer (see "Check by hand" below).
+and no schedule. Nothing is left to do by hand: an entry the check cannot
+decide is paid, as the rule pays an entry without dated evidence.
 
 **1. Today's page** (`src/utils/explorer-tags.ts`). An entry with no name tag
 there is rewarded, and nothing more is asked about it:
@@ -474,57 +474,58 @@ decides:
 |---|---|
 | A Wayback Machine copy of its address page, taken after the submission, shows no tag | kept |
 | A copy taken before the submission shows the tag | **excluded** |
-| The token logo the explorer hosts (the token tracker's, its `Last-Modified`) was written before the submission, and is not older than the contract by more than 7 days (a shared file dates nothing) | **excluded** |
 | [eth-labels](https://github.com/dawsbot/eth-labels), a public copy of Etherscan-built explorers' tags kept in git, lists the tag in a copy committed before the submission | **excluded** |
-| The token logo was written after the submission | kept |
-| Nothing dated either way: a name tag never archived, Solscan, a tag on Blockscout from another source than Kleros, an archive that does not answer | **paid by default** |
+| The token logo the explorer hosts (the token tracker's, its `Last-Modified`) was written after the submission | kept |
+| Nothing dated either way: a name tag never archived, a logo written before the submission, Solscan, a tag on Blockscout from another source than Kleros, an archive that does not answer | **paid by default** |
 
 An excluded entry gets the reason `tagged on explorer before submission` in
 `<runId>_filter_check.csv`, with its evidence as the detail.
 `files/<runId>_explorer_check.csv` (fetch writes it before counting) lists
 every entry tagged today or not read with its decision and the evidence: the
-archived copy's link, the logo's date, the eth-labels commit, or why there was
-none. The run's summary gives the counts.
+archived copy's link, the eth-labels commit, the logo's date, or why there was
+none. The excluded entries come first, then those paid by default because a
+source did not answer. The run's summary gives the counts.
 
-- **Failures only ever pay.** An exclusion's evidence must stand against
-  everything the Wayback Machine holds of the page: a logo or eth-labels
-  date excludes only once the archive was asked and its copies read, and when
-  no copy taken after that date (and before the submission) shows the page
-  without a tag. An archive that does not answer, refuses, or runs out of time
-  leaves the entry paid by default, saying so.
-- The logo dates the token's explorer profile, not its name tag: the two come
-  together when a profile is made, which an untagged copy after the logo's
-  date disproves (the entry is then paid by default).
-- A tag (or token profile) an explorer took from an earlier Kleros entry of
-  the address never counts: before any exclusion, the Address Tags and Tokens
-  registries are read (once per run, any spelling of the address) for a
-  registration that resolved before the evidence's date; one found, or a
-  registry that cannot be read, leaves the entry paid by default. Tags made
-  by the Address Tag Query registry name no address there, so on explorers
-  that cannot be read they are not recognised.
+- **Failures only ever pay.** An exclusion's evidence must stand against what
+  the Wayback Machine holds of the page: it excludes only once the archive
+  answered, the earliest copy after the submission was read (showing no tag,
+  it keeps the entry), and no copy before the submission that could show the
+  tag gone was left unread or shows it gone. For an archived tag, that is any
+  copy newer than it; for eth-labels, any copy at all, since its rows carry
+  no date of their own (its puller keeps a row from whichever scrape first saw
+  the tag, sometimes years before the commit). When the index answers that a
+  page was never archived, or has no copy before the submission, that is
+  checked against the page's earliest copy, asked for in another form, before
+  eth-labels excludes it: an answer cut short reads the same as none. An
+  archive that does not answer, refuses, or runs out of time leaves the entry
+  paid by default, saying so.
+- A logo written before the submission excludes nothing: it dates the
+  token's explorer profile, not its name tag, and profiles without a tag
+  exist (COMP, TROLL and BabyPepe on etherscan.io show a logo and no tag), so
+  a tag added after the submission would pass for an old one.
+- A tag an explorer took from an earlier Kleros entry of the address never
+  counts: before any exclusion, the Address Tags and Tokens registries are
+  read (once per run, any spelling of the address) for a registration that
+  resolved before the archived copy with the tag, or before eth-labels' copy;
+  one found, or a registry that cannot be read, leaves the entry paid by
+  default. The lookup gives up on an indexer page after 2 minutes, and its
+  errors keep only the network's code, never the indexer's URL (its key). Tags made by the Address Tag Query registry name no
+  address there, so on explorers that cannot be read they are not
+  recognised.
 - Archived copies are read strictly: the address's own badge, never the
   contract creator's tag that some layouts mark the same way, nor the
   contract's name that the page title shows when it has no tag; a copy the
   archive redirects to another moment's is skipped.
-- A shared logo file rewritten after the contract was created (a rebrand of
-  the token it belongs to) would still date the profile wrongly: a rare case
-  the 7-day guard does not catch.
 - No dated evidence, no exclusion: this is how the check applies the rule
   (the program's posts say entries must not already be tagged, not how that
   is established). A tag seen only today is not evidence; on Arbiscan or
   Solscan nothing at all can be seen.
-- **Check by hand** when the Wayback Machine or the registries did not
-  answer. Those entries are paid by default unless excluded, and the run says
-  how many and names them. In the explorer check file they come first, with
-  the decision "paid by default, check by hand": those with evidence of a
-  tag before their submission that could not be confirmed (an early logo, an
-  eth-labels listing) at the very top, each with the archived copies to open
-  (the newest before the submission and the earliest after it, or the
-  archive's list of copies). Add one tagged before its submission to
-  `exclusions.json`, then generate and document again, or run `fetch` again
-  once the archive answers. In October 2026, with the archive refusing this
-  machine, that list held 15 entries, among them all 6 known to have been
-  tagged before their submission that the check could not exclude.
+- When the Wayback Machine, eth-labels or the registries did not answer, the
+  entries they leave undecided are paid by default, and the run says how
+  many. A `fetch` run again once they answer may exclude some of them; nothing
+  requires it. In October 2026, with the archive refusing this machine, that
+  held 15 entries, among them all 6 known to have been tagged before their
+  submission that the check could not exclude.
 - A submitter protects an entry by archiving its address page on the Wayback
   Machine (web.archive.org/save) when submitting.
 - Periods before November 2026 (`EXPLORER_DATING_SINCE`, default
@@ -534,29 +535,30 @@ none. The run's summary gives the counts.
   `exclusions.json`, then generate and document again (see
   [Exclusions](#exclusions-fixing-rewards-after-they-were-generated)).
 
-`EXPLORER_CHECK=off` skips all of it (then check every entry by hand): from
-`EXPLORER_DATING_SINCE` on, `fetch`, `filter-check` and `all` warn about it at
-the start and again at the end, since the rule is then not applied at all.
-`prefetch` never runs it. Each Etherscan-built explorer is read at one page per
-2 s, all of them side by side, and Blockscout 50 addresses per request: half a
-month's entries took under 2 minutes. The dating reads each tagged token's
-logo date with one `HEAD` request, downloads eth-labels' file (~12 MB) once,
-and asks the Wayback Machine one request at a time: one index query per entry
-(its latest 50 copies), then an archived page only where there is one to read,
-5 s apart. Its index, and its pages, are each not asked again in the run when
-they refuse this machine (HTTP 429 with no `Retry-After`: its bot block,
-which lasts hours and can refuse pages while the index answers), fail for 2
-entries in a row (3 attempts each, waiting 30 s, then 90 s, or as long as it
-asks), or after 30 minutes in all; the entries they leave undecided are paid
-by default unless checked by hand (above), and the summary says a fetch run
-again later, before sending, may exclude more. Token logos are asked one
-`HEAD` each, and an explorer whose logos fail 3 times in a row is not asked
-again. Expect about 10 minutes for a month like October 2026 (~70 tagged or
-unreadable entries) when the archive answers promptly; on 2026-11-12 an
-earlier version needed 17 minutes for 8 entries while the archive slowed this
-machine down, and the archive then refused it for over a day after a day of
-research traffic from it (its notice asks to email info@archive.org, with the
-machine's IP, to look into a block).
+`EXPLORER_CHECK=off` skips all of it: from `EXPLORER_DATING_SINCE` on,
+`fetch`, `filter-check` and `all` warn about it at the start and again at the
+end, since the rule is then not applied at all. `prefetch` never runs it.
+Each Etherscan-built explorer is read at one page per 2 s, all of them side by
+side, and Blockscout 50 addresses per request: half a month's entries took
+under 2 minutes. The dating downloads eth-labels' file (~12 MB) once, reads a
+tagged token's logo date with one `HEAD` request where no copy or listing
+decided it, and asks the Wayback Machine one request at a time: one index
+query per entry (its latest 50 copies; for a page with more copies than that
+after the submission, two more for the copies on either side of it; one more
+where eth-labels would exclude on an empty answer), then an archived page only
+where there is one to read, 5 s apart. Its index, and its
+pages, are each not asked again in the run when they refuse this machine
+(HTTP 429 with no `Retry-After`: its bot block, which lasts hours and can
+refuse pages while the index answers), fail for 2 entries in a row (3
+attempts each, waiting 30 s, then 90 s, or as long as it asks), or after 30
+minutes in all; the entries they leave undecided are paid by default. Token
+logos are asked one `HEAD` each, and an explorer whose logos fail 3 times in
+a row is not asked again. Expect about 10 minutes for a month like October
+2026 (~70 tagged or unreadable entries) when the archive answers promptly; on
+2026-11-12 an earlier version needed 17 minutes for 8 entries while the
+archive slowed this machine down, and the archive then refused it for over a
+day after a day of research traffic from it (its notice asks to email
+info@archive.org, with the machine's IP, to look into a block).
 
 ### 3) Removals + ATQ
 

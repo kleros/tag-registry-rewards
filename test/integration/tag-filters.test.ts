@@ -471,7 +471,7 @@ describe("applyTagFilters", () => {
                   ignored: [],
                   detail: "",
                   url: "",
-                  ...(i.address === evmAddress(0x7a9) ? { logo: "https://etherscan.io/token/images/uni_32.png", createdAt: 1600000000 } : {}),
+                  ...(i.address === evmAddress(0x7a9) ? { logo: "https://etherscan.io/token/images/uni_32.png" } : {}),
                 },
           ])
         )
@@ -536,11 +536,11 @@ describe("applyTagFilters", () => {
       )
       assert.deepEqual(new Set(passed.map((t) => t.id)), new Set([taggedToken.id, untagged.id, onArbitrum.id, domain.id]), "a CDN entry is exempt, whatever its address")
       assert.deepEqual(
-        dated.map(({ address, submissionTime, tagged, names, logo, createdAt }) => ({ address, submissionTime, tagged, names, logo, createdAt })),
+        dated.map(({ address, submissionTime, tagged, names, logo }) => ({ address, submissionTime, tagged, names, logo })),
         [
-          { address: evmAddress(0x7a9), submissionTime: 1793000000, tagged: true, names: ["Uniswap V2: Router 2"], logo: "https://etherscan.io/token/images/uni_32.png", createdAt: 1600000000 },
-          { address: evmAddress(0x7a9), submissionTime: 1793100000, tagged: true, names: ["Uniswap V2: Router 2"], logo: "https://etherscan.io/token/images/uni_32.png", createdAt: 1600000000 },
-          { address: evmAddress(0xa4b), submissionTime: 1793200000, tagged: null, names: [], logo: undefined, createdAt: undefined },
+          { address: evmAddress(0x7a9), submissionTime: 1793000000, tagged: true, names: ["Uniswap V2: Router 2"], logo: "https://etherscan.io/token/images/uni_32.png" },
+          { address: evmAddress(0x7a9), submissionTime: 1793100000, tagged: true, names: ["Uniswap V2: Router 2"], logo: "https://etherscan.io/token/images/uni_32.png" },
+          { address: evmAddress(0xa4b), submissionTime: 1793200000, tagged: null, names: [], logo: undefined },
         ],
         "only entries tagged today or not readable are dated, each against its own submission"
       )
@@ -553,7 +553,10 @@ describe("applyTagFilters", () => {
         ]
       )
       assert.ok(logs.has("Explorer dating: 1 excluded on dated evidence of a tag before their submission, 1 kept on dated evidence, 1 paid without dated evidence either way"))
-      assert.ok(logs.has("1 of them could not be checked against the Wayback Machine or the registries"), "a later run may exclude it: the run says so")
+      assert.ok(
+        logs.has("Explorer dating: 1 of them paid by default because the Wayback Machine, eth-labels or the registries did not answer"),
+        "a later run may exclude it: the run says so"
+      )
     })
 
     it("dates from EXPLORER_DATING_SINCE, read when a period is filtered, and refuses a bad one", async () => {

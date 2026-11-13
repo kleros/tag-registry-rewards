@@ -74,6 +74,19 @@ describe("registrationLookup (the explorer check's earlier Kleros entries)", () 
     await assert.rejects(registrationLookup()("10", evmAddress(1)), /the indexer answered HTTP 503/)
   })
 
+  it("never names the indexer's URL (its key, however short) when it cannot be reached: the message reaches the verdicts", async () => {
+    const keyed = "http://127.0.0.1:9/6c5b8b5/v1/graphql" // nothing listens there
+    const restore = setEnv({ XDAI_GTCR_SUBGRAPH_URL: keyed })
+    try {
+      await assert.rejects(registrationLookup()("10", evmAddress(1)), (err: Error) => {
+        assert.equal(err.message, "the indexer could not be reached (ECONNREFUSED)")
+        return true
+      })
+    } finally {
+      restore()
+    }
+  })
+
   describe("with entries the indexer left blank", () => {
     let ipfs: MockServer
     let files: { [path: string]: { status?: number; body?: unknown } }

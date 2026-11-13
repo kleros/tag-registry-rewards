@@ -3,6 +3,7 @@ import fetch from "node-fetch"
 import conf from "./config"
 import { assertAllResolved, fillMissingKeys, isMissingRequester, keysFromItemFile, UnresolvedItem } from "./utils/item-data"
 import { ExclusionList, loadExclusions } from "./utils/exclusions"
+import { httpFetch } from "./utils/http"
 
 const PAGE_SIZE = 1000
 
@@ -245,6 +246,14 @@ const addressInValues = (values: { [label: string]: unknown }): string | null =>
   return found.length === 1 ? found[0] : null
 }
 
+const REGISTRATION_LOOKUP_TIMEOUT_MS = 120000 // per page of the indexer
+// What a network error was (ECONNREFUSED, request-timeout…), without its
+// message: node-fetch's names the URL.
+const networkErrorCode = (err: unknown): string => {
+  const { code, type } = (err || {}) as { code?: unknown; type?: unknown }
+  return String(code || type || "no answer")
+}
+
 // Every registration the Address Tags and Tokens registries ever resolved for
 // an address (whatever became of the entry since), the earliest first: the
 // explorer check asks it before holding a tag against an entry, since a tag an
@@ -267,7 +276,10 @@ export const registrationLookup = (): ((chainId: string, address: string) => Pro
       const items: Item[] = []
       let afterId = ""
       for (;;) {
-        const response = await fetch(conf.XDAI_GTCR_SUBGRAPH_URL, {
+        // A stalled indexer must not hold the run. The network's errors name
+        // its URL, key and all, and these reach the verdicts and their file:
+        // only their code is kept.
+        const response = await httpFetch(conf.XDAI_GTCR_SUBGRAPH_URL, {
           method: "POST",
           body: JSON.stringify({
             query: `
@@ -288,9 +300,14 @@ export const registrationLookup = (): ((chainId: string, address: string) => Pro
             `,
           }),
           headers: { "Content-Type": "application/json" },
+          timeout: REGISTRATION_LOOKUP_TIMEOUT_MS,
+        }).catch((err: unknown) => {
+          throw new Error(`the indexer could not be reached (${networkErrorCode(err)})`)
         })
         if (!response.ok) throw new Error(`the indexer answered HTTP ${response.status}`)
-        const json = await response.json()
+        const json = await response.json().catch((err: unknown) => {
+          throw new Error(`the indexer's answer could not be read (${networkErrorCode(err)})`)
+        })
         if (json.errors || !json.data) throw new Error(`the indexer answered ${JSON.stringify(json).slice(0, 200)}`)
         const page: Item[] = json.data.litems || []
         items.push(...page)

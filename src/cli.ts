@@ -440,17 +440,12 @@ const main = async () => {
       // the dated check decided every entry (README "Explorer tags")
       console.log(
         `Explorer check: ${conf.FILES_DIR}/${review.file} (${review.excluded} excluded on dated evidence of a tag before ` +
-          `their submission, ${review.paidByDefault} paid without dated evidence).` +
-          (review.unchecked ? "" : " Nothing to do by hand.")
+          `their submission, ${review.paidByDefault} paid without dated evidence` +
+          (review.unchecked
+            ? `, ${review.unchecked} of them because the Wayback Machine, eth-labels or the registries did not answer`
+            : "") +
+          ")."
       )
-      if (review.unchecked) {
-        console.log(
-          `  ${review.unchecked} of the entries paid by default could not be checked against the Wayback Machine or the ` +
-            "registries: check them by hand before sending (marked \"check by hand\" at the top of the file, with the " +
-            "archived copies to open). For any tagged before its submission, add it to exclusions.json, then run generate " +
-            "and document again; or fetch again once the archive answers."
-        )
-      }
     } else if (review) {
       // Published already: an exclusion found in the review means generating
       // and documenting the period again (README "Exclusions").

@@ -151,7 +151,7 @@ describe("tagsRoutine (fetch)", () => {
     const tagDating = require("../../src/utils/tag-dating")
     const realDating = tagDating.dateExplorerTags
     tagDating.dateExplorerTags = async (items: { key: string }[]) =>
-      new Map(items.map((i) => [i.key, { decision: "excluded", evidence: "its token logo was written before the submission" }]))
+      new Map(items.map((i) => [i.key, { decision: "excluded", evidence: "archived with the public name tag before the submission" }]))
     try {
       subgraph.add(
         subgraphItem("tokens", { requests: [reg(evmAddress(4))], key0: `eip155:1:${evmAddress(0xc3)}` }),
@@ -169,24 +169,24 @@ describe("tagsRoutine (fetch)", () => {
       })
       assert.equal(manifest.includedCount, 1, "the entry tagged before its submission is not rewarded")
       assert.equal(manifest.excludedCount, 1)
-      assert.ok(logs.has("nothing to do by hand"))
+      assert.ok(logs.has("with its verdict and evidence: 1 excluded, 0 paid without dated evidence (README"))
     } finally {
       tagDating.dateExplorerTags = realDating
     }
   })
 
-  it("names the entries the archive left unchecked, first in the file and in the run's summary, for a check by hand", async () => {
+  it("counts the entries paid by default because the archive did not answer, and asks nothing of anyone", async () => {
     // as on 2026-11-12, the Wayback Machine refusing this machine: a token with
-    // an early logo it could not confirm, and an Arbiscan entry with copies unread
+    // an archived tag it could not confirm, and an Arbiscan entry with copies unread
     const refused = "the Wayback Machine refuses this machine's requests (HTTP 429, flagged as bot traffic)"
     const evidence: { [address: string]: string } = {
       [evmAddress(0xa4)]:
         `its explorer could not be read, with no dated evidence of a tag at the submission (2026-09-15T00:00:00Z): its archived copies could not be read (${refused}); ` +
-        `to look at by hand: https://web.archive.org/web/20250808070753/https://arbiscan.io/address/${evmAddress(0xa4)}`,
+        `archived copies: https://web.archive.org/web/20250808070753/https://arbiscan.io/address/${evmAddress(0xa4)}`,
       [evmAddress(0xc3)]:
         `tagged today (Circle: USDC Token), with no dated evidence of a tag at the submission (2026-09-15T00:00:00Z): its archived copies could not be read (${refused}); ` +
-        `its token logo was written 2023-08-27T23:36:59Z, before the submission, but the Wayback Machine's copies of the page could not be read to confirm it (${refused}); ` +
-        `to look at by hand: https://web.archive.org/web/20250116091735/https://etherscan.io/address/${evmAddress(0xc3)}`,
+        `eth-labels lists the public name tag "Circle: USDC Token" in its copy of 2026-07-10T16:37:25Z, but the Wayback Machine's copies of the page could not be read to confirm it (${refused}); ` +
+        `archived copies: https://web.archive.org/web/20250116091735/https://etherscan.io/address/${evmAddress(0xc3)}`,
     }
     const tagDating = require("../../src/utils/tag-dating")
     const realDating = tagDating.dateExplorerTags
@@ -207,25 +207,24 @@ describe("tagsRoutine (fetch)", () => {
         paidByDefault: 2,
         unchecked: 2,
       })
-      assert.equal(manifest.includedCount, 2, "paid unless excluded by hand")
-      assert.ok(!logs.has("nothing to do by hand"))
+      assert.equal(manifest.includedCount, 2, "the rule pays an entry without dated evidence")
       const summary = logs.text()
-      assert.ok(summary.includes("2 entries could not be checked"))
-      const early = summary.indexOf(`tokens 1:${evmAddress(0xc3)}`)
-      const plain = summary.indexOf(`tokens 42161:${evmAddress(0xa4)}`)
-      assert.ok(early > 0 && plain > early, "the entry with evidence of an early tag named first")
-      assert.ok(summary.includes(`tagged today (etherscan.io: Circle: USDC Token), with evidence of a tag before its submission`))
+      assert.ok(
+        summary.includes(
+          "0 excluded, 2 paid without dated evidence (2 of them because the Wayback Machine, eth-labels or the registries did not answer)"
+        )
+      )
+      assert.ok(!/by hand|exclusions\.json/.test(summary), "nothing is asked of the operator")
       const review = readCsv(join(work, "files", manifest.explorerCheck!.file))
       const col = (name: string) => review[0].indexOf(name)
       assert.deepEqual(
         review.slice(1).map((r) => [r[col("Decision")], r[col("Chain ID")]]),
         [
-          ["paid by default, check by hand", "1"],
-          ["paid by default, check by hand", "42161"],
-        ],
-        "first in the file, the one with early evidence at the very top"
+          ["paid by default", "42161"],
+          ["paid by default", "1"],
+        ]
       )
-      assert.ok(review[1][col("Evidence")].endsWith(`https://web.archive.org/web/20250116091735/https://etherscan.io/address/${evmAddress(0xc3)}`))
+      assert.ok(review[2][col("Evidence")].endsWith(`https://web.archive.org/web/20250116091735/https://etherscan.io/address/${evmAddress(0xc3)}`))
     } finally {
       tagDating.dateExplorerTags = realDating
     }
