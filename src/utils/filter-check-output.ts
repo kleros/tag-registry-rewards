@@ -2,6 +2,7 @@ import { createObjectCsvWriter } from "csv-writer"
 import conf from "../config"
 import { ExplorerReview, FilterCheckReason, FilterCheckRow } from "../types"
 import { ensureFilesDir, formatRegistry } from "./output-helpers"
+import { datedEarlyEvidence, datedUnchecked } from "./tag-dating"
 
 // Every FilterCheckReason (the compiler enforces it), in the order the
 // filters apply them: the order of the summary rows.
@@ -32,11 +33,14 @@ type CsvRow = {
   detail: string
 }
 
-// The explorer check's findings (see explorer-tags.ts and tag-dating.ts):
-// entries tagged on their explorer today, then those whose explorer could not
-// be read, each with the dated check's verdict and evidence when it applies
-// (excluded, kept, or paid by default). `<runId>_explorer_check.csv`, or null
-// when there is nothing to list.
+// The explorer check's findings (see explorer-tags.ts and tag-dating.ts),
+// each with the dated check's verdict and evidence when it applies (excluded,
+// kept, or paid by default). First the entries it could not check (the
+// archive or the registries did not answer: "paid by default, check by hand",
+// those with evidence of a tag before their submission at the very top), then
+// the entries tagged on their explorer today, then those whose explorer could
+// not be read. `<runId>_explorer_check.csv`, or null when there is nothing to
+// list.
 export const writeExplorerCheck = async (runId: string, reviews: ExplorerReview[]): Promise<string | null> => {
   if (reviews.length === 0) return null
   ensureFilesDir()
@@ -58,11 +62,12 @@ export const writeExplorerCheck = async (runId: string, reviews: ExplorerReview[
       { id: "evidence", title: "Evidence" },
     ],
   })
-  const ordered = reviews.filter((r) => r.status === "tagged").concat(reviews.filter((r) => r.status !== "tagged"))
+  const rank = (r: ExplorerReview): number => (datedEarlyEvidence(r) ? 0 : datedUnchecked(r) ? 1 : r.status === "tagged" ? 2 : 3)
+  const ordered = [0, 1, 2, 3].flatMap((group) => reviews.filter((r) => rank(r) === group))
   await csvWriter.writeRecords(
     ordered.map(({ tag, status, url, detail, decision, evidence }) => ({
       status,
-      decision: decision || "to review by hand",
+      decision: datedUnchecked({ decision, evidence }) ? "paid by default, check by hand" : decision || "to review by hand",
       id: tag.id,
       submitter: tag.submitter,
       registry: formatRegistry(tag.registry),

@@ -229,6 +229,22 @@ const nonTokensFromDomains = async (domainItems: Item[], exclusions: ExclusionLi
   return kept
 }
 
+// The address an item's values name, written as CAIP-10 (eip155:<chain>:0x…):
+// the "Contract Address" or "Address" field, else the only value written so.
+// null when there is none, or more than one with no such field to choose.
+const CAIP_EVM = /^eip155:\d+:0x[0-9a-fA-F]{40}$/
+const addressInValues = (values: { [label: string]: unknown }): string | null => {
+  for (const label of ["Contract Address", "Address"]) {
+    const value = typeof values[label] === "string" ? (values[label] as string).trim() : ""
+    if (CAIP_EVM.test(value)) return value
+  }
+  const found = Object.values(values)
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim())
+    .filter((value) => CAIP_EVM.test(value))
+  return found.length === 1 ? found[0] : null
+}
+
 // Every registration the Address Tags and Tokens registries ever resolved for
 // an address (whatever became of the entry since), the earliest first: the
 // explorer check asks it before holding a tag against an entry, since a tag an
@@ -281,9 +297,11 @@ export const registrationLookup = (): ((chainId: string, address: string) => Pro
         if (page.length < PAGE_SIZE) break
         afterId = page[page.length - 1].id
       }
-      // A blank item whose data is the item itself (inline JSON, an early
-      // Address Tags form) holds its keys there; one whose file names no
-      // address cannot be any address's tag.
+      // A blank item whose data is the item itself (inline JSON, early
+      // Address Tags forms) holds its keys there: an item file ({ columns,
+      // values }), or its values alone ({"Contract Address": "eip155:10:0x…",
+      // "Public Name Tag": …}, a registered Beethoven X entry of 2025). One
+      // whose file names no address cannot be any address's tag.
       const noAddress = new Set<string>()
       const inline = items.map((item) => {
         if (item.key0 || !item.data) return item
@@ -293,7 +311,11 @@ export const registrationLookup = (): ((chainId: string, address: string) => Pro
         } catch {
           return item
         }
-        if (!file || typeof file !== "object" || !Array.isArray(file.columns) || !file.values) return item
+        if (!file || typeof file !== "object" || Array.isArray(file)) return item
+        if (!Array.isArray(file.columns) || !file.values) {
+          const address = addressInValues(file as { [label: string]: unknown })
+          return address ? { ...item, key0: address } : item
+        }
         const keys = keysFromItemFile(file)
         if (keys && keys.key0 && keys.key0 !== "-") return { ...item, ...keys }
         noAddress.add(item.id)

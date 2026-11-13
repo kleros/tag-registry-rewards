@@ -442,8 +442,9 @@ explorer (`explorer` in `src/utils/chains.ts`, the program's list) **when they
 were submitted** are not rewarded; Domains (CDN) entries are exempt. An
 explorer shows a tag as it is today, never when it was added, and tags often
 appear after the submission (explorers import token listings in bulk), so
-`fetch` and `filter-check` decide each entry on dated evidence, with no key,
-no schedule and nothing to do by hand.
+`fetch` and `filter-check` decide each entry on dated evidence, with no key
+and no schedule. There is nothing to do by hand unless the Wayback Machine or
+the registries did not answer (see "Check by hand" below).
 
 **1. Today's page** (`src/utils/explorer-tags.ts`). An entry with no name tag
 there is rewarded, and nothing more is asked about it:
@@ -508,9 +509,22 @@ none. The run's summary gives the counts.
 - A shared logo file rewritten after the contract was created (a rebrand of
   the token it belongs to) would still date the profile wrongly: a rare case
   the 7-day guard does not catch.
-- "Paid by default" is the published default: no dated evidence, no
-  exclusion. A tag seen only today is not evidence; on Arbiscan or Solscan
-  nothing at all can be seen.
+- No dated evidence, no exclusion: this is how the check applies the rule
+  (the program's posts say entries must not already be tagged, not how that
+  is established). A tag seen only today is not evidence; on Arbiscan or
+  Solscan nothing at all can be seen.
+- **Check by hand** when the Wayback Machine or the registries did not
+  answer. Those entries are paid by default unless excluded, and the run says
+  how many and names them. In the explorer check file they come first, with
+  the decision "paid by default, check by hand": those with evidence of a
+  tag before their submission that could not be confirmed (an early logo, an
+  eth-labels listing) at the very top, each with the archived copies to open
+  (the newest before the submission and the earliest after it, or the
+  archive's list of copies). Add one tagged before its submission to
+  `exclusions.json`, then generate and document again, or run `fetch` again
+  once the archive answers. In October 2026, with the archive refusing this
+  machine, that list held 15 entries, among them all 6 known to have been
+  tagged before their submission that the check could not exclude.
 - A submitter protects an entry by archiving its address page on the Wayback
   Machine (web.archive.org/save) when submitting.
 - Periods before November 2026 (`EXPLORER_DATING_SINCE`, default
@@ -520,7 +534,9 @@ none. The run's summary gives the counts.
   `exclusions.json`, then generate and document again (see
   [Exclusions](#exclusions-fixing-rewards-after-they-were-generated)).
 
-`EXPLORER_CHECK=off` skips all of it (then check every entry by hand);
+`EXPLORER_CHECK=off` skips all of it (then check every entry by hand): from
+`EXPLORER_DATING_SINCE` on, `fetch`, `filter-check` and `all` warn about it at
+the start and again at the end, since the rule is then not applied at all.
 `prefetch` never runs it. Each Etherscan-built explorer is read at one page per
 2 s, all of them side by side, and Blockscout 50 addresses per request: half a
 month's entries took under 2 minutes. The dating reads each tagged token's
@@ -532,10 +548,15 @@ they refuse this machine (HTTP 429 with no `Retry-After`: its bot block,
 which lasts hours and can refuse pages while the index answers), fail for 2
 entries in a row (3 attempts each, waiting 30 s, then 90 s, or as long as it
 asks), or after 30 minutes in all; the entries they leave undecided are paid
-by default, saying so, and the summary says a fetch run again later, before
-sending, may exclude more. Token logos are asked one `HEAD` each, and an
-explorer whose logos fail 3 times in a row is not asked again. Expect about
-10 minutes for a month like October 2026 (~70 tagged or unreadable entries).
+by default unless checked by hand (above), and the summary says a fetch run
+again later, before sending, may exclude more. Token logos are asked one
+`HEAD` each, and an explorer whose logos fail 3 times in a row is not asked
+again. Expect about 10 minutes for a month like October 2026 (~70 tagged or
+unreadable entries) when the archive answers promptly; on 2026-11-12 an
+earlier version needed 17 minutes for 8 entries while the archive slowed this
+machine down, and the archive then refused it for over a day after a day of
+research traffic from it (its notice asks to email info@archive.org, with the
+machine's IP, to look into a block).
 
 ### 3) Removals + ATQ
 

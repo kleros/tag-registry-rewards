@@ -35,6 +35,23 @@ import { EXPLORER_BROWSER_HEADERS, isEtherscanBuilt, parseArchivedAddressPage } 
 
 export type DatingDecision = "excluded" | "kept" | "paid by default"
 
+// A verdict paid by default because the Wayback Machine did not answer,
+// refused the run's requests or ran out of time, or the registries could not
+// be read for an earlier Kleros entry: one a later run may decide otherwise,
+// and one for a person to check meanwhile (its evidence links the archived
+// copies to open).
+export const datedUnchecked = (verdict: { decision?: string; evidence?: string }): boolean =>
+  verdict.decision === "paid by default" && /the Wayback Machine|could not be checked/.test(verdict.evidence || "")
+
+// Of those, one with dated evidence of a tag before its submission that could
+// not be confirmed (a logo written before it, an eth-labels listing, an
+// archived copy with the tag): the first to check.
+export const datedEarlyEvidence = (verdict: { decision?: string; evidence?: string }): boolean =>
+  datedUnchecked(verdict) &&
+  /before the submission, but |archived with the public name tag "[^"]*" on \S+, but |eth-labels lists the public name tag "[^"]*" in its copy of \S+, but /.test(
+    verdict.evidence || ""
+  )
+
 export interface DatingItem {
   key: string
   host: string // the chain's reference explorer
@@ -213,7 +230,14 @@ interface ArchiveFindings {
   afterSkippedAt: number | null // its earliest copy after the submission, when a later one was read instead
   before: ArchivedReading | null // the latest one taken before it (read unless `after` shows no tag)
   beforeUnreadAt: number | null // its newest copy before the submission, when that one could not be read
+  // The copies a person would look at when they could not be read here: the
+  // newest before the submission and the earliest after it, from the index.
+  toLookAt: string[]
 }
+
+// Where a person sees every copy the archive holds of a page.
+const archiveCalendar = (host: string, address: string): string => `${WAYBACK}/web/*/https://${host}/address/${address}`
+const copyLink = (copy: Copy): string => `${WAYBACK}/web/${copy.timestamp}/${copy.original}`
 
 // When the explorer wrote a logo file (its Last-Modified), why it gave none,
 // or why it could not be asked.
@@ -330,6 +354,7 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
       afterSkippedAt: null,
       before: null,
       beforeUnreadAt: null,
+      toLookAt: [archiveCalendar(item.host, item.address)],
     })
     if (indexDown) return unanswered(indexDown)
     if (archiveDeadline === undefined) archiveDeadline = Date.now() + archiveBudgetMs
@@ -365,6 +390,7 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
       afterSkippedAt: null,
       before: null,
       beforeUnreadAt: null,
+      toLookAt: [before[0], after[0]].filter((copy): copy is Copy => copy !== undefined).map(copyLink),
     }
     if (findings.copies === 0) return findings
     if (pagesDown) return { ...findings, failure: pagesDown }
@@ -513,7 +539,12 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
       if (!why) return { decision: "kept", evidence: `its token logo ${item.logo} was written ${iso(logoAt)}, after the submission (${iso(sub)})` }
       notes.push(`its token logo was written ${iso(logoAt)}, after the submission, but ${why}`)
     }
-    return { decision: "paid by default", evidence: `${today}, with no dated evidence of a tag at the submission (${iso(sub)})${notes.length ? `: ${notes.join("; ")}` : ""}` }
+    // The archive did not answer here: the copies a person can open instead.
+    const look = archive && (!archive.answered || archive.failure) && archive.toLookAt.length > 0 ? `; to look at by hand: ${archive.toLookAt.join(" , ")}` : ""
+    return {
+      decision: "paid by default",
+      evidence: `${today}, with no dated evidence of a tag at the submission (${iso(sub)})${notes.length ? `: ${notes.join("; ")}` : ""}${look}`,
+    }
   }
 
   for (const item of toDate) out.set(item.key, await dateOne(item))

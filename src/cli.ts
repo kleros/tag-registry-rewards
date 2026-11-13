@@ -20,6 +20,7 @@ import { isBudgetExceeded, setTimeBudget } from "./utils/runtime-helpers"
 import { txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
 import { getEvmTxProvider } from "./utils/evm-enrichment"
 import { getSolanaTxProvider } from "./utils/solana-enrichment"
+import { explorerCheckSkipped } from "./utils/tag-filters"
 import {
   applyTagExclusions,
   ExclusionList,
@@ -439,12 +440,15 @@ const main = async () => {
       // the dated check decided every entry (README "Explorer tags")
       console.log(
         `Explorer check: ${conf.FILES_DIR}/${review.file} (${review.excluded} excluded on dated evidence of a tag before ` +
-          `their submission, ${review.paidByDefault} paid without dated evidence). Nothing to do by hand.`
+          `their submission, ${review.paidByDefault} paid without dated evidence).` +
+          (review.unchecked ? "" : " Nothing to do by hand.")
       )
       if (review.unchecked) {
         console.log(
           `  ${review.unchecked} of the entries paid by default could not be checked against the Wayback Machine or the ` +
-            "registries (see their evidence): fetching again later, before sending, may exclude more."
+            "registries: check them by hand before sending (marked \"check by hand\" at the top of the file, with the " +
+            "archived copies to open). For any tagged before its submission, add it to exclusions.json, then run generate " +
+            "and document again; or fetch again once the archive answers."
         )
       }
     } else if (review) {
@@ -456,6 +460,8 @@ const main = async () => {
           "exclusions.json, then run generate and document again."
       )
     }
+    const explorerSkipped = explorerCheckSkipped({ start, end })
+    if (explorerSkipped) console.warn(`WARNING: ${explorerSkipped}`)
     // Print the exact filenames — submissions use the generate run's timestamp,
     // removals/ATQ the removals run's, so a single <runId> placeholder misleads.
     let submissionsTxFile = "<see latest_generate_manifest.json: transactionsFile>"

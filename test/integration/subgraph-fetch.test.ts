@@ -114,6 +114,34 @@ describe("registrationLookup (the explorer check's earlier Kleros entries)", () 
       assert.ok(logs.has("an earlier entry's data is malformed, its address unknown (left out)"))
     })
 
+    it("reads the address of an entry whose inline data is its values alone (a registered 2025 Address Tags entry)", async () => {
+      // as the indexer holds 0xa66b4b32…: no key0, the values as data
+      const pool = "0x9ff36e48edbf6cb910ebf9ef70f6aeba41391fce"
+      const flat = (values: { [label: string]: string }) => JSON.stringify(values)
+      const onlyOne = evmAddress(0x0e1)
+      const twoNoLabel = [evmAddress(0x0e2), evmAddress(0x0e3)]
+      subgraph.add(
+        subgraphItem("addressTags", {
+          requests: [registration(evmAddress(1), BEFORE)],
+          key0: "",
+          data: flat({ "Contract Address": `eip155:10:${pool}`, "Public Name Tag": "ECLP-WETH-USDC-dyn Pool", "Project Name": "Beethoven X" }),
+        }),
+        // no usual label: the only CAIP-10 value
+        subgraphItem("tokens", { requests: [registration(evmAddress(2), BEFORE)], key0: "", data: flat({ Token: `eip155:1:${onlyOne}`, Name: "x" }) }),
+        // two with no label to choose: unknown, named in a warning
+        subgraphItem("tokens", {
+          requests: [registration(evmAddress(3), BEFORE)],
+          key0: "",
+          data: flat({ A: `eip155:1:${twoNoLabel[0]}`, B: `eip155:1:${twoNoLabel[1]}` }),
+        })
+      )
+      const lookup = registrationLookup()
+      assert.deepEqual((await lookup("10", "0x9fF36E48EDbf6Cb910ebf9eF70F6AEBA41391FCE")).map((r) => r.resolvedAt), [BEFORE])
+      assert.deepEqual((await lookup("1", onlyOne)).map((r) => r.resolvedAt), [BEFORE])
+      assert.deepEqual(await lookup("1", twoNoLabel[0]), [])
+      assert.equal(logs.lines.filter((l) => l.includes("an earlier entry's data is malformed")).length, 1, "only the ambiguous one")
+    })
+
     it("fails, keeping every entry from being excluded, when a blank entry's address cannot be read: it might be any", async () => {
       subgraph.add(subgraphItem("tokens", { requests: [registration(evmAddress(5), BEFORE)], key0: "", data: "/ipfs/QmGone/item.json" }))
       await assert.rejects(registrationLookup()("1", evmAddress(6)), /the address of 1 earlier entry could not be read \(0x[0-9a-f]{64}@0x[0-9a-f]{40}: its IPFS file \/ipfs\/QmGone\/item\.json could not be read/)

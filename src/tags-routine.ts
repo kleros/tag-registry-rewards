@@ -14,7 +14,7 @@ import { loadHypersync, requireEnvioApiToken } from "./utils/hypersync-enrichmen
 import { assertSolanaRpcSettings } from "./utils/solana-rpc-enrichment"
 import { acquireTxCountCacheLock, txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
 import { writeFetchOutputs } from "./utils/fetch-output"
-import { applyTagFilters, datedUnchecked } from "./utils/tag-filters"
+import { applyTagFilters, datedUnchecked, explorerCheckSkipped, uncheckedSummary } from "./utils/tag-filters"
 import { writeExplorerCheck } from "./utils/filter-check-output"
 import { assertIndexerComplete } from "./utils/indexer-checks"
 import { ExclusionList, loadExclusions } from "./utils/exclusions"
@@ -204,12 +204,23 @@ export const tagsRoutine = async (period: Period, sharedExclusions?: ExclusionLi
   const tagged = explorerReview.filter((r) => r.status === "tagged").length
   const dated = explorerReview.some((r) => r.decision !== undefined)
   const decided = (decision: string): number => explorerReview.filter((r) => r.decision === decision).length
+  const toCheck = uncheckedSummary(explorerReview)
   if (explorerFile && dated) {
     console.log(
       `[filter] Explorer check: ${conf.FILES_DIR}/${explorerFile} lists each entry tagged on its explorer or not readable, ` +
         `with its verdict and evidence: ${decided("excluded")} excluded, ${decided("paid by default")} paid without dated evidence ` +
-        "(README \"Explorer tags\"); nothing to do by hand"
+        "(README \"Explorer tags\")" +
+        (toCheck.length === 0 ? "; nothing to do by hand" : "")
     )
+    if (toCheck.length > 0) {
+      console.warn(
+        `[filter] Explorer check: ${explorerReview.filter(datedUnchecked).length} entries could not be checked (the Wayback ` +
+          "Machine or the registries did not answer) and are paid unless excluded. Check them by hand before sending " +
+          "(marked \"check by hand\" at the top of the file, with the archived copies to open) and add any tagged before " +
+          "its submission to exclusions.json, or run fetch again once the archive answers:\n" +
+          toCheck.join("\n")
+      )
+    }
   } else if (explorerFile) {
     console.log(
       `[filter] Explorer check to review: ${conf.FILES_DIR}/${explorerFile}. Add the entries already tagged before ` +
@@ -246,6 +257,8 @@ export const tagsRoutine = async (period: Period, sharedExclusions?: ExclusionLi
   )
 
   console.log("Fetch completed:", manifest)
+  const skipped = explorerCheckSkipped(period)
+  if (skipped) console.warn(`[fetch] WARNING: ${skipped}`)
   return manifest
 }
 

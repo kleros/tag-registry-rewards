@@ -1,7 +1,7 @@
 import { ChainConfig, ExplorerReview, FilterCheckReason, Period, Tag } from "../types"
 import { findChainConfig } from "./chains"
 import { checkExplorerTags } from "./explorer-tags"
-import { dateExplorerTags, DatingItem } from "./tag-dating"
+import { dateExplorerTags, datedEarlyEvidence, datedUnchecked, DatingItem } from "./tag-dating"
 import { registrationLookup } from "../tag-fetch"
 import { getAddressTagExclusionReason } from "./address-tag-validation"
 import { detectPredictionMarketTokens } from "./prediction-market-detection"
@@ -75,6 +75,17 @@ export interface TagFilterOptions {
 // checked by hand, with exclusions.json for the tagged ones).
 export const explorerCheckEnabled = (): boolean =>
   !/^(off|false|0|no)$/i.test(String(process.env.EXPLORER_CHECK || "").trim())
+
+// What to tell the operator when EXPLORER_CHECK=off in a period the dated
+// check applies to: the rule is then not applied at all, which a line in the
+// middle of a long run is easy to miss (fetch says it again at the end). null
+// when the check runs, or the period is one only listed for review.
+export const explorerCheckSkipped = (period?: Period): string | null =>
+  !explorerCheckEnabled() && explorerDatingApplies(period)
+    ? "EXPLORER_CHECK=off, so the explorer rule is not applied to this period: entries tagged on their explorer " +
+      "before their submission are paid like the others. Remove EXPLORER_CHECK=off from .env and run again, unless " +
+      'every Address Tags and Tokens entry is checked by hand (README "Explorer tags").'
+    : null
 
 export const applyTagFilters = async (
   tags: Tag[],
@@ -175,7 +186,9 @@ export const applyTagFilters = async (
   // submission is excluded, the others listed with their verdict.
   const datedOut = new Set<string>()
   if (!explorerCheckEnabled()) {
-    console.log("[filter] EXPLORER_CHECK=off: no entry looked up on its explorer (check them by hand)")
+    const skipped = skipExplorerCheck ? null : explorerCheckSkipped(period)
+    if (skipped) console.warn(`[filter] WARNING: ${skipped}`)
+    else console.log("[filter] EXPLORER_CHECK=off: no entry looked up on its explorer (check them by hand)")
   } else if (!skipExplorerCheck) {
     explorerReview = await reviewOnExplorer(afterPhase1b.filter((tag) => !excludedSet.has(tag.id)), period)
     for (const review of explorerReview) {
@@ -286,14 +299,27 @@ export const reviewOnExplorer = async (tags: Tag[], period?: Period): Promise<Ex
   if (unchecked > 0) {
     console.warn(
       `[filter] Explorer dating: ${unchecked} of them could not be checked against the Wayback Machine or the registries ` +
-        "(their evidence says why): running fetch again later may exclude more"
+        "(their evidence says why): they are paid unless checked by hand (marked \"check by hand\" at the top of the " +
+        "explorer check file, with the archived copies to open), or a fetch run again once the archive answers excludes them"
     )
   }
   return review
 }
 
-// An entry paid by default because the Wayback Machine did not answer, refused
-// the run's requests or ran out of time, or the registries could not be read
-// for an earlier Kleros entry: one a later run may decide otherwise.
-export const datedUnchecked = (review: ExplorerReview): boolean =>
-  review.decision === "paid by default" && /the Wayback Machine|could not be checked/.test(review.evidence || "")
+export { datedUnchecked, datedEarlyEvidence }
+
+// The entries the dated check could not check, for the run's summary: one
+// line each (the explorer check file has their evidence and the archived
+// copies to open), those with evidence of a tag before their submission first.
+export const uncheckedSummary = (reviews: ExplorerReview[], max = 20): string[] => {
+  const unchecked = reviews.filter(datedUnchecked)
+  const ordered = unchecked.filter(datedEarlyEvidence).concat(unchecked.filter((r) => !datedEarlyEvidence(r)))
+  const lines = ordered.slice(0, max).map(
+    (r) =>
+      `  - ${r.tag.registry} ${r.tag.chain}:${r.tag.tagAddress} (${r.tag.id}): ` +
+      (r.status === "tagged" ? `tagged today (${r.detail})` : "its explorer could not be read") +
+      (datedEarlyEvidence(r) ? ", with evidence of a tag before its submission" : "")
+  )
+  if (ordered.length > max) lines.push(`  - and ${ordered.length - max} more, in the explorer check file`)
+  return lines
+}

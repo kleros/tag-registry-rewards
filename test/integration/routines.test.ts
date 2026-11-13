@@ -175,6 +175,75 @@ describe("tagsRoutine (fetch)", () => {
     }
   })
 
+  it("names the entries the archive left unchecked, first in the file and in the run's summary, for a check by hand", async () => {
+    // as on 2026-11-12, the Wayback Machine refusing this machine: a token with
+    // an early logo it could not confirm, and an Arbiscan entry with copies unread
+    const refused = "the Wayback Machine refuses this machine's requests (HTTP 429, flagged as bot traffic)"
+    const evidence: { [address: string]: string } = {
+      [evmAddress(0xa4)]:
+        `its explorer could not be read, with no dated evidence of a tag at the submission (2026-09-15T00:00:00Z): its archived copies could not be read (${refused}); ` +
+        `to look at by hand: https://web.archive.org/web/20250808070753/https://arbiscan.io/address/${evmAddress(0xa4)}`,
+      [evmAddress(0xc3)]:
+        `tagged today (Circle: USDC Token), with no dated evidence of a tag at the submission (2026-09-15T00:00:00Z): its archived copies could not be read (${refused}); ` +
+        `its token logo was written 2023-08-27T23:36:59Z, before the submission, but the Wayback Machine's copies of the page could not be read to confirm it (${refused}); ` +
+        `to look at by hand: https://web.archive.org/web/20250116091735/https://etherscan.io/address/${evmAddress(0xc3)}`,
+    }
+    const tagDating = require("../../src/utils/tag-dating")
+    const realDating = tagDating.dateExplorerTags
+    tagDating.dateExplorerTags = async (items: { key: string; address: string }[]) =>
+      new Map(items.map((i) => [i.key, { decision: "paid by default", evidence: evidence[i.address] }]))
+    try {
+      subgraph.add(
+        subgraphItem("tokens", { requests: [reg(evmAddress(4))], key0: `eip155:42161:${evmAddress(0xa4)}` }),
+        subgraphItem("tokens", { requests: [reg(evmAddress(3))], key0: `eip155:1:${evmAddress(0xc3)}` })
+      )
+      dune.evmCounts = { "1": { [evmAddress(0xc3)]: 10 }, "42161": { [evmAddress(0xa4)]: 20 } }
+      const manifest = await withEnv({ EXPLORER_CHECK: "on", EXPLORER_DATING_SINCE: "2026-09-01" }, () => routines.tagsRoutine(PERIOD))
+      assert.deepEqual(manifest.explorerCheck, {
+        file: `${manifest.runId}_explorer_check.csv`,
+        tagged: 1,
+        notRead: 1,
+        excluded: 0,
+        paidByDefault: 2,
+        unchecked: 2,
+      })
+      assert.equal(manifest.includedCount, 2, "paid unless excluded by hand")
+      assert.ok(!logs.has("nothing to do by hand"))
+      const summary = logs.text()
+      assert.ok(summary.includes("2 entries could not be checked"))
+      const early = summary.indexOf(`tokens 1:${evmAddress(0xc3)}`)
+      const plain = summary.indexOf(`tokens 42161:${evmAddress(0xa4)}`)
+      assert.ok(early > 0 && plain > early, "the entry with evidence of an early tag named first")
+      assert.ok(summary.includes(`tagged today (etherscan.io: Circle: USDC Token), with evidence of a tag before its submission`))
+      const review = readCsv(join(work, "files", manifest.explorerCheck!.file))
+      const col = (name: string) => review[0].indexOf(name)
+      assert.deepEqual(
+        review.slice(1).map((r) => [r[col("Decision")], r[col("Chain ID")]]),
+        [
+          ["paid by default, check by hand", "1"],
+          ["paid by default, check by hand", "42161"],
+        ],
+        "first in the file, the one with early evidence at the very top"
+      )
+      assert.ok(review[1][col("Evidence")].endsWith(`https://web.archive.org/web/20250116091735/https://etherscan.io/address/${evmAddress(0xc3)}`))
+    } finally {
+      tagDating.dateExplorerTags = realDating
+    }
+  })
+
+  it("warns at the start and the end of a fetch that skips the explorer rule in a dated period (EXPLORER_CHECK=off)", async () => {
+    subgraph.add(subgraphItem("tokens", { requests: [reg(evmAddress(4))], key0: `eip155:1:${evmAddress(0xc3)}` }))
+    dune.evmCounts = { "1": { [evmAddress(0xc3)]: 10 } }
+    await withEnv({ EXPLORER_CHECK: "off", EXPLORER_DATING_SINCE: "2026-09-01" }, () => routines.tagsRoutine(PERIOD))
+    const warnings = logs.lines.filter((l) => l.includes("EXPLORER_CHECK=off, so the explorer rule is not applied to this period"))
+    assert.equal(warnings.length, 2, "when filtering, and again after the counts")
+    assert.ok(logs.lines.some((l) => l.startsWith("[fetch] WARNING: EXPLORER_CHECK=off")))
+    logs.clear()
+    await withEnv({ EXPLORER_CHECK: "off" }, () => routines.tagsRoutine(PERIOD))
+    assert.ok(!logs.has("WARNING: EXPLORER_CHECK=off"), "a period before the dated check: the quiet line, as before")
+    assert.ok(logs.has("EXPLORER_CHECK=off: no entry looked up on its explorer"))
+  })
+
   it("never writes outputs when a count is missing (payouts are never split on zeros)", async () => {
     subgraph.add(subgraphItem("tokens", { requests: [reg(evmAddress(1))], key0: `eip155:1:${evmAddress(0xc9)}` }))
     const real = evmLane.enrichAllEvmAddresses

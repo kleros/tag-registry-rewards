@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from "node:test"
 import { strict as assert } from "assert"
 import { gzipSync } from "zlib"
-import { dateExplorerTags, DatingItem, DatingOptions, parseEthLabelsCsv, waybackTimestamp } from "../../src/utils/tag-dating"
+import { dateExplorerTags, datedEarlyEvidence, datedUnchecked, DatingItem, DatingOptions, parseEthLabelsCsv, waybackTimestamp } from "../../src/utils/tag-dating"
 
 // The dated explorer check against answers shaped like the Wayback Machine's,
 // the explorers' and GitHub's (2026-11-11). Its HTTP and pauses are swapped
@@ -314,6 +314,12 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     assert.match(verdicts.get("before")!.evidence, /its token logo was written 2025-05-01T00:00:00Z, before the submission, but the Wayback Machine could not be asked to confirm it/)
     assert.equal(verdicts.get("after")!.decision, "paid by default", "nor keep on it: a copy before the submission might show the tag")
     assert.match(verdicts.get("after")!.evidence, /its token logo was written 2025-05-01T00:00:00Z, after the submission, but the Wayback Machine could not be asked about earlier copies/)
+    // both left for a person to check, the one with early evidence first
+    assert.ok(datedUnchecked(verdicts.get("before")!) && datedEarlyEvidence(verdicts.get("before")!))
+    assert.ok(datedUnchecked(verdicts.get("after")!) && !datedEarlyEvidence(verdicts.get("after")!))
+    for (const key of ["before", "after"]) {
+      assert.match(verdicts.get(key)!.evidence, /; to look at by hand: https:\/\/web\.archive\.org\/web\/\*\/https:\/\/[a-z.]+\/address\/0x[0-9a-fA-F]{40}$/, "the archive's list of copies")
+    }
   })
 
   it("pays by default when the archive does not answer, retrying, and stops asking it after two entries in a row", async () => {
@@ -358,6 +364,13 @@ describe("tag dating: whether a tag seen today was already there at the submissi
       assert.match(verdicts.get(key)!.evidence, /the Wayback Machine refuses this machine's requests \(HTTP 429, flagged as bot traffic\)/)
     }
     assert.match(verdicts.get("2")!.evidence, /its pages not asked again in this run/)
+    for (const key of ["1", "2"]) {
+      assert.ok(
+        verdicts.get(key)!.evidence.endsWith(`; to look at by hand: https://web.archive.org/web/20250116091735/https://etherscan.io/address/${ADDRESS}`),
+        "the copy the index named, for a person to open"
+      )
+      assert.ok(datedUnchecked(verdicts.get(key)!) && datedEarlyEvidence(verdicts.get(key)!) === false, "unchecked, with no early evidence read")
+    }
     assert.equal(verdicts.get("never archived")!.decision, "excluded", "a page the index shows was never archived needs no page to confirm its logo")
     assert.deepEqual(
       requests.filter((r) => new URL(r.url).host === "web.archive.org").map((r) => new URL(r.url).pathname.split("/")[1]),
@@ -418,5 +431,42 @@ describe("tag dating: eth-labels' file", () => {
 
   it("refuses a file whose columns changed", () => {
     assert.throws(() => parseEthLabelsCsv("addr,chain,tag\n"), /unexpected columns/)
+  })
+})
+
+describe("tag dating: the verdicts left for a person to check", () => {
+  const paid = (evidence: string) => ({ decision: "paid by default", evidence })
+  const refused = "the Wayback Machine refuses this machine's requests (HTTP 429, flagged as bot traffic)"
+
+  it("marks a verdict the archive or the registries left unchecked, and among them one with early evidence", () => {
+    const cases: [string, { decision: string; evidence: string }, boolean, boolean][] = [
+      [
+        "an early logo the archive could not confirm",
+        paid(`tagged today (Treat: TREAT Token), with no dated evidence of a tag at the submission (2026-10-04T14:33:00Z): its archived copies could not be read (${refused}); its token logo was written 2023-08-27T23:36:59Z, before the submission, but the Wayback Machine's copies of the page could not be read to confirm it (${refused})`),
+        true,
+        true,
+      ],
+      [
+        "an eth-labels listing the archive could not confirm",
+        paid(`its explorer could not be read, with no dated evidence of a tag at the submission (2026-10-28T09:05:45Z): its archived copies could not be read (${refused}); eth-labels lists the public name tag "Aave: Incentives V3" in its copy of 2026-07-10T16:37:25Z, but the Wayback Machine's copies of the page could not be read to confirm it (${refused})`),
+        true,
+        true,
+      ],
+      [
+        "an archived tag the registries could not clear",
+        paid(`tagged today (X), with no dated evidence of a tag at the submission (2026-10-04T14:33:00Z): archived with the public name tag "X" on 2025-01-16T09:17:35Z, but the program's registries could not be checked for an earlier entry of this address (the indexer answered HTTP 503)`),
+        true,
+        true,
+      ],
+      ["the archive refused, nothing else known", paid(`its explorer could not be read, with no dated evidence of a tag at the submission (2026-10-27T00:32:15Z): its archived copies could not be read (${refused})`), true, false],
+      ["an earlier Kleros entry: decided, nothing to check", paid(`eth-labels lists the public name tag "A" in its copy of 2026-07-10T16:37:25Z, but Kleros entry 0x02@0x66 registered this address on 2023-05-01T00:00:00.000Z`), false, false],
+      ["never archived: nothing a person could add", paid("its explorer could not be read, with no dated evidence of a tag at the submission (2026-10-18T07:43:25Z): never archived"), false, false],
+      ["Solscan", paid("its explorer could not be read, and solscan.io keeps no dated copy a script can read"), false, false],
+      ["excluded", { decision: "excluded", evidence: `archived with the public name tag "X" on 2025-01-16T09:17:35Z, before the submission (2026-10-04T14:33:00Z): https://web.archive.org/web/20250116091735/x` }, false, false],
+    ]
+    for (const [what, verdict, unchecked, early] of cases) {
+      assert.equal(datedUnchecked(verdict), unchecked, `${what}: unchecked`)
+      assert.equal(datedEarlyEvidence(verdict), early, `${what}: early evidence`)
+    }
   })
 })
