@@ -1,0 +1,59 @@
+{
+  "version": 2,
+  "id": "08c5ecc22bc6685e3fc8a30689a7159a7049f61b7159defdb869f45654ef2acc",
+  "contentId": "3b1f54e538da6932d5c9c9c670a48b1a00748d7489b35d8767cb99d1f84ad443",
+  "file": "1794314612310_removals_transactions.json",
+  "fileSha256": "4ff3e724bd8c66f1c25626fbf1f32229079af0200a301c25fa201b75fe8652f0",
+  "kind": "removals",
+  "periodStart": "2026-10-01T00:00:00.000Z",
+  "periodEnd": "2026-11-01T00:00:00.000Z",
+  "chainId": 100,
+  "token": "0xcb3231aBA3b451343e0Fddfc45883c842f223846",
+  "from": "0x28A81EC3045F079DCf051BA2F3280335D18144cC",
+  "startBlock": 49230188,
+  "status": "completed",
+  "total": "20999999999999999999992",
+  "createdAt": "2026-11-11T20:51:06.521Z",
+  "updatedAt": "2026-11-11T20:54:50.848Z",
+  "transfers": [
+    {
+      "recipient": "0x03F28fD8e91E5c821cc7Aa4DA3Fed7c4de0102aa",
+      "amount": "14000000000000000000000",
+      "status": "confirmed",
+      "requestedAt": "2026-11-11T20:51:27.203Z",
+      "requestedNonce": 79,
+      "requestedBlock": 49230192,
+      "requestId": "054866bf799c7215e9d6391f3c746906",
+      "batch": 15,
+      "batchIndex": 11,
+      "viaWallet": true,
+      "txHash": "0x0fb4c3c78ad76eb8e20cb7fa28e3674ffe7c90a576f24c5dfba4c98a1ddc9414",
+      "nonce": 79,
+      "attempts": [
+        "0x0fb4c3c78ad76eb8e20cb7fa28e3674ffe7c90a576f24c5dfba4c98a1ddc9414"
+      ],
+      "blockNumber": 49230233,
+      "confirmedAt": "2026-11-11T20:54:50.796Z"
+    },
+    {
+      "recipient": "0x982674073Adc1e7a1bF14e3b7f3B938166fFBB33",
+      "amount": "6999999999999999999992",
+      "status": "confirmed",
+      "requestedAt": "2026-11-11T20:51:27.203Z",
+      "requestedNonce": 79,
+      "requestedBlock": 49230192,
+      "requestId": "054866bf799c7215e9d6391f3c746906",
+      "batch": 15,
+      "batchIndex": 12,
+      "viaWallet": true,
+      "txHash": "0x0fb4c3c78ad76eb8e20cb7fa28e3674ffe7c90a576f24c5dfba4c98a1ddc9414",
+      "nonce": 79,
+      "attempts": [
+        "0x0fb4c3c78ad76eb8e20cb7fa28e3674ffe7c90a576f24c5dfba4c98a1ddc9414"
+      ],
+      "blockNumber": 49230233,
+      "confirmedAt": "2026-11-11T20:54:50.805Z"
+    }
+  ],
+  "completedAt": "2026-11-11T20:54:50.848Z"
+}
