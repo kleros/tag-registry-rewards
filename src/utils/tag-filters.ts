@@ -1,29 +1,46 @@
 import { ChainConfig, ExplorerReview, FilterCheckReason, Period, Tag } from "../types"
 import { findChainConfig } from "./chains"
 import { checkExplorerTags } from "./explorer-tags"
+import { dateExplorerTags, datedUnchecked, DatingItem } from "./tag-dating"
+import { registrationLookup } from "../tag-fetch"
 import { getAddressTagExclusionReason } from "./address-tag-validation"
 import { detectPredictionMarketTokens } from "./prediction-market-detection"
 import { sleep } from "../transaction-sender"
+
+// A YYYY-MM-DD (UTC) setting, parsed once at load so a typo fails at startup,
+// not after the subgraph fetch.
+const parseSinceDate = (setting: string, raw: string): Date => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw.trim())) {
+    throw new Error(`Invalid ${setting} "${raw}". Expected YYYY-MM-DD.`)
+  }
+  const since = new Date(`${raw.trim()}T00:00:00Z`)
+  // Date would roll 2026-02-30 over to March 2: compare the parts back.
+  if (isNaN(since.getTime()) || since.toISOString().slice(0, 10) !== raw.trim()) {
+    throw new Error(`Invalid ${setting} "${raw}": not a real date.`)
+  }
+  return since
+}
 
 // The prediction-market filter applies to periods starting on or after this
 // date (YYYY-MM-DD, UTC): the rule was announced for the October 2026 period, so
 // re-running an older month reproduces what was paid. Override with
 // PREDICTION_MARKET_FILTER_SINCE (e.g. 2000-01-01 to apply it to every period).
-// Parsed once at load so a typo fails at startup, not after the subgraph fetch.
 const PREDICTION_MARKET_POLICY_START = "2026-10-01"
 const PREDICTION_MARKET_FILTER_SINCE = process.env.PREDICTION_MARKET_FILTER_SINCE || PREDICTION_MARKET_POLICY_START
-const parseFilterSince = (raw: string): Date => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw.trim())) {
-    throw new Error(`Invalid PREDICTION_MARKET_FILTER_SINCE "${raw}". Expected YYYY-MM-DD.`)
-  }
-  const since = new Date(`${raw.trim()}T00:00:00Z`)
-  // Date would roll 2026-02-30 over to March 2: compare the parts back.
-  if (isNaN(since.getTime()) || since.toISOString().slice(0, 10) !== raw.trim()) {
-    throw new Error(`Invalid PREDICTION_MARKET_FILTER_SINCE "${raw}": not a real date.`)
-  }
-  return since
-}
-const predictionMarketFilterSince = parseFilterSince(PREDICTION_MARKET_FILTER_SINCE)
+const predictionMarketFilterSince = parseSinceDate("PREDICTION_MARKET_FILTER_SINCE", PREDICTION_MARKET_FILTER_SINCE)
+
+// The explorer check excludes, on dated evidence (utils/tag-dating.ts), from
+// the periods starting on or after this date: the November 2026 period was
+// the first paid this way, so re-running an older month reproduces what was
+// paid (its tagged entries are only listed for review). Override with
+// EXPLORER_DATING_SINCE, read when a period is filtered (and checked at load,
+// so a typo still fails at startup).
+const EXPLORER_DATING_POLICY_START = "2026-11-01"
+const explorerDatingSetting = (): string => process.env.EXPLORER_DATING_SINCE || EXPLORER_DATING_POLICY_START
+parseSinceDate("EXPLORER_DATING_SINCE", explorerDatingSetting())
+
+export const explorerDatingApplies = (period?: Period): boolean =>
+  !period || period.start.getTime() >= parseSinceDate("EXPLORER_DATING_SINCE", explorerDatingSetting()).getTime()
 
 const predictionMarketFilterApplies = (period?: Period): boolean => {
   if (!period) return true
@@ -40,8 +57,9 @@ const predictionMarketFilterApplies = (period?: Period): boolean => {
 export interface FilterResult {
   passed: Tag[]
   excluded: { tag: Tag; reason: FilterCheckReason; detail?: string }[]
-  // What the reference explorers show of the Address Tags and Tokens entries,
-  // for review: nothing is excluded for it automatically (reviewOnExplorer)
+  // What the reference explorers show of the Address Tags and Tokens entries
+  // (tagged there, or not readable), each with the dated check's verdict when
+  // it applies (reviewOnExplorer)
   explorerReview: ExplorerReview[]
 }
 
@@ -53,10 +71,19 @@ export interface TagFilterOptions {
   skipExplorerCheck?: boolean
 }
 
-// EXPLORER_CHECK=off skips the explorer check (then every entry is to be
-// checked by hand, with exclusions.json for the tagged ones).
+// EXPLORER_CHECK=off skips the explorer check: the rule is then not applied.
 export const explorerCheckEnabled = (): boolean =>
   !/^(off|false|0|no)$/i.test(String(process.env.EXPLORER_CHECK || "").trim())
+
+// What to tell the operator when EXPLORER_CHECK=off in a period the dated
+// check applies to: the rule is then not applied at all, which a line in the
+// middle of a long run is easy to miss (fetch says it again at the end). null
+// when the check runs, or the period is one only listed for review.
+export const explorerCheckSkipped = (period?: Period): string | null =>
+  !explorerCheckEnabled() && explorerDatingApplies(period)
+    ? "EXPLORER_CHECK=off, so the explorer rule is not applied to this period: entries tagged on their explorer " +
+      'before their submission are paid like the others. Remove EXPLORER_CHECK=off from .env and run again (README "Explorer tags").'
+    : null
 
 export const applyTagFilters = async (
   tags: Tag[],
@@ -152,39 +179,54 @@ export const applyTagFilters = async (
   passed.push(...nonAddressTags, ...validAddressTags)
 
   // Phase 3: what the chains' reference explorers show of the entries left
-  // (for review; the ones excluded above need none)
+  // (the ones excluded above need no look-up): from the periods the dated
+  // check applies to, an entry with dated evidence of its tag before its
+  // submission is excluded, the others listed with their verdict.
+  const datedOut = new Set<string>()
   if (!explorerCheckEnabled()) {
-    console.log("[filter] EXPLORER_CHECK=off: no entry looked up on its explorer (check them by hand)")
+    const skipped = skipExplorerCheck ? null : explorerCheckSkipped(period)
+    if (skipped) console.warn(`[filter] WARNING: ${skipped}`)
+    else console.log("[filter] EXPLORER_CHECK=off: no entry looked up on its explorer")
   } else if (!skipExplorerCheck) {
-    explorerReview = await reviewOnExplorer(afterPhase1b.filter((tag) => !excludedSet.has(tag.id)))
+    explorerReview = await reviewOnExplorer(afterPhase1b.filter((tag) => !excludedSet.has(tag.id)), period)
+    for (const review of explorerReview) {
+      if (review.decision !== "excluded") continue
+      excluded.push({ tag: review.tag, reason: "tagged on explorer before submission", detail: review.evidence })
+      datedOut.add(review.tag.id)
+    }
   }
 
-  return { passed, excluded, explorerReview }
+  return { passed: passed.filter((tag) => !datedOut.has(tag.id)), excluded, explorerReview }
 }
 
 // Address Tags and Tokens entries already tagged on their chain's reference
-// explorer are not rewarded; Contract Domain Name entries are exempt (the
-// program's rules). Each such entry is looked up, and those tagged there, or
-// whose explorer could not be read, are returned for review. None is excluded
-// here: an explorer shows its tags as they are today, not when they were added
-// (the rule is about tags that predate the submission), and Etherscan-built
-// explorers do not say whether a tag came from Kleros Scout itself (Blockscout
-// does, and those are left out). A confirmed one goes to exclusions.json.
-export const reviewOnExplorer = async (tags: Tag[]): Promise<ExplorerReview[]> => {
+// explorer when they were submitted are not rewarded; Contract Domain Name
+// entries are exempt (the program's rules). Each such entry is looked up, and
+// those tagged there today, or whose explorer could not be read, are returned.
+// An explorer shows its tags as they are today, not when they were added, so
+// from the periods the dated check applies to (explorerDatingApplies), each is
+// dated by tag-dating.ts: excluded only on dated evidence that its tag existed
+// before the submission, paid without any. Before those periods they are only
+// listed, for a check by hand (a confirmed one goes to exclusions.json). Tags
+// an explorer took from Kleros Scout never count (explorer-tags.ts).
+export const reviewOnExplorer = async (tags: Tag[], period?: Period): Promise<ExplorerReview[]> => {
   const checked = tags.filter((tag) => tag.registry !== "domains")
   const hostOf = (tag: Tag): string => (findChainConfig(tag.chain) as ChainConfig).explorer
   const results = await checkExplorerTags(
     checked.map((tag, i) => ({ key: String(i), host: hostOf(tag), chainId: tag.chain, address: tag.tagAddress }))
   )
   const review: ExplorerReview[] = []
+  const namesOf: string[][] = [] // each review's tags, as read
   const notRead: { [host: string]: number } = {}
   checked.forEach((tag, i) => {
     const verdict = results.get(String(i))
     if (!verdict || verdict.tagged === false) return
+    const shown = verdict.logo ? { logo: verdict.logo } : {}
+    namesOf.push(verdict.names)
     if (verdict.tagged === true) {
-      review.push({ tag, status: "tagged", url: verdict.url, detail: `${hostOf(tag)}: ${verdict.names.join("; ")}` })
+      review.push({ tag, status: "tagged", url: verdict.url, detail: `${hostOf(tag)}: ${verdict.names.join("; ")}`, ...shown })
     } else {
-      review.push({ tag, status: "not read", url: verdict.url, detail: verdict.detail })
+      review.push({ tag, status: "not read", url: verdict.url, detail: verdict.detail, ...shown })
       notRead[hostOf(tag)] = (notRead[hostOf(tag)] || 0) + 1
     }
   })
@@ -193,10 +235,70 @@ export const reviewOnExplorer = async (tags: Tag[]): Promise<ExplorerReview[]> =
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
     .map((host) => `${host} ${notRead[host]}`)
     .join(", ")
-  console.log(
+  const found =
     `[filter] Explorer check: ${checked.length} Address Tags and Tokens entries looked up, ${tagged} tagged on their explorer` +
-      (review.length > tagged ? `, ${review.length - tagged} on explorers that cannot be read (${notReadText})` : "") +
-      (review.length > 0 ? ": review them (nothing is excluded for it automatically)" : "")
+    (review.length > tagged ? `, ${review.length - tagged} on explorers that cannot be read (${notReadText})` : "")
+
+  if (!explorerDatingApplies(period)) {
+    console.log(found + (review.length > 0 ? ": review them (nothing is excluded for it automatically)" : ""))
+    console.log(
+      `[filter] Explorer dating skipped: period starts ${(period as Period).start.toISOString()}, ` +
+        `before EXPLORER_DATING_SINCE=${explorerDatingSetting()}`
+    )
+    return review
+  }
+  if (review.length === 0) {
+    console.log(found)
+    return review
+  }
+  console.log(`${found}: dating them (Wayback Machine, token logos, eth-labels)`)
+  const registrations = registrationLookup()
+  // A tag an explorer took from an earlier Kleros entry of the address never counts.
+  const earlierKlerosEntry = async (item: DatingItem, before: number): Promise<string | null> => {
+    try {
+      const earlier = (await registrations(item.chainId, item.address)).find((r) => r.resolvedAt < before)
+      return earlier
+        ? `Kleros entry ${earlier.id} registered this address on ${new Date(earlier.resolvedAt * 1000).toISOString()}, ` +
+            "and a tag an explorer took from Kleros never counts"
+        : null
+    } catch (err) {
+      return `the program's registries could not be checked for an earlier entry of this address (${String((err as Error).message || err).slice(0, 120)})`
+    }
+  }
+  const verdicts = await dateExplorerTags(
+    review.map((r, i) => ({
+      key: String(i),
+      host: hostOf(r.tag),
+      chainId: r.tag.chain,
+      address: r.tag.tagAddress,
+      ...(r.tag.submissionTime ? { submissionTime: r.tag.submissionTime } : {}),
+      tagged: r.status === "tagged" ? true : null,
+      names: namesOf[i],
+      ...(r.logo ? { logo: r.logo } : {}),
+    })),
+    { earlierKlerosEntry }
   )
+  review.forEach((r, i) => {
+    const verdict = verdicts.get(String(i))
+    if (!verdict) throw new Error(`[filter] the dated explorer check gave no verdict for ${r.tag.id}`)
+    r.decision = verdict.decision
+    r.evidence = verdict.evidence
+  })
+  const count = (decision: ExplorerReview["decision"]): number => review.filter((r) => r.decision === decision).length
+  console.log(
+    `[filter] Explorer dating: ${count("excluded")} excluded on dated evidence of a tag before their submission, ` +
+      `${count("kept")} kept on dated evidence, ${count("paid by default")} paid without dated evidence either way`
+  )
+  const unchecked = review.filter(datedUnchecked).length
+  if (unchecked > 0) {
+    // the rule pays an entry without dated evidence: nothing to do, but a run
+    // with every source answering may exclude more
+    console.warn(
+      `[filter] Explorer dating: ${unchecked} of them paid by default because the Wayback Machine, eth-labels or the ` +
+        "registries did not answer (their evidence says which)"
+    )
+  }
   return review
 }
+
+export { datedUnchecked }

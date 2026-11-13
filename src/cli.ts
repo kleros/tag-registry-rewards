@@ -20,6 +20,7 @@ import { isBudgetExceeded, setTimeBudget } from "./utils/runtime-helpers"
 import { txCountCacheDir, txCountCacheEnabled } from "./utils/tx-count-cache"
 import { getEvmTxProvider } from "./utils/evm-enrichment"
 import { getSolanaTxProvider } from "./utils/solana-enrichment"
+import { explorerCheckSkipped } from "./utils/tag-filters"
 import {
   applyTagExclusions,
   ExclusionList,
@@ -435,7 +436,17 @@ const main = async () => {
     console.log(`Documented ${entry.recipientCount} recipients for ${entry.period}.`)
     if (entry.url) console.log(`IPFS URL: ${entry.url}`)
     const review = fetchManifest.explorerCheck
-    if (review) {
+    if (review && review.excluded !== undefined) {
+      // the dated check decided every entry (README "Explorer tags")
+      console.log(
+        `Explorer check: ${conf.FILES_DIR}/${review.file} (${review.excluded} excluded on dated evidence of a tag before ` +
+          `their submission, ${review.paidByDefault} paid without dated evidence` +
+          (review.unchecked
+            ? `, ${review.unchecked} of them because the Wayback Machine, eth-labels or the registries did not answer`
+            : "") +
+          ")."
+      )
+    } else if (review) {
       // Published already: an exclusion found in the review means generating
       // and documenting the period again (README "Exclusions").
       console.log(
@@ -444,6 +455,8 @@ const main = async () => {
           "exclusions.json, then run generate and document again."
       )
     }
+    const explorerSkipped = explorerCheckSkipped({ start, end })
+    if (explorerSkipped) console.warn(`WARNING: ${explorerSkipped}`)
     // Print the exact filenames — submissions use the generate run's timestamp,
     // removals/ATQ the removals run's, so a single <runId> placeholder misleads.
     let submissionsTxFile = "<see latest_generate_manifest.json: transactionsFile>"

@@ -1,6 +1,6 @@
 import { after, afterEach, before, beforeEach, describe, it } from "node:test"
 import { strict as assert } from "assert"
-import { fetchTags } from "../../src/tag-fetch"
+import { fetchTags, registrationLookup } from "../../src/tag-fetch"
 import { fetchAtqAbsent, fetchAtqRegistered, fetchRemovals } from "../../src/removals-fetch"
 import { captureConsole, CapturedConsole } from "../support/console"
 import { setEnv } from "../support/env"
@@ -45,6 +45,123 @@ afterEach(async () => {
   await subgraph.stop()
 })
 
+describe("registrationLookup (the explorer check's earlier Kleros entries)", () => {
+  it("finds every Address Tags and Tokens registration of an address, whatever its spelling, reading both registries once", async () => {
+    const checksummed = "0x929EC64c34a17401F460460D4B9390518E5B473e"
+    const lower = checksummed.toLowerCase()
+    const SINCE_REMOVED = BEFORE - 86400 * 400
+    subgraph.add(
+      subgraphItem("addressTags", { requests: [registration(evmAddress(1), BEFORE)], key0: `eip155:10:${lower}` }),
+      subgraphItem("tokens", { requests: [registration(evmAddress(2), IN), clearing(evmAddress(9), AFTER)], key0: `eip155:10:${checksummed}` }),
+      // written in no usual spelling, removed since: still an earlier entry
+      subgraphItem("tokens", { requests: [registration(evmAddress(3), SINCE_REMOVED)], key0: "eip155:10:0x929ec64C34A17401f460460d4b9390518e5b473E ", status: "Absent" }),
+      subgraphItem("domains", { requests: [registration(evmAddress(4), BEFORE - 86400)], key0: `eip155:10:${checksummed}` }), // a CDN entry: not a tag
+      subgraphItem("addressTags", { requests: [registration(evmAddress(5), 0)], key0: `eip155:10:${checksummed}` }), // pending: not registered
+      subgraphItem("addressTags", { requests: [registration(evmAddress(6), BEFORE)], key0: `eip155:42161:${lower}` }) // another chain
+    )
+    const lookup = registrationLookup()
+    const found = await lookup("10", checksummed)
+    assert.deepEqual(found.map((r) => r.resolvedAt), [SINCE_REMOVED, BEFORE, IN], "the earliest first, removal requests, pending ones and CDN left out")
+    assert.deepEqual(await lookup("10", lower), found)
+    assert.deepEqual((await lookup("42161", checksummed)).map((r) => r.resolvedAt), [BEFORE])
+    assert.deepEqual(await lookup("10", evmAddress(0xfee)), [])
+    const reads = subgraph.queries.filter((q) => q.idGt !== undefined)
+    assert.deepEqual(reads.map((q) => q.registry), [REGISTRY.addressTags, REGISTRY.tokens], "each registry read once, for every question")
+  })
+
+  it("says so when the indexer cannot answer", async () => {
+    subgraph.fault = { status: 503 }
+    await assert.rejects(registrationLookup()("10", evmAddress(1)), /the indexer answered HTTP 503/)
+  })
+
+  it("never names the indexer's URL (its key, however short) when it cannot be reached: the message reaches the verdicts", async () => {
+    const keyed = "http://127.0.0.1:9/6c5b8b5/v1/graphql" // nothing listens there
+    const restore = setEnv({ XDAI_GTCR_SUBGRAPH_URL: keyed })
+    try {
+      await assert.rejects(registrationLookup()("10", evmAddress(1)), (err: Error) => {
+        assert.equal(err.message, "the indexer could not be reached (ECONNREFUSED)")
+        return true
+      })
+    } finally {
+      restore()
+    }
+  })
+
+  describe("with entries the indexer left blank", () => {
+    let ipfs: MockServer
+    let files: { [path: string]: { status?: number; body?: unknown } }
+    let restoreGateways: () => void
+    beforeEach(async () => {
+      files = {}
+      ipfs = await startMockServer((req) => files[req.path] || { status: 404, body: { error: "not found" } })
+      restoreGateways = setEnv({ IPFS_READ_GATEWAYS: `${ipfs.url}/ipfs` })
+    })
+    afterEach(async () => {
+      restoreGateways()
+      await ipfs.close()
+    })
+    const itemFile = (key0: string) => ({
+      columns: [
+        { label: "Address", type: "rich address", isIdentifier: true },
+        { label: "Name", type: "text", isIdentifier: true },
+      ],
+      values: { Address: key0, Name: "Some contract" },
+    })
+
+    it("reads their address from their IPFS file or their inline data, and leaves out files that name none", async () => {
+      const fromFile = evmAddress(0xf11e)
+      const inline = evmAddress(0x111e)
+      files["/ipfs/QmEarlier/item.json"] = { body: itemFile(`eip155:1:${fromFile}`) }
+      files["/ipfs/QmNoAddress/item.json"] = { body: { columns: [{ label: "Name", type: "text" }], values: { Name: "x" } } }
+      subgraph.add(
+        subgraphItem("addressTags", { requests: [registration(evmAddress(1), BEFORE)], key0: "", data: "/ipfs/QmEarlier/item.json" }),
+        subgraphItem("addressTags", { requests: [registration(evmAddress(2), BEFORE)], key0: "", data: JSON.stringify(itemFile(`eip155:1:${inline}`)) }),
+        subgraphItem("tokens", { requests: [registration(evmAddress(3), BEFORE)], key0: "", data: "/ipfs/QmNoAddress/item.json" }),
+        subgraphItem("tokens", { requests: [registration(evmAddress(4), BEFORE)], key0: "", data: JSON.stringify({ columns: [], values: {} }) }),
+        // malformed for good: named in a warning, left out (failing on it would keep every run from excluding anything)
+        subgraphItem("addressTags", { requests: [registration(evmAddress(7), BEFORE)], key0: "", data: "{ not json" })
+      )
+      const lookup = registrationLookup()
+      assert.deepEqual((await lookup("1", fromFile)).map((r) => r.resolvedAt), [BEFORE])
+      assert.deepEqual((await lookup("1", inline)).map((r) => r.resolvedAt), [BEFORE])
+      assert.ok(logs.has("an earlier entry's data is malformed, its address unknown (left out)"))
+    })
+
+    it("reads the address of an entry whose inline data is its values alone (a registered 2025 Address Tags entry)", async () => {
+      // as the indexer holds 0xa66b4b32…: no key0, the values as data
+      const pool = "0x9ff36e48edbf6cb910ebf9ef70f6aeba41391fce"
+      const flat = (values: { [label: string]: string }) => JSON.stringify(values)
+      const onlyOne = evmAddress(0x0e1)
+      const twoNoLabel = [evmAddress(0x0e2), evmAddress(0x0e3)]
+      subgraph.add(
+        subgraphItem("addressTags", {
+          requests: [registration(evmAddress(1), BEFORE)],
+          key0: "",
+          data: flat({ "Contract Address": `eip155:10:${pool}`, "Public Name Tag": "ECLP-WETH-USDC-dyn Pool", "Project Name": "Beethoven X" }),
+        }),
+        // no usual label: the only CAIP-10 value
+        subgraphItem("tokens", { requests: [registration(evmAddress(2), BEFORE)], key0: "", data: flat({ Token: `eip155:1:${onlyOne}`, Name: "x" }) }),
+        // two with no label to choose: unknown, named in a warning
+        subgraphItem("tokens", {
+          requests: [registration(evmAddress(3), BEFORE)],
+          key0: "",
+          data: flat({ A: `eip155:1:${twoNoLabel[0]}`, B: `eip155:1:${twoNoLabel[1]}` }),
+        })
+      )
+      const lookup = registrationLookup()
+      assert.deepEqual((await lookup("10", "0x9fF36E48EDbf6Cb910ebf9eF70F6AEBA41391FCE")).map((r) => r.resolvedAt), [BEFORE])
+      assert.deepEqual((await lookup("1", onlyOne)).map((r) => r.resolvedAt), [BEFORE])
+      assert.deepEqual(await lookup("1", twoNoLabel[0]), [])
+      assert.equal(logs.lines.filter((l) => l.includes("an earlier entry's data is malformed")).length, 1, "only the ambiguous one")
+    })
+
+    it("fails, keeping every entry from being excluded, when a blank entry's address cannot be read: it might be any", async () => {
+      subgraph.add(subgraphItem("tokens", { requests: [registration(evmAddress(5), BEFORE)], key0: "", data: "/ipfs/QmGone/item.json" }))
+      await assert.rejects(registrationLookup()("1", evmAddress(6)), /the address of 1 earlier entry could not be read \(0x[0-9a-f]{64}@0x[0-9a-f]{40}: its IPFS file \/ipfs\/QmGone\/item\.json could not be read/)
+    })
+  })
+})
+
 describe("fetchTags", () => {
   it("returns the live items of the three registries registered in the period", async () => {
     const tag = subgraphItem("addressTags", { requests: [registration(evmAddress(1), IN)], key0: "eip155:8453:0xAbC0000000000000000000000000000000000001", key1: "Uniswap Router" })
@@ -77,6 +194,7 @@ describe("fetchTags", () => {
       submitter: evmAddress(1),
       tagAddress: "0xAbC0000000000000000000000000000000000001",
       latestRequestResolutionTime: IN,
+      submissionTime: IN - 3600, // the registration's: what the explorer rule dates against
       isTokenOnAddressTags: false,
       addressTagName: "uniswap router",
     })

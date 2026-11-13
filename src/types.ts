@@ -43,6 +43,9 @@ export interface Tag {
   submitter: string
   tagAddress: string
   latestRequestResolutionTime: number
+  // When that registration was requested (unix s), if the indexer has it: the
+  // moment the explorer rule is about (see utils/tag-dating.ts).
+  submissionTime?: number
   isTokenOnAddressTags: boolean
   addressTagName: string
 }
@@ -78,8 +81,14 @@ export interface FetchManifest {
   droppedBySolanaHoldersCount?: number
   // Where the tx counts came from (absent in manifests from older runs).
   enrichment?: FetchEnrichmentInfo
-  // The explorer check's findings to review (see utils/explorer-tags.ts), when any.
-  explorerCheck?: { file: string; tagged: number; notRead: number }
+  // The explorer check's findings (see utils/explorer-tags.ts), when any: from
+  // the periods the dated check applies to, how many it excluded on dated
+  // evidence and how many it paid without any (utils/tag-dating.ts).
+  // `unchecked`: of those paid, the ones that could not be checked against
+  // the Wayback Machine (it did not answer, refused, or ran out of time),
+  // eth-labels, or the registries (for an earlier Kleros entry): a later run
+  // may exclude more.
+  explorerCheck?: { file: string; tagged: number; notRead: number; excluded?: number; paidByDefault?: number; unchecked?: number }
 }
 
 export interface FetchEnrichmentInfo {
@@ -137,6 +146,7 @@ export type FilterCheckReason =
   | "erc-20 contract"
   | "answers any call (catch-all)"
   | "solana token mint"
+  | "tagged on explorer before submission"
 
 export interface FilterCheckRow {
   id: string
@@ -150,16 +160,22 @@ export interface FilterCheckRow {
   detail?: string
 }
 
-// An Address Tags or Tokens entry as its reference explorer shows it: tagged
-// there (with the tags), or an explorer that could not be read (a Cloudflare
-// challenge, Solscan). Reported for review, never excluded automatically: no
-// explorer tells when a tag was added, nor whether it came from Kleros Scout
-// itself (see explorer-tags.ts); a confirmed one goes to exclusions.json.
+// An Address Tags or Tokens entry as its reference explorer shows it today:
+// tagged there (with the tags), or an explorer that could not be read (a
+// Cloudflare challenge, Solscan). No explorer tells when a tag was added, so
+// from the periods the dated check applies to (utils/tag-dating.ts) each one
+// carries its verdict and what it rests on; before those, it is listed for a
+// check by hand (a confirmed one goes to exclusions.json).
 export interface ExplorerReview {
   tag: Tag
   status: "tagged" | "not read"
   url: string
   detail: string // the tags, or why the explorer was not read
+  // what the page showed to date the tag with (utils/explorer-tags.ts)
+  logo?: string
+  // the dated check's verdict and its evidence
+  decision?: "excluded" | "kept" | "paid by default"
+  evidence?: string
 }
 
 export interface FilterCheckReport {
@@ -170,6 +186,9 @@ export interface FilterCheckReport {
   explorerTaggedCount?: number
   explorerNotReadCount?: number
   explorerCheckFile?: string
+  // from the periods the dated check applies to: entries paid without dated
+  // evidence either way (the excluded ones are in summaryByReason)
+  explorerPaidByDefaultCount?: number
   summaryByReason: Array<{ reason: FilterCheckReason; count: number }>
 }
 

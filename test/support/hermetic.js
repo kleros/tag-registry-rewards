@@ -68,7 +68,7 @@ net.Socket.prototype.connect = function connect(...args) {
 }
 
 // The settings a test may not inherit from the operator's shell.
-const PIPELINE_SETTING = /^(TX_NETWORK_ID|WALLET_PRIVATE_KEY|STIPEND|MAX_REWARD|REWARD_.*|SOLANA_.*|EVM_.*|REMOVAL_.*|MAX_PER_ATQ_.*|PNK|XDAI_.*|FILES_DIR|FILEBASE_TOKEN|IPFS_GATEWAY|EXCLUSIONS_FILE|ENVIO_API_TOKEN|HYPERSYNC_.*|JUPITER_.*|TX_COUNT_CACHE.*|DUNE_.*|TX_RPC_URL|DISBURSEMENTS_DIR|SEND_.*|DISBURSE_.*|EXPLORER_CHECK|INDEXER_CHECK|IPFS_READ_GATEWAYS|PREDICTION_MARKET_.*|PM_DETECT_.*)$/
+const PIPELINE_SETTING = /^(TX_NETWORK_ID|WALLET_PRIVATE_KEY|STIPEND|MAX_REWARD|REWARD_.*|SOLANA_.*|EVM_.*|REMOVAL_.*|MAX_PER_ATQ_.*|PNK|XDAI_.*|FILES_DIR|FILEBASE_TOKEN|IPFS_GATEWAY|EXCLUSIONS_FILE|ENVIO_API_TOKEN|HYPERSYNC_.*|JUPITER_.*|TX_COUNT_CACHE.*|DUNE_.*|TX_RPC_URL|DISBURSEMENTS_DIR|SEND_.*|DISBURSE_.*|EXPLORER_.*|INDEXER_CHECK|IPFS_READ_GATEWAYS|PREDICTION_MARKET_.*|PM_DETECT_.*)$/
 
 // The documented configuration (.env.example) plus unreachable local URLs for
 // every external service, so a test that forgets a mock fails fast.
@@ -110,8 +110,11 @@ const baseline = (tmp) => ({
   HYPERSYNC_URL_TEMPLATE: "http://127.0.0.1:9/hypersync-not-mocked/{chainId}",
   JUPITER_TOKENS_API_URL: "http://127.0.0.1:9/jupiter-not-mocked",
   DUNE_BASE_URL: "http://127.0.0.1:9/dune-not-mocked",
-  // The explorers are real websites, not mocked: a test turns the check on
-  // with checkExplorerTags stubbed (test/integration/tag-filters.test.ts).
+  // The explorers (and the Wayback Machine, explorer logos and eth-labels the
+  // check dates tags with) are real websites, not mocked: a test turns the
+  // check on with checkExplorerTags and dateExplorerTags stubbed
+  // (test/integration/tag-filters.test.ts), or stubs their HTTP
+  // (test/unit/explorer-tags.test.ts, test/unit/tag-dating.test.ts).
   EXPLORER_CHECK: "off",
   // Gnosis is not mocked either: test/integration/indexer-checks.test.ts
   // checks the indexer against a stubbed reader.

@@ -26,12 +26,19 @@ export const filterCheckRoutine = async (period: Period): Promise<FilterCheckRep
   const explorerFile = await writeExplorerCheck(runId, explorerReview)
   const tagged = explorerReview.filter((r) => r.status === "tagged").length
 
+  const paidByDefault = explorerReview.filter((r) => r.decision === "paid by default").length
+  const dated = explorerReview.some((r) => r.decision !== undefined)
   const report: FilterCheckReport = {
     runId,
     csvFile: output.csvFile,
     excludedCount: excludedRows.length,
     ...(explorerFile
-      ? { explorerTaggedCount: tagged, explorerNotReadCount: explorerReview.length - tagged, explorerCheckFile: explorerFile }
+      ? {
+          explorerTaggedCount: tagged,
+          explorerNotReadCount: explorerReview.length - tagged,
+          explorerCheckFile: explorerFile,
+          ...(dated ? { explorerPaidByDefaultCount: paidByDefault } : {}),
+        }
       : {}),
     summaryByReason: output.summaryByReason,
   }

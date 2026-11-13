@@ -7,6 +7,7 @@ import {
   explorerAddressUrl,
   ExplorerItem,
   isKlerosSourced,
+  parseArchivedAddressPage,
   parseEtherscanAddressPage,
 } from "../../src/utils/explorer-tags"
 
@@ -56,6 +57,109 @@ describe("explorer tags: an Etherscan-built address page", () => {
     assert.equal(parseEtherscanAddressPage(page("Just a moment..."), USDC).tagged, null)
     assert.equal(parseEtherscanAddressPage(page("Base Account (Invalid Address) | BaseScan"), USDC).tagged, null)
     assert.equal(parseEtherscanAddressPage(page(addressTitle("0x5b43453fce04b92e190f391a83136bfbecedefd1"), TAG_WITH_LINK), USDC).tagged, null)
+  })
+
+  // Treat's page on etherscan.io, 2026-11-11 (trimmed)
+  const TREAT = "0xfbd5fd3f85e9f4c5e8b40eec9f8b8ab1caaa146b"
+  const TREAT_TAG =
+    "<a href='https://treattoken.org/' data-bs-html='true' title='Public Name Tag (viewable by anyone) <br/> Treat: TREAT Token&#10;(0xfbd5fd3f85e9f4c5e8b40eec9f8b8ab1caaa146b)'>" +
+    "<div class='d-flex align-items-center gap-1'><i class='fas fa-tag text-muted'></i><span class='hash-tag text-truncate lh-sm my-n1'>Treat: TREAT Token</span></div></a>"
+  const CREATOR = (age: string) =>
+    "<!-- Contract Creator --> <h4 class=\"text-cap mb-1 mt-1\">Creator</h4> <div class=\"d-flex align-items-center gap-1\"> " +
+    "<a class='hash-tag text-truncate' href='/address/0x30391dd1076a47b6d39bd6fcd7359583fc8c3eac' title='Treat: Deployer (0x30391dd1076a47b6d39bd6fcd7359583fc8c3eac)'>Treat: Deployer</a>" +
+    " <span class=\"text-secondary mx-1\">|</span> <a href=\"/tx/0x4314912cffa9a4b2b63ef22d879659c8e922cabbe64015943da2b466407e6a99\"> " +
+    `<span>${age}</span></a> </div> <!-- End Contract Creator -->`
+  const TRACKER = (src: string) =>
+    `<a class='d-flex align-items-center text-nowrap' href="/token/${TREAT}" data-bs-toggle='tooltip' data-bs-trigger='hover' title="View Token Tracker Page">` +
+    `<img src='${src}' width='24' class='rounded-circle me-1'>Treat (TREAT)</a>`
+  const KLEROS_NOTE =
+    "<!-- Public Comment --> <div class='container-xxl'><div class='alert alert-dark alert-dismissible fade show mb-3' role='alert'>" +
+    "This nametag was submitted by <a href='https://www.kleros.io/' target='_blank' rel=\"nofollow\">Kleros Curate</a>.</div></div>"
+
+  it("reads a token's tracker logo, whose file date a tag is dated with", () => {
+    const html = page(addressTitle(TREAT, "Etherscan", "Treat: TREAT Token"), TREAT_TAG + CREATOR("3 yrs 301 days ago") + TRACKER("/token/images/treattoken_32.png"))
+    const read = parseEtherscanAddressPage(html, TREAT, `https://etherscan.io/address/${TREAT}`)
+    assert.deepEqual([read.tagged, read.names], [true, ["Treat: TREAT Token"]])
+    assert.equal(read.logo, "https://etherscan.io/token/images/treattoken_32.png")
+    const placeholder = parseEtherscanAddressPage(page(addressTitle(TREAT), CREATOR("12 mins ago") + TRACKER("/images/main/empty-token.png")), TREAT, "")
+    assert.equal(placeholder.logo, undefined, "a placeholder image is no logo")
+  })
+
+  it("does not count a name tag the explorer took from Kleros Curate (its public note says so)", () => {
+    const read = parseEtherscanAddressPage(page(addressTitle(TREAT, "Etherscan", "Treat: TREAT Token"), KLEROS_NOTE + TREAT_TAG), TREAT)
+    assert.deepEqual([read.tagged, read.names, read.ignored], [false, [], ["Treat: TREAT Token"]])
+    assert.equal(read.detail, "only a name tag submitted by Kleros Curate")
+  })
+})
+
+describe("explorer tags: an archived copy of an Etherscan-built address page", () => {
+  // Markup of the Wayback Machine's copies (trimmed), one per layout
+  const TREAT = "0xfbd5fd3f85e9f4c5e8b40eec9f8b8ab1caaa146b"
+  const copy = (title: string, body: string) => `<html><head><title>\n${title}\n</title></head><body>${body}</body></html>`
+  const BADGE = (name: string, tooltip = name) =>
+    `<a href='https://example.org/' data-bs-html='true' title='Public Name Tag (viewable by anyone) <br/> ${tooltip}'>` +
+    `<div class='d-flex align-items-center gap-1'><i class='fas fa-tag text-muted'></i><span class='hash-tag text-truncate lh-sm my-n1'>${name}</span></div></a>`
+  const CREATOR_TAGGED = (name: string) =>
+    `<a class='hash-tag text-truncate' href='/address/0x089775364ea24957da94348cf740375826ed3330' data-bs-toggle='tooltip' data-bs-trigger='hover' title='Public Name Tag (viewable by anyone)'>${name}</a>`
+
+  it("reads the address's own tag in each layout since 2023", () => {
+    // 2026-01-29, etherscan.io
+    const current = parseArchivedAddressPage(copy("Treat: TREAT Token | Address: 0xfbd5fd3f...1caaa146b | Etherscan", BADGE("Treat: TREAT Token", `Treat: TREAT Token&#10;(${TREAT})`)), TREAT)
+    assert.deepEqual([current.readable, current.tagged, current.names], [true, true, ["Treat: TREAT Token"]])
+    // 2025-01-16, etherscan.io: the title breaks the line with an entity, and
+    // the creator's link carries the marker too
+    const layout2025 = parseArchivedAddressPage(
+      copy(
+        "\tTreat: TREAT Token&#10;(0xFbD5fD3f85e9f4c5E8B40EEC9F8B8ab1cAAa146b) | Address 0xFbD5fD3f85e9f4c5E8B40EEC9F8B8ab1cAAa146b | Etherscan",
+        CREATOR_TAGGED("Treat: Deployer") + BADGE("Treat: TREAT Token")
+      ),
+      TREAT
+    )
+    assert.deepEqual([layout2025.tagged, layout2025.names], [true, ["Treat: TREAT Token"]])
+    // 2023-06-10, celoscan.io
+    const celo = "0x3a73033c0b1407574c76bdbac67f126f6b4a9aa9"
+    const layout2023 = parseArchivedAddressPage(
+      copy(
+        `LayerZero: Celo Endpoint | Address ${celo} | CeloScan`,
+        "<h2 class=\"card-header-title\">Contract Overview</h2> <div> <span class='u-label u-label--secondary text-dark font-size-1 rounded py-1 px-3'>" +
+          "<span data-toggle='tooltip' title='Public Name Tag (viewable by anyone)'>LayerZero: Celo Endpoint</span>"
+      ),
+      celo
+    )
+    assert.deepEqual([layout2023.tagged, layout2023.names], [true, ["LayerZero: Celo Endpoint"]])
+    // 2026-06-05, basescan.org, double quotes
+    const elsa = "0x29cc30f9d113b356ce408667aa6433589cecbdca"
+    const doubleQuoted = parseArchivedAddressPage(
+      copy(
+        "HeyElsa: ELSA Token | Address: 0x29cc30f9...89cecbdca | BaseScan",
+        '<a href="https://www.heyelsa.ai/" data-bs-html="true" title="Public Name Tag (viewable by anyone) <br/> HeyElsa: ELSA Token"><div class="d-flex align-items-center gap-1">' +
+          '<i class="fas fa-tag text-muted"></i><span class="hash-tag text-truncate lh-sm my-n1">HeyElsa: ELSA Token</span></div></a>'
+      ),
+      elsa
+    )
+    assert.deepEqual([doubleQuoted.tagged, doubleQuoted.names], [true, ["HeyElsa: ELSA Token"]])
+  })
+
+  it("does not take the contract's own name, nor the creator's tag, for the address's tag", () => {
+    // 2024-12-27, optimistic.etherscan.io: untagged, its creator tagged
+    const op = "0x015aca20a1422f3c729086c17f15f10e0cfbc75a"
+    const pitfall = parseArchivedAddressPage(copy(`BalancerRelayer | Address 0x015ACA20a1422F3c729086c17f15F10e0CfbC75A | OP Mainnet Etherscan`, CREATOR_TAGGED("Balancer: Deployer 64")), op)
+    assert.deepEqual([pitfall.readable, pitfall.tagged], [true, false])
+    // 2023-02-10, etherscan.io: untagged, the title shows the contract's name
+    const untagged = parseArchivedAddressPage(copy("Treat | Address 0xFbD5fD3f85e9f4c5E8B40EEC9F8B8ab1cAAa146b | Etherscan", "<span class='hash-tag'>Token Contract</span>"), TREAT)
+    assert.deepEqual([untagged.readable, untagged.tagged], [true, false])
+    const bare = parseArchivedAddressPage(copy("Address: 0xfbd5fd3f...1caaa146b | Etherscan", ""), TREAT)
+    assert.deepEqual([bare.readable, bare.tagged], [true, false])
+  })
+
+  it("does not count a tag submitted by Kleros Curate, and reads nothing from a challenge or another address's page", () => {
+    const kleros = parseArchivedAddressPage(
+      copy("Treat: TREAT Token | Address: 0xfbd5fd3f...1caaa146b | Etherscan", "This nametag was submitted by <a href='https://www.kleros.io/'>Kleros Curate</a>." + BADGE("Treat: TREAT Token")),
+      TREAT
+    )
+    assert.deepEqual([kleros.readable, kleros.tagged], [true, false])
+    assert.equal(parseArchivedAddressPage(copy("Just a moment...", ""), TREAT).readable, false)
+    assert.equal(parseArchivedAddressPage(copy("Circle: USDC Token | Address: 0xa0b86991...e9eb0ce3606eb48 | Etherscan", BADGE("Circle: USDC Token")), TREAT).readable, false)
   })
 })
 

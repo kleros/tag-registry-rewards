@@ -1,8 +1,9 @@
 import { Item, ItemRequest, Period, Tag } from "./types"
 import fetch from "node-fetch"
 import conf from "./config"
-import { assertAllResolved, fillMissingKeys, isMissingRequester, UnresolvedItem } from "./utils/item-data"
+import { assertAllResolved, fillMissingKeys, isMissingRequester, keysFromItemFile, UnresolvedItem } from "./utils/item-data"
 import { ExclusionList, loadExclusions } from "./utils/exclusions"
+import { httpFetch } from "./utils/http"
 
 const PAGE_SIZE = 1000
 
@@ -46,6 +47,7 @@ const fetchTagsBatchByRegistry = async (
               requester
               requestType
               resolutionTime
+              submissionTime
             }
             props {
               value
@@ -124,11 +126,14 @@ const itemToTag = async (
   }
 
   const { chain, address } = parseCaip(caip)
+  // when the registration was requested: what the explorer rule dates a tag against
+  const submissionTime = Number(registration.submissionTime)
   return {
     id: item.id,
     registry: registryType,
     chain,
     latestRequestResolutionTime: Number(registration.resolutionTime),
+    ...(submissionTime > 0 ? { submissionTime } : {}),
     submitter: registration.requester,
     tagAddress: address,
     isTokenOnAddressTags:
@@ -223,6 +228,148 @@ const nonTokensFromDomains = async (domainItems: Item[], exclusions: ExclusionLi
       `not rewarded${caseOnly > 0 ? ` (${caseOnly} of them written there in another letter case)` : ""}`
   )
   return kept
+}
+
+// The address an item's values name, written as CAIP-10 (eip155:<chain>:0x…):
+// the "Contract Address" or "Address" field, else the only value written so.
+// null when there is none, or more than one with no such field to choose.
+const CAIP_EVM = /^eip155:\d+:0x[0-9a-fA-F]{40}$/
+const addressInValues = (values: { [label: string]: unknown }): string | null => {
+  for (const label of ["Contract Address", "Address"]) {
+    const value = typeof values[label] === "string" ? (values[label] as string).trim() : ""
+    if (CAIP_EVM.test(value)) return value
+  }
+  const found = Object.values(values)
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim())
+    .filter((value) => CAIP_EVM.test(value))
+  return found.length === 1 ? found[0] : null
+}
+
+const REGISTRATION_LOOKUP_TIMEOUT_MS = 120000 // per page of the indexer
+// What a network error was (ECONNREFUSED, request-timeout…), without its
+// message: node-fetch's names the URL.
+const networkErrorCode = (err: unknown): string => {
+  const { code, type } = (err || {}) as { code?: unknown; type?: unknown }
+  return String(code || type || "no answer")
+}
+
+// Every registration the Address Tags and Tokens registries ever resolved for
+// an address (whatever became of the entry since), the earliest first: the
+// explorer check asks it before holding a tag against an entry, since a tag an
+// explorer took from an earlier Kleros entry never counts. Both registries are
+// read once, on the first question (the indexer matches key0 letter for
+// letter, so addresses are compared here as caipAddressKey writes them,
+// whatever their spelling); an item the indexer left blank is read from its
+// data (inline JSON) or its IPFS file. One whose IPFS file cannot be read now
+// might be any address: the lookup then fails, which keeps every entry from
+// being excluded in the run (a later run may read it). One whose data is
+// malformed for good is named in a warning and left out: failing on it would
+// keep every entry of every run from being excluded, for a one-in-thousands
+// chance that it was the entry's address. A resolved request that was
+// rejected counts too: that also only ever keeps an entry.
+export const registrationLookup = (): ((chainId: string, address: string) => Promise<{ id: string; resolvedAt: number }[]>) => {
+  let loaded: Promise<Map<string, { id: string; resolvedAt: number }[]>> | undefined
+  const load = async (): Promise<Map<string, { id: string; resolvedAt: number }[]>> => {
+    const byAddress = new Map<string, { id: string; resolvedAt: number }[]>()
+    for (const registry of [conf.XDAI_REGISTRY_ADDRESS_TAGS, conf.XDAI_REGISTRY_TOKENS]) {
+      const items: Item[] = []
+      let afterId = ""
+      for (;;) {
+        // A stalled indexer must not hold the run. The network's errors name
+        // its URL, key and all, and these reach the verdicts and their file:
+        // only their code is kept.
+        const response = await httpFetch(conf.XDAI_GTCR_SUBGRAPH_URL, {
+          method: "POST",
+          body: JSON.stringify({
+            query: `
+              {
+                litems:LItem(where: {
+                  registryAddress: {_eq:"${registry}"},
+                  id: {_gt: "${afterId}"},
+                }, limit: ${PAGE_SIZE}, order_by: {id: asc}) {
+                  id
+                  data
+                  key0
+                  requests {
+                    requestType
+                    resolutionTime
+                  }
+                }
+              }
+            `,
+          }),
+          headers: { "Content-Type": "application/json" },
+          timeout: REGISTRATION_LOOKUP_TIMEOUT_MS,
+        }).catch((err: unknown) => {
+          throw new Error(`the indexer could not be reached (${networkErrorCode(err)})`)
+        })
+        if (!response.ok) throw new Error(`the indexer answered HTTP ${response.status}`)
+        const json = await response.json().catch((err: unknown) => {
+          throw new Error(`the indexer's answer could not be read (${networkErrorCode(err)})`)
+        })
+        if (json.errors || !json.data) throw new Error(`the indexer answered ${JSON.stringify(json).slice(0, 200)}`)
+        const page: Item[] = json.data.litems || []
+        items.push(...page)
+        if (page.length < PAGE_SIZE) break
+        afterId = page[page.length - 1].id
+      }
+      // A blank item whose data is the item itself (inline JSON, early
+      // Address Tags forms) holds its keys there: an item file ({ columns,
+      // values }), or its values alone ({"Contract Address": "eip155:10:0x…",
+      // "Public Name Tag": …}, a registered Beethoven X entry of 2025). One
+      // whose file names no address cannot be any address's tag.
+      const noAddress = new Set<string>()
+      const inline = items.map((item) => {
+        if (item.key0 || !item.data) return item
+        let file: { columns?: unknown; values?: unknown } | null
+        try {
+          file = JSON.parse(item.data)
+        } catch {
+          return item
+        }
+        if (!file || typeof file !== "object" || Array.isArray(file)) return item
+        if (!Array.isArray(file.columns) || !file.values) {
+          const address = addressInValues(file as { [label: string]: unknown })
+          return address ? { ...item, key0: address } : item
+        }
+        const keys = keysFromItemFile(file)
+        if (keys && keys.key0 && keys.key0 !== "-") return { ...item, ...keys }
+        noAddress.add(item.id)
+        return item
+      })
+      const { items: filled, unresolved } = await fillMissingKeys(
+        inline.filter((item) => !noAddress.has(item.id)),
+        "explorer-dating"
+      )
+      const unknown = unresolved.filter((u) => /could not be read/.test(u.why))
+      for (const u of unresolved.filter((u) => /names no IPFS file/.test(u.why))) {
+        console.warn(`[explorer-dating] an earlier entry's data is malformed, its address unknown (left out): ${u.id}: ${u.why}`)
+      }
+      if (unknown.length > 0) {
+        throw new Error(
+          `the address of ${unknown.length} earlier entr${unknown.length === 1 ? "y" : "ies"} could not be read (` +
+            unknown.map((u) => `${u.id}: ${u.why}`).join("; ").slice(0, 300) +
+            ")"
+        )
+      }
+      for (const item of filled) {
+        if (!item.key0) continue
+        const key = caipAddressKey(item.key0)
+        for (const request of item.requests || []) {
+          const resolvedAt = Number(request.resolutionTime)
+          if (request.requestType !== "RegistrationRequested" || !(resolvedAt > 0)) continue
+          byAddress.set(key, (byAddress.get(key) || []).concat({ id: item.id, resolvedAt }))
+        }
+      }
+    }
+    for (const list of byAddress.values()) list.sort((a, b) => a.resolvedAt - b.resolvedAt)
+    return byAddress
+  }
+  return async (chainId, address) => {
+    if (!loaded) loaded = load()
+    return (await loaded).get(caipAddressKey(`eip155:${chainId}:${address}`)) || []
+  }
 }
 
 // Submitters never rewarded, compared case-insensitively (the indexer returns
