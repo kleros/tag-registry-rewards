@@ -180,6 +180,16 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     assert.equal((await date([item()])).get("a")!.decision, "kept", "read, that copy keeps it")
   })
 
+  it("does not exclude on an archived tag when a later Kleros entry, before the submission, may have replaced it on a page that cannot be read today", async () => {
+    copies[ADDRESS] = [["2025-01-16T09:17:35Z", true]]
+    earlier = (_item, before) =>
+      before > unixOf("2026-08-01T00:00:00Z") ? "Kleros entry 0x03@0xee registered this address on 2026-08-01T00:00:00.000Z, and a tag an explorer took from Kleros never counts" : null
+    const unread = (await date([item({ tagged: null, names: [] })])).get("a")!
+    assert.equal(unread.decision, "paid by default")
+    assert.match(unread.evidence, /archived with the public name tag "Treat: TREAT Token" on 2025-01-16T09:17:35Z, but Kleros entry 0x03@0xee/)
+    assert.equal((await date([item()])).get("a")!.decision, "excluded", "today's page shows a tag not from Kleros")
+  })
+
   it("does not hold against an entry a tag an earlier Kleros entry of its address may have given it", async () => {
     copies[ADDRESS] = [["2025-01-16T09:17:35Z", true]]
     earlier = () => "Kleros entry 0x01@0x66 registered this address on 2024-03-01T00:00:00.000Z, and a tag an explorer took from Kleros never counts"
@@ -260,11 +270,30 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     assert.deepEqual(earlierAsked, [{ address: ADDRESS, before: unixOf("2026-07-10T16:37:25Z") }], "asked up to eth-labels' copy")
     // the same address in the other registry, after eth-labels' copy: not where the tag it lists came from
     earlier = registeredAt("2026-08-01T00:00:00Z")
-    assert.equal((await date([item()])).get("a")!.decision, "excluded")
+    assert.equal((await date([item()])).get("a")!.decision, "excluded", "today's page shows a tag not from Kleros")
+    // ... unless today's page cannot be read: the explorer may show that entry's tag since
+    earlierAsked = []
+    const unread = (await date([item({ tagged: null, names: [] })])).get("a")!
+    assert.equal(unread.decision, "paid by default")
+    assert.match(unread.evidence, /^its explorer could not be read, .*eth-labels lists the public name tag "Treat: TREAT Token" in its copy of 2026-07-10T16:37:25Z, but Kleros entry 0x03@0xee/)
+    assert.deepEqual(earlierAsked, [{ address: ADDRESS, before: SUBMITTED }], "asked up to the submission")
     earlier = () => "the program's registries could not be checked for an earlier entry of this address (the indexer answered HTTP 503)"
     const unanswered = (await date([item()])).get("a")!
     assert.equal(unanswered.decision, "paid by default", "an unanswered check never excludes")
     assert.ok(datedUnchecked(unanswered))
+  })
+
+  it("does not exclude on eth-labels when a newer copy shows another tag an earlier Kleros entry may have given, unless it is the listed one", async () => {
+    // eth-labels' copy of 2026-07-10 lists the tag; a Kleros entry of 2026-08-01; the page archived on 2026-09-01
+    ethLabels = { committed: "2026-07-10T16:37:25Z", csv: `address,chainId,label,nameTag\n"${ADDRESS}",1,"treat","Treat: Old Name"\n` }
+    earlier = (_item, before) =>
+      before > unixOf("2026-08-01T00:00:00Z") ? "Kleros entry 0x03@0xee registered this address on 2026-08-01T00:00:00.000Z, and a tag an explorer took from Kleros never counts" : null
+    copies[ADDRESS] = [["2026-09-01T00:00:00Z", true]] // shows "Treat: TREAT Token", not the listed tag
+    const other = (await date([item()])).get("a")!
+    assert.equal(other.decision, "paid by default", "the tag may have become the Kleros entry's")
+    assert.match(other.evidence, /eth-labels lists the public name tag "Treat: Old Name" in its copy of 2026-07-10T16:37:25Z, but Kleros entry 0x03@0xee/)
+    listed() // the listed tag is "Treat: TREAT Token", the one the copy shows: it outlasted the Kleros entry
+    assert.equal((await date([item()])).get("a")!.decision, "excluded")
   })
 
   it("does not exclude on eth-labels when the earliest copy after the submission could not be read (it might have kept the entry)", async () => {
@@ -405,6 +434,11 @@ describe("tag dating: whether a tag seen today was already there at the submissi
     assert.match(verdict.evidence, /but the Wayback Machine's index listed copies of the page when asked again/)
     copies[ADDRESS] = copies[ADDRESS].slice(1)
     assert.equal((await date([item()])).get("a")!.decision, "excluded", "none before the submission, twice")
+    const answer2 = route
+    route = (url, method) => (new URL(url).searchParams.get("limit") === "1" ? { body: "[]" } : answer2(url, method))
+    const none = (await date([item()])).get("a")!
+    assert.equal(none.decision, "paid by default", "no copy at all, after an answer that listed 50: the index is failing")
+    assert.match(none.evidence, /the Wayback Machine's index listed no copy of the page when asked again/)
   })
 
   it("keeps a page archived without its tag right after the submission, though more copies came later than one answer holds", async () => {

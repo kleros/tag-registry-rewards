@@ -506,9 +506,12 @@ source did not answer. The run's summary gives the counts.
 - A tag an explorer took from an earlier Kleros entry of the address never
   counts: before any exclusion, the Address Tags and Tokens registries are
   read (once per run, any spelling of the address) for a registration that
-  resolved before the archived copy with the tag, or before eth-labels' copy;
-  one found, or a registry that cannot be read, leaves the entry paid by
-  default. The lookup gives up on an indexer page after 2 minutes, and its
+  could have given the page its tag: for an archived tag, one resolved before
+  the copy; for eth-labels, one resolved before its copy, or before a newer
+  archived copy showing another tag; for either, when today's page could not
+  be read, one resolved any time before the submission (the explorer may have
+  put the entry's tag in place since; a tag read today is not Kleros's). One
+  found, or a registry that cannot be read, leaves the entry paid by default. The lookup gives up on an indexer page after 2 minutes, and its
   errors keep only the network's code, never the indexer's URL (its key). Tags made by the Address Tag Query registry name no
   address there, so on explorers that cannot be read they are not
   recognised.

@@ -33,11 +33,14 @@ import { EXPLORER_BROWSER_HEADERS, isEtherscanBuilt, parseArchivedAddressPage } 
 // of the index that 3 would rest on (a page never archived, or none of its
 // copies before the submission) is checked first against the page's earliest
 // copy, asked for in another form, since an answer cut short reads the same
-// as none. Both exclude only when the program's registries
-// hold no earlier entry of the address, registered before the copy with the
-// tag or eth-labels' copy: a tag an explorer took from Kleros never counts
-// (explorer-tags.ts reads its note on today's page and on archived ones; this
-// covers the pages that cannot be read and layouts without it). An archive
+// as none. Both exclude only when the program's registries hold no entry of
+// the address that could have given the page its tag: one registered before
+// the copy with the tag (2), or before eth-labels' copy or a newer copy
+// showing another tag (3), or, when today's page could not be read, any time
+// before the submission (the explorer may have put the entry's tag in place
+// since; a tag read today is not Kleros's). A tag an explorer took from Kleros
+// never counts (explorer-tags.ts reads its note on today's page and on archived
+// ones; this covers the pages that cannot be read and layouts without it). An archive
 // that does not answer, refuses, or runs out of time leaves the entry paid by
 // default, saying so. Every verdict says what it rests on. Nothing is left to
 // check by hand.
@@ -106,6 +109,7 @@ const LOGO_TIMEOUT_MS = 30000
 const LOGO_GIVE_UP_AFTER = 3 // failed logos in a row, per explorer
 
 const iso = (unix: number): string => new Date(unix * 1000).toISOString().replace(".000Z", "Z")
+const sameTag = (a: string | undefined, b: string | undefined): boolean => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase()
 const isEvmAddress = (address: string): boolean => /^0x[0-9a-fA-F]{40}$/.test(address)
 const errorText = (err: unknown): string => String((err as Error)?.message || err).slice(0, 160)
 
@@ -460,6 +464,9 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
     try {
       await sleep(ARCHIVE_PACE_SECONDS)
       const earliest = await archivedCopies(item.host, item.address, "limit=1", archiveDeadline as number)
+      // "before" follows an answer that listed copies after the submission:
+      // no earliest copy at all contradicts it too
+      if (empty === "before" && earliest.length === 0) return "the Wayback Machine's index listed no copy of the page when asked again"
       const contradicts = empty === "all" ? earliest.length > 0 : earliest.some((c) => c.at < sub)
       return contradicts ? "the Wayback Machine's index listed copies of the page when asked again" : null
     } catch (err) {
@@ -514,7 +521,10 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
       }
       if (archive.before && archive.before.tagged) {
         const tag = `the public name tag "${archive.before.names[0]}" on ${iso(archive.before.at)}`
-        const why = unconfirmed(archive.before.at) || (await options.earlierKlerosEntry(item, archive.before.at))
+        // a Kleros entry registered since could have given the page its tag
+        // by the submission, unless today's page shows a tag not from Kleros
+        const klerosCutoff = item.tagged === true ? archive.before.at : sub
+        const why = unconfirmed(archive.before.at) || (await options.earlierKlerosEntry(item, klerosCutoff))
         if (!why) {
           return { decision: "excluded", evidence: `archived with ${tag}, before the submission (${iso(sub)}): ${archive.before.url}` }
         }
@@ -540,13 +550,22 @@ export const dateExplorerTags = async (items: DatingItem[], options: DatingOptio
           // Its rows carry no date of their own (its puller keeps a row from
           // whichever scrape first saw the tag, years before that copy at
           // times): any copy before the submission without the tag, or
-          // unread, stands against it, and so does an earlier Kleros entry
-          // of the address registered before that copy (the tag's possible
-          // source; a later one cannot be the source of a tag it lists).
+          // unread, stands against it. So does a Kleros entry of the address
+          // that could have given the page its tag by the submission: one
+          // registered before eth-labels' copy (the listed tag's possible
+          // source); one registered before the newest copy before the
+          // submission when that copy shows another tag (which may be the
+          // entry's); and, when today's page could not be read, one
+          // registered any time before the submission (the explorer may have
+          // put the entry's tag in the listed one's place). A tag read on
+          // today's page is not Kleros's (explorer-tags.ts reads its note).
+          const before = archive && archive.before
+          const otherTagAt = before && before.tagged && !sameTag(before.names[0], name) ? before.at : 0
+          const klerosCutoff = item.tagged === true ? Math.max(ethLabels.at, otherTagAt) : sub
           const why =
             unconfirmed(null) ||
             (archive && archive.emptyAnswer !== null ? await confirmEmptyAnswer(item, sub, archive.emptyAnswer) : null) ||
-            (await options.earlierKlerosEntry(item, ethLabels.at))
+            (await options.earlierKlerosEntry(item, klerosCutoff))
           if (!why) return { decision: "excluded", evidence: `${listed}, before the submission (${iso(sub)}): ${ethLabelsPage(ethLabels.sha)}` }
           notes.push(`${listed}, but ${why}`)
           unconfirmedEvidence = true
